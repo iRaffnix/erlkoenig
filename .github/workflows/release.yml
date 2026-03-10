@@ -48,15 +48,34 @@ jobs:
         run: cd dsl && mix test
 
       # ── Verify artifacts ──────────────────────────────────
-      - name: Verify static binary
+      - name: Verify static binaries
         run: |
+          echo "=== erlkoenig_rt ==="
           file build/release/erlkoenig_rt | grep -q "statically linked"
-          echo "erlkoenig_rt: $(ls -lh build/release/erlkoenig_rt | awk '{print $5}')"
-
-      - name: List release contents
-        run: |
-          echo "--- dist/ ---"
+          ls -lh build/release/erlkoenig_rt
+          echo ""
+          echo "=== C demo binaries ==="
+          ls -lh build/release/demo/
+          echo ""
+          echo "=== Go demo binaries ==="
+          ls -lh build/release/echo-server build/release/reverse-proxy build/release/api-server
+          echo ""
+          echo "=== dist/ ==="
           ls -lh dist/
+
+      # ── Package static-demo-binaries ───────────────────────
+      - name: Package static-demo-binaries
+        run: |
+          mkdir -p static-demo-binaries
+          cp build/release/demo/test-erlkoenig-* static-demo-binaries/
+          cp build/release/echo-server static-demo-binaries/
+          cp build/release/reverse-proxy static-demo-binaries/
+          cp build/release/api-server static-demo-binaries/
+          tar czf dist/static-demo-binaries-linux-amd64.tar.gz -C . static-demo-binaries/
+          echo "=== static-demo-binaries ==="
+          ls -lh static-demo-binaries/
+          echo ""
+          echo "Archive: $(ls -lh dist/static-demo-binaries-linux-amd64.tar.gz | awk '{print $5}')"
 
       # ── Upload artifacts ──────────────────────────────────
       - name: Upload artifacts
@@ -65,11 +84,9 @@ jobs:
           name: release-linux-amd64
           path: |
             build/release/erlkoenig_rt
-            build/release/echo-server
-            build/release/reverse-proxy
-            build/release/api-server
             dist/erlkoenig-*.tar.gz
             dist/erlkoenig-dsl
+            dist/static-demo-binaries-linux-amd64.tar.gz
 
   # ── GitHub Release ────────────────────────────────────────
   publish:
@@ -87,9 +104,7 @@ jobs:
           cp artifacts/build/release/erlkoenig_rt release/erlkoenig_rt-linux-amd64
           cp artifacts/dist/erlkoenig-*.tar.gz release/
           cp artifacts/dist/erlkoenig-dsl release/erlkoenig-dsl-linux-amd64
-          cp artifacts/build/release/echo-server release/echo-server-linux-amd64
-          cp artifacts/build/release/reverse-proxy release/reverse-proxy-linux-amd64
-          cp artifacts/build/release/api-server release/api-server-linux-amd64
+          cp artifacts/dist/static-demo-binaries-linux-amd64.tar.gz release/
           ls -lh release/
 
       - name: Create GitHub Release

@@ -8,15 +8,19 @@ Linux x86_64 system with kernel >= 5.2.
 
 - A Linux server (x86_64, kernel >= 5.2)
 - Root access (for capabilities and systemd)
-- Two files from a release build:
+- Two files from a [GitHub Release](https://github.com/erlkoenig/erlkoenig/releases) or a build machine:
   - `erlkoenig-0.1.0.tar.gz` — OTP release (~16 MB, includes ERTS)
-  - `erlkoenig_rt` — C runtime (92 KB, static binary)
+  - `erlkoenig_rt-linux-amd64` — C runtime (92 KB, static binary)
+- Optional:
+  - `erlkoenig-dsl-linux-amd64` — DSL compiler escript (~1.4 MB)
+  - `static-demo-binaries-linux-amd64.tar.gz` — 14 static demo binaries for testing
 
 If you have access to a build machine, generate these with:
 
 ```bash
 make release    # → dist/erlkoenig-0.1.0.tar.gz + dist/erlkoenig-dsl
-make rt         # → build/release/erlkoenig_rt
+make rt         # → build/release/erlkoenig_rt + build/release/demo/*
+make go-demos   # → build/release/{echo-server,reverse-proxy,api-server}
 ```
 
 ## Step 1: Create the erlkoenig user
@@ -140,6 +144,32 @@ Now you can compile `.exs` config files:
 
 ```bash
 (erlkoenig) $ ek-load examples/simple_echo.exs
+```
+
+## Step 8 (optional): Install demo binaries
+
+The demo archive contains 11 static C binaries and 3 static Go binaries
+for testing containers. None of them require any libraries on the host.
+
+```bash
+tar xzf static-demo-binaries-linux-amd64.tar.gz
+
+# C test binaries (sleeper, echo_server, crasher, mem_eater, ...)
+sudo mkdir -p /usr/lib/erlkoenig/demo
+sudo cp static-demo-binaries/test-erlkoenig-* /usr/lib/erlkoenig/demo/
+sudo chown -R root:root /usr/lib/erlkoenig/demo
+sudo chmod 700 /usr/lib/erlkoenig/demo/*
+
+# Go demo binaries (echo-server, reverse-proxy, api-server)
+sudo cp static-demo-binaries/{echo-server,reverse-proxy,api-server} /usr/lib/erlkoenig/
+sudo chmod 755 /usr/lib/erlkoenig/{echo-server,reverse-proxy,api-server}
+```
+
+Try it out:
+
+```bash
+(erlkoenig) $ ek-spawn hello /usr/lib/erlkoenig/demo/test-erlkoenig-echo_server 10.0.0.5 7777
+(erlkoenig) $ ek-spawn web /usr/lib/erlkoenig/echo-server 10.0.0.6 8080
 ```
 
 ## Uninstall

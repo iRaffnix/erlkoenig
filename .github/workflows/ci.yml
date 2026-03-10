@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev-*]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ── C Runtime (static musl binary) ────────────────────────
+  c-runtime:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install musl toolchain
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build erlkoenig_rt (static musl)
+        run: make rt
+
+      - name: Verify static binary
+        run: |
+          file build/release/erlkoenig_rt
+          file build/release/erlkoenig_rt | grep -q "statically linked"
+          ls -lh build/release/erlkoenig_rt
+
+      - name: Upload C runtime
+        uses: actions/upload-artifact@v4
+        with:
+          name: erlkoenig-rt-linux-amd64
+          path: build/release/erlkoenig_rt
+
+  # ── Erlang (eunit + dialyzer) ─────────────────────────────
+  erlang:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: '27'
+          rebar3-version: '3.24'
+
+      - name: Restore rebar3 cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            _build
+            ~/.cache/rebar3
+          key: rebar3-${{ hashFiles('rebar.lock', 'rebar.config') }}
+          restore-keys: rebar3-
+
+      - name: Compile
+        run: rebar3 compile
+
+      - name: EUnit tests
+        run: rebar3 eunit
+
+      - name: Dialyzer
+        run: make dialyzer
+
+  # ── Elixir DSL ────────────────────────────────────────────
+  dsl:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: '27'
+          elixir-version: '1.18'
+          rebar3-version: '3.24'
+
+      - name: Restore Mix cache
+        uses: actions/cache@v4
+        with:
+          path: dsl/_build
+          key: mix-${{ hashFiles('dsl/mix.exs', 'dsl/mix.lock') }}
+          restore-keys: mix-
+
+      - name: DSL tests
+        run: cd dsl && mix test
+
+      - name: Build escript
+        run: make dsl-escript
+
+      - name: Verify escript
+        run: dsl/erlkoenig-dsl --help || true

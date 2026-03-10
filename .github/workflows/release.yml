@@ -1,0 +1,99 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools golang-go
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: '27'
+          elixir-version: '1.18'
+          rebar3-version: '3.24'
+
+      # ── Build everything ──────────────────────────────────
+      - name: Build C runtime (static musl)
+        run: make rt
+
+      - name: Build Go demos (static)
+        run: make go-demos
+
+      - name: Build Erlang + OTP release
+        run: |
+          rebar3 compile
+          make release
+
+      # ── Run tests before release ──────────────────────────
+      - name: EUnit
+        run: rebar3 eunit
+
+      - name: Dialyzer
+        run: make dialyzer
+
+      - name: DSL tests
+        run: cd dsl && mix test
+
+      # ── Verify artifacts ──────────────────────────────────
+      - name: Verify static binary
+        run: |
+          file build/release/erlkoenig_rt | grep -q "statically linked"
+          echo "erlkoenig_rt: $(ls -lh build/release/erlkoenig_rt | awk '{print $5}')"
+
+      - name: List release contents
+        run: |
+          echo "--- dist/ ---"
+          ls -lh dist/
+
+      # ── Upload artifacts ──────────────────────────────────
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-amd64
+          path: |
+            build/release/erlkoenig_rt
+            build/release/echo-server
+            build/release/reverse-proxy
+            build/release/api-server
+            dist/erlkoenig-*.tar.gz
+            dist/erlkoenig-dsl
+
+  # ── GitHub Release ────────────────────────────────────────
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-linux-amd64
+          path: artifacts
+
+      - name: Prepare release files
+        run: |
+          mkdir -p release
+          cp artifacts/build/release/erlkoenig_rt release/erlkoenig_rt-linux-amd64
+          cp artifacts/dist/erlkoenig-*.tar.gz release/
+          cp artifacts/dist/erlkoenig-dsl release/erlkoenig-dsl-linux-amd64
+          cp artifacts/build/release/echo-server release/echo-server-linux-amd64
+          cp artifacts/build/release/reverse-proxy release/reverse-proxy-linux-amd64
+          cp artifacts/build/release/api-server release/api-server-linux-amd64
+          ls -lh release/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true

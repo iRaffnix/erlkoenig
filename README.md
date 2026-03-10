@@ -40,7 +40,7 @@ Erlkoenig combines a **68 KB C runtime** with an **Erlang/OTP control plane**.
 - **5 Linux namespaces** (PID, NET, MNT, UTS, IPC) per container.
 - **Cgroups v2** memory, CPU, PID limits + eBPF device filtering.
 - **Seccomp-BPF** syscall filtering (4 profiles).
-- **Integrated Firewall:** Every container automatically gets its own `nf_tables` chain. Rules are added atomically when a container starts. The firewall engine ([`erlkoenig_nft`](apps/erlkoenig_nft/)) is pure Erlang, talking directly to the kernel via Netlink. No C code, no shelling out. See [**docs/FIREWALL.md**](docs/FIREWALL.md).
+- **Integrated Firewall:** Every container automatically gets its own `nf_tables` chain. Rules are added atomically when a container starts. The firewall engine ([`erlkoenig_nft`](https://github.com/iRaffnix/erlkoenig_nft)) is pure Erlang, talking directly to the kernel via Netlink. No C code, no shelling out.
 - **Container DNS** for automatic name resolution.
 - **Read-only rootfs** with `/proc` masking (OCI-compliant).
 - **Zero external dependencies** — no libcap, no libseccomp, no libnetlink.

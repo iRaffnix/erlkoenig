@@ -254,7 +254,7 @@ forward chain and DNAT rules for port mappings. Rules are added atomically
 when a container enters `namespace_ready` and removed when it enters
 `stopped`.
 
-**Host firewall ([`erlkoenig_nft`](../apps/erlkoenig_nft/)):** A separate
+**Host firewall ([`erlkoenig_nft`](https://github.com/iRaffnix/erlkoenig_nft)):** A separate
 OTP application with its own supervision tree. Manages the host's input
 chain, blocklists, rate limiting, conntrack monitoring, and threat detection.
 

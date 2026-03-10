@@ -140,12 +140,14 @@ capability drop, seccomp filters, signal handling, rlimits, and
 
 ## Erlang Build
 
-Standard rebar3 project with two OTP applications:
+Standard rebar3 project with one OTP application and an external dependency:
 
 ```
 apps/
-├── erlkoenig_core/    Control plane (containers, zones, networking)
-└── erlkoenig_nft/     Firewall engine (netlink, nf_tables, conntrack)
+└── erlkoenig_core/    Control plane (containers, zones, networking)
+
+# External dependency (fetched by rebar3):
+# erlkoenig_nft — Firewall engine (https://github.com/iRaffnix/erlkoenig_nft)
 ```
 
 ```bash
@@ -199,7 +201,6 @@ The release tarball includes documentation and examples:
 doc/
 ├── README.md
 ├── ARCHITECTURE.md
-├── FIREWALL.md
 ├── ROADMAP.md
 └── STATIC_BINARIES.md
 
@@ -277,7 +278,6 @@ c-runtime/               C source (rt, namespaces, seccomp, netcfg)
   test/                  libcheck test suite
 apps/
   erlkoenig_core/        Control plane application
-  erlkoenig_nft/         Firewall application
 dsl/                     Elixir DSL
   mix.exs                Mix project
   examples/              .exs example configs

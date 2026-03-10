@@ -381,7 +381,7 @@ format_limit(undefined, _FmtFun) -> "unlimited";
 format_limit(Val, FmtFun) -> FmtFun(Val).
 
 %%====================================================================
-%% export — generate .ek DSL from running containers
+%% export — generate .exs DSL from running containers
 %%====================================================================
 
 -spec export() -> ok.

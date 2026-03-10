@@ -3,7 +3,7 @@ defmodule Erlkoenig.MixTasksTest do
 
   describe "mix erlkoenig.compile" do
     test "compiles example to term file" do
-      input = Path.join([__DIR__, "..", "examples", "web_cluster.ek"]) |> Path.expand()
+      input = Path.join([__DIR__, "..", "examples", "web_cluster.exs"]) |> Path.expand()
       output = Path.join(System.tmp_dir!(), "erlkoenig_compile_test_#{:rand.uniform(100000)}.term")
 
       Mix.Tasks.Erlkoenig.Compile.run([input, "-o", output])
@@ -26,7 +26,7 @@ defmodule Erlkoenig.MixTasksTest do
     end
 
     test "compiled term includes watches and guard" do
-      input = Path.join([__DIR__, "..", "examples", "web_cluster.ek"]) |> Path.expand()
+      input = Path.join([__DIR__, "..", "examples", "web_cluster.exs"]) |> Path.expand()
       output = Path.join(System.tmp_dir!(), "erlkoenig_compile_test2_#{:rand.uniform(100000)}.term")
 
       Mix.Tasks.Erlkoenig.Compile.run([input, "-o", output])
@@ -43,7 +43,7 @@ defmodule Erlkoenig.MixTasksTest do
 
   describe "mix erlkoenig.validate" do
     test "validates correct config" do
-      input = Path.join([__DIR__, "..", "examples", "web_cluster.ek"]) |> Path.expand()
+      input = Path.join([__DIR__, "..", "examples", "web_cluster.exs"]) |> Path.expand()
       # Should not raise or exit
       Mix.Tasks.Erlkoenig.Validate.run([input])
     end

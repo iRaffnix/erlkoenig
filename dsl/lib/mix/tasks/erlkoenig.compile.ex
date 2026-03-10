@@ -16,14 +16,14 @@
 
 defmodule Mix.Tasks.Erlkoenig.Compile do
   @moduledoc """
-  Compile a Erlkoenig DSL .ek file to an Erlang .term file.
+  Compile a Erlkoenig DSL .exs file to an Erlang .term file.
 
   ## Usage
 
-      mix erlkoenig.compile config.ek
-      mix erlkoenig.compile config.ek -o /etc/erlkoenig/cluster.term
+      mix erlkoenig.compile config.exs
+      mix erlkoenig.compile config.exs -o /etc/erlkoenig/cluster.term
 
-  The .ek file must define a module that uses `Erlkoenig.DSL` (or
+  The .exs file must define a module that uses `Erlkoenig.DSL` (or
   `Erlkoenig.Firewall`, `Erlkoenig.Container`, etc.) and implements
   a `config/0` or `containers/0` function.
   """
@@ -42,7 +42,7 @@ defmodule Mix.Tasks.Erlkoenig.Compile do
         compile_file(input_file, opts)
 
       [] ->
-        Mix.shell().error("Usage: mix erlkoenig.compile <file.ek> [-o output.term]")
+        Mix.shell().error("Usage: mix erlkoenig.compile <file.exs> [-o output.term]")
         System.halt(1)
 
       _ ->

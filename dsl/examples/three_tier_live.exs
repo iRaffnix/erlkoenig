@@ -7,7 +7,7 @@ defmodule ThreeTierLive do
   All three are statically linked Go binaries, no config files needed.
   rqlite provides distributed SQLite with Raft consensus via HTTP API.
 
-      ek-load /opt/erlkoenig/examples/three_tier_live.ek
+      ek-load /opt/erlkoenig/examples/three_tier_live.exs
       curl http://localhost/api/users
   """
 

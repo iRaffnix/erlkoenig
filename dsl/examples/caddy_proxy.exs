@@ -7,7 +7,7 @@ defmodule ReverseProxyDemo do
   Two containers — the proxy forwards HTTP traffic to the echo backend.
   Config is compiled into the args, no config files needed.
 
-      ek-load /opt/erlkoenig/examples/caddy_proxy.ek
+      ek-load /opt/erlkoenig/examples/caddy_proxy.exs
       curl http://localhost/hello
   """
 

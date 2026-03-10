@@ -162,7 +162,7 @@ about missing spec annotations are ignored.
 
 ## Elixir DSL Build
 
-The DSL lives in `dsl/` and compiles `.ek` files into Erlang term files:
+The DSL lives in `dsl/` and compiles `.exs` files into Erlang term files:
 
 ```bash
 make dsl             # mix compile
@@ -204,11 +204,11 @@ doc/
 └── STATIC_BINARIES.md
 
 examples/
-├── simple_echo.ek
-├── hardened_worker.ek
-├── web_cluster.ek
-├── three_tier_live.ek
-└── ... (11 .ek files)
+├── simple_echo.exs
+├── hardened_worker.exs
+├── web_cluster.exs
+├── three_tier_live.exs
+└── ... (11 .exs files)
 ```
 
 ## Deploy
@@ -280,7 +280,7 @@ apps/
   erlkoenig_nft/         Firewall application
 dsl/                     Elixir DSL
   mix.exs                Mix project
-  examples/              .ek example configs
+  examples/              .exs example configs
   vim/                   Vim syntax highlighting
 demos/                   Go demo binaries (echo, proxy, api)
 integration-tests/       Integration test scripts

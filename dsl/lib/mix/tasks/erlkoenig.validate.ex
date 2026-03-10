@@ -16,14 +16,14 @@
 
 defmodule Mix.Tasks.Erlkoenig.Validate do
   @moduledoc """
-  Validate a Erlkoenig DSL .ek file without applying it.
+  Validate a Erlkoenig DSL .exs file without applying it.
 
   Compiles the file, extracts the config, and checks for common
   errors (missing binaries, invalid IPs, port conflicts, etc.).
 
   ## Usage
 
-      mix erlkoenig.validate config.ek
+      mix erlkoenig.validate config.exs
   """
 
   use Mix.Task
@@ -37,7 +37,7 @@ defmodule Mix.Tasks.Erlkoenig.Validate do
         validate_file(input_file)
 
       _ ->
-        Mix.shell().error("Usage: mix erlkoenig.validate <file.ek>")
+        Mix.shell().error("Usage: mix erlkoenig.validate <file.exs>")
         System.halt(1)
     end
   end

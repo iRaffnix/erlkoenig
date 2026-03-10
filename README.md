@@ -73,9 +73,9 @@ Deploy, inspect, and manage your containers live without restarting the daemon.
 
 ```bash
 source /opt/erlkoenig/activate
-ek-load mystack.ek     # compile + start
-ek-reload mystack.ek   # delta update (no downtime)
-ek-export backup.ek    # running state → config file
+ek-load mystack.exs     # compile + start
+ek-reload mystack.exs   # delta update (no downtime)
+ek-export backup.exs    # running state → config file
 
 $ /opt/erlkoenig/bin/erlkoenig remote_console
 

@@ -136,10 +136,10 @@ sudo -u erlkoenig sed -i "1s|.*|#!${ERTS_BIN}/escript|" \
   /opt/erlkoenig/bin/erlkoenig-dsl
 ```
 
-Now you can compile `.ek` config files:
+Now you can compile `.exs` config files:
 
 ```bash
-(erlkoenig) $ ek-load examples/simple_echo.ek
+(erlkoenig) $ ek-load examples/simple_echo.exs
 ```
 
 ## Uninstall

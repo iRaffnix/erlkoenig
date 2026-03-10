@@ -273,7 +273,7 @@ USAGE
     esac
 }
 
-# Export running containers as .ek DSL file
+# Export running containers as .exs DSL file
 ek-export() {
     if [ $# -eq 0 ]; then
         _ek-cap 'ek:export()'
@@ -285,11 +285,11 @@ ek-export() {
 # Compile DSL file
 ek-compile() {
     if [ $# -eq 0 ]; then
-        echo "Usage: ek-compile <file.ek> [-o output.term]"
+        echo "Usage: ek-compile <file.exs> [-o output.term]"
         echo ""
         echo "Examples:"
-        echo "  ek-compile firewall.ek"
-        echo "  ek-compile firewall.ek -o /etc/erlkoenig/firewall.term"
+        echo "  ek-compile firewall.exs"
+        echo "  ek-compile firewall.exs -o /etc/erlkoenig/firewall.term"
         return 1
     fi
     "${_ERLKOENIG_DIR}/bin/erlkoenig-dsl" compile "$@"
@@ -298,24 +298,24 @@ ek-compile() {
 # Validate DSL file
 ek-validate() {
     if [ $# -eq 0 ]; then
-        echo "Usage: ek-validate <file.ek>"
+        echo "Usage: ek-validate <file.exs>"
         return 1
     fi
     "${_ERLKOENIG_DIR}/bin/erlkoenig-dsl" validate "$@"
 }
 
-# Compile + load DSL file (compile .ek, then spawn containers)
+# Compile + load DSL file (compile .exs, then spawn containers)
 ek-load() {
     if [ $# -eq 0 ]; then
-        echo "Usage: ek-load <file.ek|file.term>"
+        echo "Usage: ek-load <file.exs|file.term>"
         return 1
     fi
     local file="$1"
     local term_file="$file"
 
-    # If .ek, compile first
-    if [[ "$file" == *.ek ]]; then
-        term_file="${file%.ek}.term"
+    # If .exs, compile first
+    if [[ "$file" == *.exs ]]; then
+        term_file="${file%.exs}.term"
         ek-compile "$file" -o "$term_file" || return 1
     fi
 
@@ -325,14 +325,14 @@ ek-load() {
 # Compile + reload DSL file (delta-update: stop removed, start new)
 ek-reload() {
     if [ $# -eq 0 ]; then
-        echo "Usage: ek-reload <file.ek|file.term>"
+        echo "Usage: ek-reload <file.exs|file.term>"
         return 1
     fi
     local file="$1"
     local term_file="$file"
 
-    if [[ "$file" == *.ek ]]; then
-        term_file="${file%.ek}.term"
+    if [[ "$file" == *.exs ]]; then
+        term_file="${file%.exs}.term"
         ek-compile "$file" -o "$term_file" || return 1
     fi
 

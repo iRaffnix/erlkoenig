@@ -19,8 +19,8 @@ defmodule Erlkoenig.CLI do
   Escript entry point for erlkoenig-dsl.
 
   Usage:
-      erlkoenig-dsl compile config.ek [-o output.term]
-      erlkoenig-dsl validate config.ek
+      erlkoenig-dsl compile config.exs [-o output.term]
+      erlkoenig-dsl validate config.exs
   """
 
   @bash_completion ~S"""
@@ -38,7 +38,7 @@ defmodule Erlkoenig.CLI do
           *)
               case "$prev" in
                   compile|validate)
-                      COMPREPLY=($(compgen -f -X '!*.ek' -- "$cur"))
+                      COMPREPLY=($(compgen -f -X '!*.exs' -- "$cur"))
                       ;;
                   -o)
                       COMPREPLY=($(compgen -f -X '!*.term' -- "$cur"))
@@ -63,8 +63,8 @@ defmodule Erlkoenig.CLI do
   _erlkoenig_dsl() {
       local -a commands
       commands=(
-          'compile:Compile a DSL .ek file to an Erlang .term file'
-          'validate:Check a DSL .ek file for errors'
+          'compile:Compile a DSL .exs file to an Erlang .term file'
+          'validate:Check a DSL .exs file for errors'
       )
 
       _arguments -C \
@@ -79,11 +79,11 @@ defmodule Erlkoenig.CLI do
               case "${words[1]}" in
                   compile)
                       _arguments \
-                          '1:input file:_files -g "*.ek"' \
+                          '1:input file:_files -g "*.exs"' \
                           '-o[output file]:output file:_files -g "*.term"'
                       ;;
                   validate)
-                      _arguments '1:input file:_files -g "*.ek"'
+                      _arguments '1:input file:_files -g "*.exs"'
                       ;;
               esac
               ;;
@@ -109,14 +109,14 @@ defmodule Erlkoenig.CLI do
 
     case files do
       [input_file] -> do_compile(input_file, opts)
-      _ -> error("Usage: erlkoenig-dsl compile <file.ek> [-o output.term]")
+      _ -> error("Usage: erlkoenig-dsl compile <file.exs> [-o output.term]")
     end
   end
 
   defp validate(args) do
     case args do
       [input_file] -> do_validate(input_file)
-      _ -> error("Usage: erlkoenig-dsl validate <file.ek>")
+      _ -> error("Usage: erlkoenig-dsl validate <file.exs>")
     end
   end
 
@@ -285,13 +285,13 @@ defmodule Erlkoenig.CLI do
     erlkoenig-dsl - Erlkoenig configuration compiler
 
     Usage:
-        erlkoenig-dsl compile <file.ek> [-o output.term]
-        erlkoenig-dsl validate <file.ek>
+        erlkoenig-dsl compile <file.exs> [-o output.term]
+        erlkoenig-dsl validate <file.exs>
         erlkoenig-dsl --help
 
     Commands:
-        compile     Compile a DSL .ek file to an Erlang .term file
-        validate    Check a DSL .ek file for errors
+        compile     Compile a DSL .exs file to an Erlang .term file
+        validate    Check a DSL .exs file for errors
 
     Shell completion:
         eval "$(erlkoenig-dsl --completions bash)"

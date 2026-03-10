@@ -1,0 +1,43 @@
+# Erlang/rebar3
+_build/
+_checkouts/
+rebar.lock
+*.beam
+*.plt
+erl_crash.dump
+rebar3.crashdump
+.erlang.cookie
+
+# Build output (CMake + C)
+build/
+*.o
+*.a
+
+# Elixir DSL
+dsl/_build/
+dsl/erlkoenig-dsl
+
+# Release tarballs
+dist/
+
+# Generated docs
+doc/
+
+# Internal docs (not for GitHub)
+docs-intern/
+
+# Claude Code
+.claude/
+
+# Editor
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+
+# Logs
+*.log

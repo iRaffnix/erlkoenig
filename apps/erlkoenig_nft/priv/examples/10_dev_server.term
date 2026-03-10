@@ -1,0 +1,77 @@
+%%% ==========================================================================
+%%% 10. Development Server
+%%% ==========================================================================
+%%% Multi-service dev box: SSH, HTTP, HTTPS, Erlang EPMD + distribution,
+%%% Phoenix LiveReload, PostgreSQL. Relaxed limits but still protected.
+%%% Log-and-reject unknown traffic (friendlier than silent drop).
+%%%
+%%% Features used:
+%%%   - log_reject (ICMP unreachable instead of silent drop)
+%%%   - tcp_port_range_accept (Erlang distribution ports)
+%%%   - Multiple services with counters
+%%%   - Relaxed ct_guard thresholds for development
+%%%   - DPI watch for debugging traffic patterns
+%%% ==========================================================================
+
+#{
+    table => <<"devserver">>,
+    sets => [
+        {<<"blocklist">>, ipv4_addr},
+        {<<"blocklist6">>, ipv6_addr}
+    ],
+    counters => [ssh, http, https, epmd, phoenix, postgres, rejected],
+    chains => [
+        #{name => <<"prerouting_ban">>, hook => prerouting, type => filter,
+          priority => -300, policy => accept,
+          rules => [
+              {set_lookup_drop, <<"blocklist">>, banned},
+              {set_lookup_drop, <<"blocklist6">>, banned}
+          ]},
+        #{name => <<"input">>, hook => input, type => filter,
+          priority => 0, policy => drop,
+          rules => [
+              ct_established_accept,
+              iif_accept,
+              %% SSH: still rate-limited even on dev
+              {tcp_accept_limited, 22, ssh, #{rate => 25, burst => 5}},
+              %% Web: dev HTTP + HTTPS
+              {tcp_accept, 80, http},
+              {tcp_accept, 443, https},
+              %% Phoenix dev server + LiveReload websocket
+              {tcp_accept, 4000, phoenix},
+              {tcp_accept, 4001},
+              %% Erlang: EPMD + distribution port range
+              {tcp_accept, 4369, epmd},
+              {tcp_port_range_accept, 9100, 9155},
+              %% PostgreSQL for local dev
+              {tcp_accept, 5432, postgres},
+              %% Grafana / monitoring
+              {tcp_accept, 3000},
+              {protocol_accept, icmp},
+              {protocol_accept, icmpv6},
+              %% Reject (not drop) — send ICMP unreachable so devs see errors fast
+              {log_reject, <<"DEV-REJECT: ">>}
+          ]}
+    ],
+    watch => #{
+        interval => 5000,
+        thresholds => [
+            {ssh_flood,    ssh,      pps, '>', 50.0},
+            {http_load,    http,     pps, '>', 500.0},
+            {db_load,      postgres, pps, '>', 200.0},
+            {ban_activity, banned,   pps, '>', 0.0}
+        ]
+    },
+    ct_guard => #{
+        %% Relaxed thresholds for development
+        conn_flood => {200, 10},
+        port_scan => {50, 60},
+        ban_duration => 600,
+        whitelist => [
+            {127, 0, 0, 1},
+            {10, 0, 0, 0},     %% office network
+            {192, 168, 1, 0}   %% home network
+        ],
+        cleanup_interval => 60000
+    }
+}.

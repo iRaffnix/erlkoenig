@@ -1,0 +1,63 @@
+%%% ==========================================================================
+%%% 1. Hardened Web Server
+%%% ==========================================================================
+%%% Classic production web server: SSH + HTTP/HTTPS only.
+%%% Rate-limited SSH, counted services, IPv4+IPv6 blocklists,
+%%% connection flood + port scan detection, DPI tracing.
+%%%
+%%% Features used:
+%%%   - Dual-stack blocklists (IPv4 + IPv6)
+%%%   - Named counters on every service
+%%%   - Rate-limited SSH (25 pps, burst 5)
+%%%   - NFLOG logging for dropped packets
+%%%   - ct_guard: connection flood + port scan auto-ban
+%%%   - watch: threshold alerts on counter rates
+%%% ==========================================================================
+
+#{
+    table => <<"webserver">>,
+    sets => [
+        {<<"blocklist">>, ipv4_addr},
+        {<<"blocklist6">>, ipv6_addr}
+    ],
+    counters => [ssh, http, https, banned, dropped],
+    chains => [
+        %% Prerouting: drop banned IPs before they hit any chain
+        #{name => <<"prerouting_ban">>, hook => prerouting, type => filter,
+          priority => -300, policy => accept,
+          rules => [
+              {set_lookup_drop, <<"blocklist">>, banned},
+              {set_lookup_drop, <<"blocklist6">>, banned}
+          ]},
+        %% Input: default drop, allow only needed services
+        #{name => <<"input">>, hook => input, type => filter,
+          priority => 0, policy => drop,
+          rules => [
+              ct_established_accept,
+              iif_accept,
+              {tcp_accept_limited, 22, ssh, #{rate => 25, burst => 5}},
+              {tcp_accept, 80, http},
+              {tcp_accept, 443, https},
+              {protocol_accept, icmp},
+              {protocol_accept, icmpv6},
+              {log_drop_nflog, <<"WEB-DROP: ">>, 1, dropped}
+          ]}
+    ],
+    watch => #{
+        interval => 2000,
+        thresholds => [
+            {ssh_flood,    ssh,     pps, '>', 50.0},
+            {http_flood,   http,    pps, '>', 1000.0},
+            {https_flood,  https,   pps, '>', 1000.0},
+            {ddos_alert,   dropped, pps, '>', 200.0},
+            {ban_activity, banned,  pps, '>', 0.0}
+        ]
+    },
+    ct_guard => #{
+        conn_flood => {50, 10},
+        port_scan => {20, 60},
+        ban_duration => 3600,
+        whitelist => [{127, 0, 0, 1}],
+        cleanup_interval => 30000
+    }
+}.

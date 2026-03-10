@@ -1,0 +1,67 @@
+%%% ==========================================================================
+%%% 3. Mail Server
+%%% ==========================================================================
+%%% SMTP (25, 587), IMAP (993), POP3 (995) with TLS.
+%%% Rate-limited SMTP to prevent abuse. All services counted.
+%%% Reject (RST) on plaintext POP3/IMAP ports to signal "use TLS".
+%%%
+%%% Features used:
+%%%   - tcp_reject (send RST on deprecated plaintext ports)
+%%%   - Multiple tcp_accept_limited (SMTP rate limiting)
+%%%   - Named counters per service for monitoring
+%%%   - Watch thresholds tuned for mail traffic patterns
+%%% ==========================================================================
+
+#{
+    table => <<"mailserver">>,
+    sets => [
+        {<<"blocklist">>, ipv4_addr},
+        {<<"blocklist6">>, ipv6_addr}
+    ],
+    counters => [smtp, submission, imaps, pop3s, banned, dropped],
+    chains => [
+        #{name => <<"prerouting_ban">>, hook => prerouting, type => filter,
+          priority => -300, policy => accept,
+          rules => [
+              {set_lookup_drop, <<"blocklist">>, banned},
+              {set_lookup_drop, <<"blocklist6">>, banned}
+          ]},
+        #{name => <<"input">>, hook => input, type => filter,
+          priority => 0, policy => drop,
+          rules => [
+              ct_established_accept,
+              iif_accept,
+              %% SSH: management
+              {tcp_accept_limited, 22, ssh, #{rate => 10, burst => 3}},
+              %% SMTP: rate-limited to prevent relay abuse
+              {tcp_accept_limited, 25, smtp, #{rate => 50, burst => 10}},
+              %% Submission (authenticated SMTP): slightly higher limit
+              {tcp_accept_limited, 587, submission, #{rate => 100, burst => 20}},
+              %% IMAPS + POP3S: TLS only
+              {tcp_accept, 993, imaps},
+              {tcp_accept, 995, pop3s},
+              %% Reject plaintext IMAP/POP3 with RST (signal: use TLS)
+              {tcp_reject, 143},
+              {tcp_reject, 110},
+              {protocol_accept, icmp},
+              {protocol_accept, icmpv6},
+              {log_drop_nflog, <<"MAIL-DROP: ">>, 1, dropped}
+          ]}
+    ],
+    watch => #{
+        interval => 2000,
+        thresholds => [
+            {smtp_flood,   smtp,       pps, '>', 200.0},
+            {imap_flood,   imaps,      pps, '>', 500.0},
+            {ddos_alert,   dropped,    pps, '>', 100.0},
+            {ban_activity, banned,     pps, '>', 0.0}
+        ]
+    },
+    ct_guard => #{
+        conn_flood => {100, 10},
+        port_scan => {15, 60},
+        ban_duration => 3600,
+        whitelist => [{127, 0, 0, 1}],
+        cleanup_interval => 30000
+    }
+}.

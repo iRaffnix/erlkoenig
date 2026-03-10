@@ -1,0 +1,41 @@
+[Unit]
+Description=Erlkoenig Container Runtime
+Documentation=https://github.com/erlkoenig/erlkoenig
+After=network.target
+Wants=network.target
+
+[Service]
+Type=exec
+User=erlkoenig
+Group=erlkoenig
+
+ExecStart=/opt/erlkoenig/bin/erlkoenig foreground
+ExecStop=/opt/erlkoenig/bin/erlkoenig stop
+
+Environment=HOME=/opt/erlkoenig
+Environment=ERL_EPMD_ADDRESS=127.0.0.1
+Environment=VMARGS_PATH=/etc/erlkoenig/vm.args
+WorkingDirectory=/opt/erlkoenig
+
+# Capabilities fuer den BEAM-Prozess:
+#   CAP_NET_ADMIN        — nftables Firewall-Regeln, Bridge/veth Setup
+#   CAP_NET_BIND_SERVICE — DNS auf Port 53 binden
+# erlkoenig_rt bekommt eigene Capabilities via setcap (nicht hier).
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+
+# Cgroup v2 Delegation: erlaubt dem Service eigene Subcgroups zu verwalten.
+Delegate=yes
+LimitNOFILE=65536
+# Fuer eBPF device filter: erlkoenig_rt braucht genug locked memory
+# fuer BPF_PROG_LOAD (erbt Limits vom BEAM-Elternprozess).
+LimitMEMLOCK=infinity
+
+Restart=on-failure
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=erlkoenig
+
+[Install]
+WantedBy=multi-user.target

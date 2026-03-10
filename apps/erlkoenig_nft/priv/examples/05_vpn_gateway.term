@@ -1,0 +1,93 @@
+%%% ==========================================================================
+%%% 5. VPN Gateway / NAT Router
+%%% ==========================================================================
+%%% WireGuard VPN gateway with SPA authentication.
+%%% Routes traffic between WireGuard clients and the internet.
+%%% Masquerade (SNAT) for outgoing NAT.
+%%%
+%%% Features used:
+%%%   - WireGuard SPA (full stack)
+%%%   - iifname_accept (trust WireGuard interface)
+%%%   - forward_established (forward chain for routing)
+%%%   - masq (masquerade/SNAT for NAT)
+%%%   - NAT chain type (postrouting)
+%%%   - Multiple chains: prerouting, input, forward, postrouting
+%%% ==========================================================================
+
+#{
+    table => <<"vpngw">>,
+    sets => [
+        {<<"blocklist">>, ipv4_addr},
+        {<<"blocklist6">>, ipv6_addr},
+        {<<"wg_allow">>, ipv4_addr, #{flags => [timeout], timeout => 300000}},
+        {<<"wg_allow6">>, ipv6_addr, #{flags => [timeout], timeout => 300000}}
+    ],
+    counters => [ssh, wg, spa, forwarded, banned, dropped],
+    chains => [
+        %% Prerouting: drop banned before any processing
+        #{name => <<"prerouting_ban">>, hook => prerouting, type => filter,
+          priority => -300, policy => accept,
+          rules => [
+              {set_lookup_drop, <<"blocklist">>, banned},
+              {set_lookup_drop, <<"blocklist6">>, banned}
+          ]},
+        %% Input: protect the gateway itself
+        #{name => <<"input">>, hook => input, type => filter,
+          priority => 0, policy => drop,
+          rules => [
+              ct_established_accept,
+              iif_accept,
+              %% SPA knock
+              {nflog_capture_udp, 61820, <<"SPA: ">>, 3},
+              %% WireGuard: SPA-gated
+              {set_lookup_udp_accept, <<"wg_allow">>, 51820},
+              {set_lookup_udp_accept, <<"wg_allow6">>, 51820},
+              %% SSH for management
+              {tcp_accept_limited, 22, ssh, #{rate => 10, burst => 3}},
+              %% Trust traffic from WireGuard interface
+              {iifname_accept, <<"wg0">>},
+              {protocol_accept, icmp},
+              {protocol_accept, icmpv6},
+              {log_drop_nflog, <<"GW-DROP: ">>, 1, dropped}
+          ]},
+        %% Forward: route traffic for VPN clients
+        #{name => <<"forward">>, hook => forward, type => filter,
+          priority => 0, policy => drop,
+          rules => [
+              forward_established,
+              %% Allow forwarding from WireGuard interface
+              {iifname_accept, <<"wg0">>},
+              {log_drop, <<"GW-FWD-DROP: ">>}
+          ]},
+        %% Postrouting NAT: masquerade outgoing traffic
+        #{name => <<"postrouting">>, hook => postrouting, type => nat,
+          priority => 100, policy => accept,
+          rules => [
+              masq
+          ]}
+    ],
+    watch => #{
+        interval => 2000,
+        thresholds => [
+            {ssh_probe,    ssh,     pps, '>', 10.0},
+            {ddos_alert,   dropped, pps, '>', 100.0},
+            {ban_activity, banned,  pps, '>', 0.0}
+        ]
+    },
+    ct_guard => #{
+        conn_flood => {50, 10},
+        port_scan => {15, 60},
+        ban_duration => 3600,
+        whitelist => [{127, 0, 0, 1}],
+        cleanup_interval => 30000
+    },
+    wg_auth => #{
+        secret => <<"change_me_to_64_hex_chars_of_real_entropy_now_please_really!!!!">>,
+        spa_port => 61820,
+        wg_port => 51820,
+        nflog_group => 3,
+        timeout => 300,
+        timestamp_window => 30,
+        require_totp => false
+    }
+}.

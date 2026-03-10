@@ -1,0 +1,85 @@
+%%% ==========================================================================
+%%% 8. Reverse Proxy / Load Balancer
+%%% ==========================================================================
+%%% DNAT to backend servers. Public HTTP/HTTPS forwarded to internal pool.
+%%% Proxy itself not directly accessible except SSH.
+%%%
+%%% Features used:
+%%%   - dnat (destination NAT to backend IPs)
+%%%   - masq (SNAT for return traffic)
+%%%   - forward_established (forward chain)
+%%%   - NAT chain types (prerouting + postrouting)
+%%%   - connlimit_drop (max connections per source IP)
+%%% ==========================================================================
+
+#{
+    table => <<"proxy">>,
+    sets => [
+        {<<"blocklist">>, ipv4_addr},
+        {<<"blocklist6">>, ipv6_addr}
+    ],
+    counters => [ssh, http_fwd, https_fwd, banned, dropped],
+    chains => [
+        %% Prerouting filter: drop banned
+        #{name => <<"prerouting_ban">>, hook => prerouting, type => filter,
+          priority => -300, policy => accept,
+          rules => [
+              {set_lookup_drop, <<"blocklist">>, banned},
+              {set_lookup_drop, <<"blocklist6">>, banned}
+          ]},
+        %% Prerouting NAT: DNAT HTTP/HTTPS to backend
+        #{name => <<"prerouting_nat">>, hook => prerouting, type => nat,
+          priority => -100, policy => accept,
+          rules => [
+              {dnat, {10, 0, 1, 100}, 80},    %% HTTP  -> backend-1:80
+              {dnat, {10, 0, 1, 100}, 443}     %% HTTPS -> backend-1:443
+          ]},
+        %% Input: protect the proxy itself
+        #{name => <<"input">>, hook => input, type => filter,
+          priority => 0, policy => drop,
+          rules => [
+              ct_established_accept,
+              iif_accept,
+              {tcp_accept_limited, 22, ssh, #{rate => 10, burst => 3}},
+              %% Connection limit: max 200 concurrent per source IP
+              {connlimit_drop, 200, 0},
+              {tcp_accept, 80, http_fwd},
+              {tcp_accept, 443, https_fwd},
+              {protocol_accept, icmp},
+              {protocol_accept, icmpv6},
+              {log_drop, <<"PROXY-DROP: ">>, dropped}
+          ]},
+        %% Forward: allow traffic to/from backends
+        #{name => <<"forward">>, hook => forward, type => filter,
+          priority => 0, policy => drop,
+          rules => [
+              forward_established,
+              %% Allow new connections to backend
+              {ip_saddr_accept, {10, 0, 1, 100}},
+              {log_drop, <<"PROXY-FWD-DROP: ">>}
+          ]},
+        %% Postrouting: masquerade
+        #{name => <<"postrouting">>, hook => postrouting, type => nat,
+          priority => 100, policy => accept,
+          rules => [masq]}
+    ],
+    watch => #{
+        interval => 2000,
+        thresholds => [
+            {http_spike,   http_fwd,  pps, '>', 2000.0},
+            {https_spike,  https_fwd, pps, '>', 2000.0},
+            {ddos_alert,   dropped,   pps, '>', 500.0},
+            {ban_activity, banned,    pps, '>', 0.0}
+        ]
+    },
+    ct_guard => #{
+        conn_flood => {200, 10},
+        port_scan => {20, 60},
+        ban_duration => 3600,
+        whitelist => [
+            {127, 0, 0, 1},
+            {10, 0, 1, 100}   %% backend
+        ],
+        cleanup_interval => 30000
+    }
+}.

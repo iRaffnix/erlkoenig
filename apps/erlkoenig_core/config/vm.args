@@ -1,0 +1,14 @@
+## Name: short name, decoupled from OS hostname
+-sname erlkoenig
+
+## Cookie: DEVELOPMENT ONLY — deploy generates a random cookie.
+## NEVER use this in production. See SECURITY.md.
+-setcookie erlkoenig_dev
+
+## Scheduler busy-wait threshold
++sbwt very_short
+
+## Distribution: bind to localhost, pin port range
+-kernel inet_dist_listen_min 9100
+-kernel inet_dist_listen_max 9155
+-kernel inet_dist_use_interface '{127,0,0,1}'

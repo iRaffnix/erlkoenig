@@ -1,0 +1,17 @@
+{application, erlkoenig_nft, [
+    {description, "Pure Erlang nf_tables firewall engine"},
+    {vsn, "0.4.0"},
+    {registered, [erlk_sup, erlk_srv, erlk_firewall, erlk_watch_sup]},
+    {mod, {erlk_app, []}},
+    {applications, [kernel, stdlib, crypto]},
+    {env, []},
+    {modules, []},
+    {licenses, ["Apache-2.0"]},
+    {links, [
+        {"GitHub", "https://github.com/erlkoenig-io/erlkoenig"}
+    ]},
+    {files, ["src", "include", "priv", "rebar.config", "README.md", "LICENSE"]},
+    {build_tools, ["rebar3"]},
+    {exclude_patterns, ["erlkoenig_ex", "tutorial", "dist", "debian",
+                         "bin", "codegen", "doc", "test"]}
+]}.

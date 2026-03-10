@@ -237,7 +237,6 @@ deploy-erl: release
 		sed -i "1s|.*|#!$$ERTS_DIR/escript|" \
 			$(ERL_INSTALL_DIR)/bin/erlkoenig-dsl && \
 		rm ~/erlkoenig-release.tar.gz'
-	scp -r dsl/examples $(HOST_ERL):$(ERL_INSTALL_DIR)/examples
 	@# ── Phase 2: Cookie + vm.args als erlkoenig ──
 	ssh $(HOST_ERL) '\
 		if [ ! -f /etc/erlkoenig/vm.args ]; then \

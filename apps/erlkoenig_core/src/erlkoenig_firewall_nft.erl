@@ -60,7 +60,7 @@
 %% Also enables ip_forward so the kernel routes between interfaces.
 -spec setup_table() -> ok | {error, term()}.
 setup_table() ->
-    ensure_ets(),
+    _ = ensure_ets(),
     %% Clean slate: delete table if it exists (ignore errors)
     _ = nfnl_server:apply_msgs(?SERVER, [
         fun(S) -> nft_delete:table(?FAMILY, ?TABLE, S) end
@@ -135,7 +135,7 @@ setup_table() ->
 %% Zones with policy isolate or strict get no masquerade.
 -spec setup_table([map()]) -> ok | {error, term()}.
 setup_table(Zones) when is_list(Zones) ->
-    ensure_ets(),
+    _ = ensure_ets(),
     _ = nfnl_server:apply_msgs(?SERVER, [
         fun(S) -> nft_delete:table(?FAMILY, ?TABLE, S) end
     ]),
@@ -242,7 +242,7 @@ add_container(ContainerId, Ip, HostVeth, Ports) ->
                     map()) ->
     ok | {error, term()}.
 add_container(ContainerId, Ip, HostVeth, Ports, FirewallTerm) ->
-    ensure_ets(),
+    _ = ensure_ets(),
     Chain = chain_name(ContainerId),
     IpBin = ip_to_binary(Ip),
     Rules = rules_from_term(FirewallTerm),
@@ -289,7 +289,7 @@ add_container(ContainerId, Ip, HostVeth, Ports, FirewallTerm) ->
 %% remaining containers.
 -spec remove_container(binary()) -> ok | {error, term()}.
 remove_container(ContainerId) ->
-    ensure_ets(),
+    _ = ensure_ets(),
     Chain = chain_name(ContainerId),
     %% Remove this container from ETS
     ets:delete(erlkoenig_firewall_ports, ContainerId),
@@ -467,7 +467,7 @@ compile_rule({iifname_accept, Name}) ->
 compile_rule({set_lookup_drop, SetName}) ->
     nft_rules:set_lookup_drop(iolist_to_binary(SetName));
 compile_rule({set_lookup_drop, SetName, Counter}) ->
-    nft_rules:set_lookup_drop(iolist_to_binary(SetName), iolist_to_binary(Counter));
+    nft_rules:set_lookup_drop_named(iolist_to_binary(SetName), iolist_to_binary(Counter));
 compile_rule({connlimit_drop, Max, Offset}) ->
     nft_rules:connlimit_drop(Max, Offset);
 compile_rule({log_drop, Prefix}) ->

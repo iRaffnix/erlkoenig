@@ -736,8 +736,6 @@ firewall_add(ContainerId, #{ip := Ip, host_veth := Veth} = _NetInfo, ExtraOpts) 
             logger:warning("firewall: failed to create chain for ~s: ~p",
                            [ContainerId, Reason])
     end,
-    ok;
-firewall_add(_ContainerId, _NetInfo, _ExtraOpts) ->
     ok.
 
 -spec firewall_remove(binary()) -> ok.

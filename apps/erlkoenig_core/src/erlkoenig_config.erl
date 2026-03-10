@@ -68,7 +68,7 @@ load(TermFile) ->
         {ok, Config} ->
             case validate_config(Config) of
                 ok ->
-                    ensure_config_tab(),
+                    _ = ensure_config_tab(),
                     Result = apply_config(Config),
                     store_config(TermFile, Config),
                     Result;
@@ -86,7 +86,7 @@ reload(TermFile) ->
         {ok, NewConfig} ->
             case validate_config(NewConfig) of
                 ok ->
-                    ensure_config_tab(),
+                    _ = ensure_config_tab(),
                     OldConfig = get_stored_config(TermFile),
                     apply_delta(OldConfig, NewConfig),
                     store_config(TermFile, NewConfig),
@@ -153,7 +153,7 @@ spawn_container(#{name := Name, binary := Binary} = Ct) ->
 -spec maybe_add_health_check(pid(), map()) -> ok.
 maybe_add_health_check(Pid, #{health_check := Opts}) when is_map(Opts) ->
     %% Small delay so the container has time to bind its port
-    timer:apply_after(2000, erlkoenig_health, add, [Pid, Opts]),
+    _ = timer:apply_after(2000, erlkoenig_health, add, [Pid, Opts]),
     ok;
 maybe_add_health_check(_Pid, _Ct) ->
     ok.

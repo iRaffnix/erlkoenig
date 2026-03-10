@@ -164,7 +164,7 @@ schedule_check(#check{interval = Interval, pid = Pid} = Check) ->
 
 -spec cancel_timer(reference() | undefined) -> ok.
 cancel_timer(undefined) -> ok;
-cancel_timer(Ref) -> erlang:cancel_timer(Ref), ok.
+cancel_timer(Ref) -> _ = erlang:cancel_timer(Ref), ok.
 
 -spec cancel_and_remove(pid(), map()) -> map().
 cancel_and_remove(Pid, State) ->
@@ -196,7 +196,7 @@ handle_failure(#check{failures = F, retries = Max, pid = Pid} = Check) ->
                            [Pid, NewF, Max]),
             erlkoenig_events:notify({container_unhealthy, get_id(Pid), NewF}),
             %% Restart: stop + the restart policy handles the rest
-            try erlkoenig_ct:stop_container(Pid)
+            try _ = erlkoenig_ct:stop_container(Pid)
             catch _:_ -> ok
             end,
             Check2#check{failures = 0};

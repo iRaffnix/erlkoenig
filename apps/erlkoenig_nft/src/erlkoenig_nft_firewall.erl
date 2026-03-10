@@ -168,9 +168,9 @@ handle_call(reload, _From, #{table := OldTable} = State) ->
                         ok ->
                             NewTable = maps:get(table, NewConfig),
                             %% Delete old table if name changed
-                            case NewTable =/= OldTable of
+                            _ = case NewTable =/= OldTable of
                                 true ->
-                                    _ = nfnl_server:apply_msgs(erlkoenig_nft_srv, [
+                                    nfnl_server:apply_msgs(erlkoenig_nft_srv, [
                                         fun(S) -> nft_delete:table(?INET, OldTable, S) end
                                     ]);
                                 false ->

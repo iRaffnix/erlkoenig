@@ -52,17 +52,17 @@ subscribe_and_unsubscribe_test_() ->
 notify_reaches_collector_test_() ->
     {setup,
      fun() ->
-         Pid = setup(),
+         {Pid, OldLevel} = setup(),
          Tab = ets:new(test_events, [ordered_set, public]),
          ok = erlkoenig_events:subscribe(erlkoenig_event_collector, [Tab]),
-         {Pid, Tab}
+         {Pid, OldLevel, Tab}
      end,
-     fun({Pid, Tab}) ->
+     fun({Pid, OldLevel, Tab}) ->
          erlkoenig_events:unsubscribe(erlkoenig_event_collector, [Tab]),
          ets:delete(Tab),
-         cleanup(Pid)
+         cleanup({Pid, OldLevel})
      end,
-     fun({_Pid, Tab}) -> [
+     fun({_Pid, _OldLevel, Tab}) -> [
         fun() ->
             erlkoenig_events:notify({container_started, <<"test-1">>, self()}),
             %% gen_event:notify is async, give it a moment
@@ -77,17 +77,17 @@ notify_reaches_collector_test_() ->
 collector_counts_events_test_() ->
     {setup,
      fun() ->
-         Pid = setup(),
+         {Pid, OldLevel} = setup(),
          Tab = ets:new(test_events, [ordered_set, public]),
          ok = erlkoenig_events:subscribe(erlkoenig_event_collector, [Tab]),
-         {Pid, Tab}
+         {Pid, OldLevel, Tab}
      end,
-     fun({Pid, Tab}) ->
+     fun({Pid, OldLevel, Tab}) ->
          erlkoenig_events:unsubscribe(erlkoenig_event_collector, [Tab]),
          ets:delete(Tab),
-         cleanup(Pid)
+         cleanup({Pid, OldLevel})
      end,
-     fun({_Pid, _Tab}) -> [
+     fun({_Pid, _OldLevel, _Tab}) -> [
         fun() ->
             erlkoenig_events:notify({container_started, <<"a">>, self()}),
             erlkoenig_events:notify({container_stopped, <<"b">>, #{}}),
@@ -108,6 +108,8 @@ event_log_handles_all_types_test() ->
     %% Direct handler callback test: all event types must return {ok, State}
     %% without crashing. This is acceptable because we test the handler
     %% module in isolation, not OTP callbacks through the bus.
+    OldLevel = logger:get_primary_config(),
+    logger:set_primary_config(level, none),
     {ok, State0} = erlkoenig_event_log:init([]),
     Events = [
         {container_started, <<"id1">>, self()},
@@ -120,7 +122,11 @@ event_log_handles_all_types_test() ->
     lists:foldl(fun(Event, State) ->
         {ok, NewState} = erlkoenig_event_log:handle_event(Event, State),
         NewState
-    end, State0, Events).
+    end, State0, Events),
+    case OldLevel of
+        #{level := Level} -> logger:set_primary_config(level, Level);
+        _ -> logger:set_primary_config(level, all)
+    end.
 
 %% =================================================================
 %% Crash isolation
@@ -156,10 +162,21 @@ crashing_handler_removed_test_() ->
 %% =================================================================
 
 setup() ->
+    OldLevel = logger:get_primary_config(),
+    logger:set_primary_config(level, none),
     {ok, Pid} = erlkoenig_events:start_link(),
-    Pid.
+    {Pid, OldLevel}.
 
-cleanup(Pid) ->
+cleanup({Pid, #{level := Level}}) ->
+    logger:set_primary_config(level, Level),
+    cleanup_pid(Pid);
+cleanup({Pid, _}) ->
+    logger:set_primary_config(level, all),
+    cleanup_pid(Pid);
+cleanup(Pid) when is_pid(Pid) ->
+    cleanup_pid(Pid).
+
+cleanup_pid(Pid) ->
     unlink(Pid),
     exit(Pid, shutdown),
     MRef = monitor(process, Pid),

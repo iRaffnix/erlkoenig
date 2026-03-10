@@ -266,9 +266,10 @@ handle_info(_Info, State) ->
     {noreply, State}.
 
 terminate(_Reason, #{socket := Sock}) ->
-    socket:close(Sock),
-    ets:delete(?CT_TAB),
-    ets:delete(?CT_AGG).
+    _ = socket:close(Sock),
+    _ = ets:delete(?CT_TAB),
+    _ = ets:delete(?CT_AGG),
+    ok.
 
 %% --- Internal: Socket ---
 
@@ -283,7 +284,7 @@ open_ct_socket() ->
             Addr = #{family => ?AF_NETLINK, addr => SaData},
             case socket:bind(Sock, Addr) of
                 ok    -> {ok, Sock};
-                Err   -> socket:close(Sock), Err
+                Err   -> _ = socket:close(Sock), Err
             end;
         Err -> Err
     end.
@@ -421,10 +422,7 @@ update_agg(#{src := SrcIP}, Delta) ->
             ets:insert(?CT_AGG, {SrcIP, 1, Now, Now});
         [] ->
             ok
-    end;
-update_agg(_EventNoSrc, _Delta) ->
-    %% Event without source IP (incomplete parse), skip
-    ok.
+    end.
 
 %% --- Internal: Kill Connections ---
 

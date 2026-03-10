@@ -60,7 +60,7 @@ open(Group, CopyRange) ->
                     ok = send_config_mode(Sock, Group, ?NFULNL_COPY_PACKET, CopyRange),
                     {ok, Sock};
                 {error, _} = Err ->
-                    socket:close(Sock),
+                    _ = socket:close(Sock),
                     Err
             end;
         {error, _} = Err ->

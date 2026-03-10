@@ -60,9 +60,9 @@ start_counter(Config) ->
 -doc "Terminate all counter workers.".
 -spec stop_counters() -> ok.
 stop_counters() ->
-    [supervisor:terminate_child(?MODULE, Pid)
-     || {_, Pid, _, _} <- supervisor:which_children(?MODULE),
-        is_pid(Pid)],
+    _ = [supervisor:terminate_child(?MODULE, Pid)
+         || {_, Pid, _, _} <- supervisor:which_children(?MODULE),
+            is_pid(Pid)],
     ok.
 
 %% --- supervisor callback ---

@@ -14,6 +14,7 @@ main(_) ->
     Escript = filename:absname("dsl/erlkoenig-dsl"),
     Example = filename:absname("dsl/examples/live_test.exs"),
     TermFile = "/tmp/erlkoenig_integration_15.term",
+    DemoBin = filename:absname("build/release/demo/test-erlkoenig-echo_server"),
 
     %% Step 1: Compile DSL example with escript
     test_helper:step("erlkoenig-dsl compile", fun() ->
@@ -39,12 +40,17 @@ main(_) ->
         end
     end),
 
-    %% Step 3: Parse the term file
+    %% Step 3: Parse and patch binary paths for dev environment
     test_helper:step("erlkoenig_config:parse/1", fun() ->
         case erlkoenig_config:parse(TermFile) of
             {ok, Config} ->
                 Containers = maps:get(containers, Config, []),
                 io:format("    ~p container(s) in config~n", [length(Containers)]),
+                %% Patch binary paths: replace install path with build path
+                Patched = [C#{binary => list_to_binary(DemoBin)} || C <- Containers],
+                PatchedConfig = Config#{containers => Patched},
+                Formatted = io_lib:format("~tp.~n", [PatchedConfig]),
+                file:write_file(TermFile, Formatted),
                 case length(Containers) of
                     N when N > 0 -> ok;
                     _ -> {error, no_containers}

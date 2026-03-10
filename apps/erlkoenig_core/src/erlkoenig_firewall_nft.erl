@@ -442,7 +442,7 @@ compile_rule(accept) ->
 compile_rule({tcp_accept, Port}) ->
     nft_rules:tcp_accept(Port);
 compile_rule({tcp_accept, Port, Counter}) ->
-    nft_rules:tcp_accept(Port, iolist_to_binary(Counter));
+    nft_rules:tcp_accept_named(Port, iolist_to_binary(Counter));
 compile_rule({tcp_accept_limited, Port, Counter, #{rate := Rate, burst := Burst}}) ->
     nft_rules:tcp_accept_limited(Port, iolist_to_binary(Counter),
                                  #{rate => Rate, burst => Burst});
@@ -453,7 +453,7 @@ compile_rule({tcp_reject, Port}) ->
 compile_rule({udp_accept, Port}) ->
     nft_rules:udp_accept(Port);
 compile_rule({udp_accept, Port, Counter}) ->
-    nft_rules:udp_accept(Port, iolist_to_binary(Counter));
+    nft_rules:udp_accept_named(Port, iolist_to_binary(Counter));
 compile_rule({udp_port_range_accept, From, To}) ->
     nft_rules:udp_port_range_accept(From, To);
 compile_rule({protocol_accept, Proto}) ->
@@ -473,7 +473,7 @@ compile_rule({connlimit_drop, Max, Offset}) ->
 compile_rule({log_drop, Prefix}) ->
     nft_rules:log_drop(iolist_to_binary(Prefix));
 compile_rule({log_drop, Prefix, Counter}) ->
-    nft_rules:log_drop(iolist_to_binary(Prefix), iolist_to_binary(Counter));
+    nft_rules:log_drop_named(iolist_to_binary(Prefix), iolist_to_binary(Counter));
 compile_rule({log_reject, Prefix}) ->
     nft_rules:log_reject(iolist_to_binary(Prefix));
 compile_rule({dnat, Ip, Port}) ->
@@ -485,17 +485,22 @@ compile_rule(Unknown) ->
 %% @doc Create a set add message.
 -spec set_msg(tuple()) -> fun().
 set_msg({Name, Type}) ->
-    fun(S) -> nft_set:add(?FAMILY, ?TABLE,
-        iolist_to_binary(Name), set_type(Type), #{}, S) end;
+    fun(S) -> nft_set:add(?FAMILY, #{
+        table => ?TABLE,
+        name  => iolist_to_binary(Name),
+        type  => set_type_atom(Type)}, S) end;
 set_msg({Name, Type, #{timeout := Timeout} = Opts}) ->
     Flags = maps:get(flags, Opts, []),
-    fun(S) -> nft_set:add(?FAMILY, ?TABLE,
-        iolist_to_binary(Name), set_type(Type),
-        #{flags => Flags, timeout => Timeout}, S) end.
+    fun(S) -> nft_set:add(?FAMILY, #{
+        table   => ?TABLE,
+        name    => iolist_to_binary(Name),
+        type    => set_type_atom(Type),
+        flags   => Flags,
+        timeout => Timeout}, S) end.
 
--spec set_type(atom()) -> non_neg_integer().
-set_type(ipv4_addr) -> 7;  %% NFT_DATA_TYPE_IPADDR
-set_type(ipv6_addr) -> 8.  %% NFT_DATA_TYPE_IP6ADDR
+-spec set_type_atom(atom()) -> atom().
+set_type_atom(ipv4_addr) -> ipv4_addr;
+set_type_atom(ipv6_addr) -> ipv6_addr.
 
 %% @doc Ensure the ETS table for tracking container port mappings exists.
 ensure_ets() ->

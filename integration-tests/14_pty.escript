@@ -107,9 +107,9 @@ test_pty_mode(RtBin, TestBin) ->
     ok = wait_for_output(Port, <<"echo: hello pty">>, 5000),
     io:format("  PTY echo verified~n"),
 
-    %% Test CMD_RESIZE
+    %% Test CMD_RESIZE (skip any PTY stdout that arrives before reply_ok)
     port_command(Port, erlkoenig_proto:encode_cmd_resize(40, 120)),
-    {ok, reply_ok, _} = recv(Port),
+    {ok, reply_ok, _} = recv_skip_stdout(Port),
     io:format("  RESIZE 40x120: OK~n"),
 
     %% Kill container
@@ -140,6 +140,12 @@ recv(Port) ->
     after ?TIMEOUT ->
         io:format("ERROR: timeout (~p ms)~n", [?TIMEOUT]),
         halt(1)
+    end.
+
+recv_skip_stdout(Port) ->
+    case recv(Port) of
+        {ok, reply_stdout, _} -> recv_skip_stdout(Port);
+        Other                 -> Other
     end.
 
 recv_raw(Port) ->

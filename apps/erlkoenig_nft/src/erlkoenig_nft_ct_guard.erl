@@ -111,9 +111,9 @@ init(Config) ->
 
     %% Create ETS tables
     %% Conn tracking: ordered_set for efficient time-range queries
-    ets:new(?GUARD_CONNS, [named_table, ordered_set, public]),
+    _ = ets:new(?GUARD_CONNS, [named_table, ordered_set, public]),
     %% Ban tracking: set keyed by IP
-    ets:new(?GUARD_BANS, [named_table, set, public]),
+    _ = ets:new(?GUARD_BANS, [named_table, set, public]),
 
     %% Subscribe to conntrack events
     pg:join(erlkoenig_nft, ct_events, self()),
@@ -245,7 +245,7 @@ handle_info({unban, SrcIP}, #{bans_expired := Exp} = State) ->
         [{_, _, _, _}] ->
             ets:delete(?GUARD_BANS, SrcIP),
             %% Unban in firewall
-            try_unban(SrcIP),
+            _ = try_unban(SrcIP),
             logger:notice("[ct_guard] Auto-unban ~s (expired)", [erlkoenig_nft_ip:format(SrcIP)]),
             {noreply, State#{bans_expired := Exp + 1}};
         [] ->
@@ -421,7 +421,7 @@ cleanup_bans(Now) ->
         case ExpiresAt =< Now of
             true ->
                 ets:delete(?GUARD_BANS, IP),
-                try_unban(IP),
+                _ = try_unban(IP),
                 Count + 1;
             false ->
                 Count

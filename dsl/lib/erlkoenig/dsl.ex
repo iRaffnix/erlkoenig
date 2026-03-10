@@ -16,9 +16,7 @@
 
 defmodule Erlkoenig.DSL do
   @moduledoc """
-  Unified DSL entry point for Erlkoenig configurations.
-
-  Combines container definitions with inline firewall rules.
+  DSL entry point for Erlkoenig container definitions.
 
   ## Example
 
@@ -44,16 +42,12 @@ defmodule Erlkoenig.DSL do
 
       MyCluster.containers()
       MyCluster.spawn_opts()
-      MyCluster.watches()
-      MyCluster.guard_config()
       MyCluster.write!("/etc/erlkoenig/cluster.term")
   """
 
   defmacro __using__(_opts) do
     quote do
       use Erlkoenig.Container
-      use Erlkoenig.Watch
-      use Erlkoenig.Guard
     end
   end
 end

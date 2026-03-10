@@ -25,15 +25,6 @@ defmodule Erlkoenig.ConfigRoundtripTest do
       binary "/opt/bin/beta"
       ip {10, 0, 0, 20}
     end
-
-    watch :monitor do
-      counter :http, :pps, threshold: 5000
-      on_alert :log
-    end
-
-    guard do
-      detect :conn_flood, threshold: 50, window: 10
-    end
   end
 
   # Covers all 11 use cases from the live test scripts
@@ -146,11 +137,7 @@ defmodule Erlkoenig.ConfigRoundtripTest do
       path = Path.join(System.tmp_dir!(), "erlkoenig_rt_#{:rand.uniform(100000)}.term")
 
       # Build the full config term (like mix erlkoenig.compile does)
-      config = %{
-        containers: TestCluster.containers(),
-        watches: TestCluster.watches(),
-        guard: TestCluster.guard_config()
-      }
+      config = %{containers: TestCluster.containers()}
 
       formatted = :io_lib.format(~c"~tp.~n", [config])
       File.write!(path, formatted)
@@ -180,14 +167,6 @@ defmodule Erlkoenig.ConfigRoundtripTest do
       beta = Enum.find(term.containers, fn c -> c.name == "beta" end)
       [beta_chain] = beta.firewall.chains
       assert :accept in beta_chain.rules
-
-      # Verify watches
-      assert length(term.watches) == 1
-      [w] = term.watches
-      assert w.name == "monitor"
-
-      # Verify guard
-      assert term.guard.conn_flood == {50, 10}
 
       File.rm!(path)
     end

@@ -24,8 +24,7 @@ defmodule Mix.Tasks.Erlkoenig.Compile do
       mix erlkoenig.compile config.exs -o /etc/erlkoenig/cluster.term
 
   The .exs file must define a module that uses `Erlkoenig.DSL` (or
-  `Erlkoenig.Firewall`, `Erlkoenig.Container`, etc.) and implements
-  a `config/0` or `containers/0` function.
+  `Erlkoenig.Container` directly) and implements a `containers/0` function.
   """
 
   use Mix.Task
@@ -80,41 +79,19 @@ defmodule Mix.Tasks.Erlkoenig.Compile do
 
       list when is_list(list) ->
         Enum.find_value(list, fn {mod, _} ->
-          if function_exported?(mod, :containers, 0) or
-               function_exported?(mod, :config, 0),
-             do: mod
+          if function_exported?(mod, :containers, 0), do: mod
         end) ||
-          (Mix.shell().error("No module with containers/0 or config/0 found")
+          (Mix.shell().error("No module with containers/0 found")
            System.halt(1))
     end
   end
 
   defp extract_term(module) do
-    cond do
-      function_exported?(module, :containers, 0) ->
-        config = %{containers: module.containers()}
-
-        config =
-          if function_exported?(module, :watches, 0),
-            do: Map.put(config, :watches, module.watches()),
-            else: config
-
-        config =
-          if function_exported?(module, :guard_config, 0) and module.guard_config() != nil,
-            do: Map.put(config, :guard, module.guard_config()),
-            else: config
-
-        config
-
-      function_exported?(module, :config, 0) ->
-        module.config()
-
-      true ->
-        Mix.shell().error(
-          "Module #{inspect(module)} has no config/0 or containers/0 function"
-        )
-
-        System.halt(1)
+    if function_exported?(module, :containers, 0) do
+      %{containers: module.containers()}
+    else
+      Mix.shell().error("Module #{inspect(module)} has no containers/0 function")
+      System.halt(1)
     end
   end
 end

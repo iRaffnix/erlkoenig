@@ -23,17 +23,4 @@ defmodule PublicBastion do
     health_check port: 22, interval: 15_000, retries: 3
   end
 
-  guard do
-    detect :conn_flood, threshold: 20, window: 10
-    detect :port_scan, threshold: 5, window: 60
-    ban_duration 3600
-    whitelist {10, 0, 0, 1}
-  end
-
-  watch :bastion_traffic do
-    counter :dropped, :packets, threshold: 50
-    interval 5000
-    on_alert :log
-    on_alert {:webhook, "https://hooks.example.com/erlkoenig"}
-  end
 end

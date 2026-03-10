@@ -87,9 +87,4 @@ defmodule ThreeTier do
     firewall :strict, allow_tcp: [6379]
   end
 
-  guard do
-    detect :conn_flood, threshold: 100, window: 10
-    detect :port_scan, threshold: 20, window: 60
-    ban_duration 3600
-  end
 end

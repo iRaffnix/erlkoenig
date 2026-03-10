@@ -36,17 +36,4 @@ defmodule WebCluster do
     firewall :strict, allow_tcp: [6379]
   end
 
-  watch :traffic do
-    counter :http_pkts, :pps, threshold: 10_000
-    counter :dropped, :packets, threshold: 500
-    interval 3000
-    on_alert :log
-    on_alert {:webhook, "https://alerts.internal/erlkoenig"}
-  end
-
-  guard do
-    detect :conn_flood, threshold: 100, window: 10
-    detect :port_scan, threshold: 20, window: 60
-    ban_duration 1800
-  end
 end

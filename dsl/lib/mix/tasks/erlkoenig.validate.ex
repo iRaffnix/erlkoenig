@@ -52,24 +52,15 @@ defmodule Mix.Tasks.Erlkoenig.Validate do
 
     [{module, _}] = Code.compile_file(input_file)
 
-    errors = []
-
-    {containers, errors} =
+    containers =
       if function_exported?(module, :containers, 0) do
-        cts = module.containers()
-        errs = validate_containers(cts)
-        {cts, errors ++ errs}
+        module.containers()
       else
-        {[], errors}
+        Mix.shell().error("Module #{inspect(module)} has no containers/0 function")
+        System.halt(1)
       end
 
-    errors =
-      if function_exported?(module, :config, 0) do
-        config = module.config()
-        errors ++ validate_firewall(config)
-      else
-        errors
-      end
+    errors = validate_containers(containers)
 
     case errors do
       [] ->
@@ -133,12 +124,4 @@ defmodule Mix.Tasks.Erlkoenig.Validate do
     end)
   end
 
-  defp validate_firewall(%{chains: chains}) when is_list(chains) do
-    Enum.flat_map(chains, fn
-      %{rules: []} -> ["empty chain (no rules)"]
-      _ -> []
-    end)
-  end
-
-  defp validate_firewall(_), do: []
 end

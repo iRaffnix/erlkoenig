@@ -83,8 +83,37 @@ defmodule Erlkoenig.Container.Builder do
   end
 
   def set_firewall_profile(state, profile, opts \\ []) when is_atom(profile) do
-    term = Erlkoenig.Firewall.Profiles.get(profile, opts)
+    term = firewall_profile(profile, opts)
     %{state | firewall: term}
+  end
+
+  defp firewall_profile(:strict, opts) do
+    allow_tcp = Keyword.get(opts, :allow_tcp, [])
+    allow_udp = Keyword.get(opts, :allow_udp, [])
+
+    rules =
+      [:ct_established_accept, :icmp_accept] ++
+        Enum.map(allow_tcp, &{:tcp_accept, &1}) ++
+        Enum.map(allow_udp, &{:udp_accept, &1})
+
+    %{chains: [%{name: "inbound", hook: :input, type: :filter, priority: 0, policy: :drop, rules: rules}]}
+  end
+
+  defp firewall_profile(:standard, opts) do
+    allow_tcp = Keyword.get(opts, :allow_tcp, [])
+    allow_udp = Keyword.get(opts, :allow_udp, [])
+
+    rules =
+      [:ct_established_accept, :icmp_accept, {:udp_accept, 53}] ++
+        Enum.map(allow_tcp, &{:tcp_accept, &1}) ++
+        Enum.map(allow_udp, &{:udp_accept, &1}) ++
+        [:accept]
+
+    %{chains: [%{name: "inbound", hook: :input, type: :filter, priority: 0, policy: :drop, rules: rules}]}
+  end
+
+  defp firewall_profile(:open, _opts) do
+    %{chains: [%{name: "inbound", hook: :input, type: :filter, priority: 0, policy: :accept, rules: []}]}
   end
 
   def set_limits(state, limits) when is_map(limits) do

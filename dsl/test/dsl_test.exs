@@ -29,19 +29,6 @@ defmodule Erlkoenig.DslTest do
       limits cpu: 2, memory: "512M", pids: 50
       seccomp :standard
     end
-
-    watch :traffic do
-      counter :http_pkts, :pps, threshold: 10_000
-      counter :dropped, :packets, threshold: 500
-      interval 3000
-      on_alert :log
-    end
-
-    guard do
-      detect :conn_flood, threshold: 100, window: 10
-      detect :port_scan, threshold: 20, window: 60
-      ban_duration 1800
-    end
   end
 
   describe "Erlkoenig.DSL" do
@@ -89,23 +76,6 @@ defmodule Erlkoenig.DslTest do
       assert cache.limits.cpu == 2
       assert cache.limits.memory == 512 * 1_048_576
       assert cache.seccomp.profile == :standard
-    end
-
-    test "watches defined" do
-      watches = FullExample.watches()
-      assert length(watches) == 1
-      [w] = watches
-      assert w.name == "traffic"
-      assert w.counters == ["http_pkts", "dropped"]
-      assert w.interval == 3000
-      assert length(w.thresholds) == 2
-    end
-
-    test "guard defined" do
-      config = FullExample.guard_config()
-      assert config.conn_flood == {100, 10}
-      assert config.port_scan == {20, 60}
-      assert config.ban_duration == 1800
     end
 
     test "write! creates valid term file" do

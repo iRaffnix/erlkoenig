@@ -144,24 +144,14 @@ defmodule Erlkoenig.CLI do
 
     [{module, _}] = Code.compile_file(input_file)
 
-    errors = []
-
-    {containers, errors} =
+    containers =
       if function_exported?(module, :containers, 0) do
-        cts = module.containers()
-        errs = validate_containers(cts)
-        {cts, errors ++ errs}
+        module.containers()
       else
-        {[], errors}
+        error("Module #{inspect(module)} has no containers/0 function")
       end
 
-    errors =
-      if function_exported?(module, :config, 0) do
-        config = module.config()
-        errors ++ validate_firewall(config)
-      else
-        errors
-      end
+    errors = validate_containers(containers)
 
     case errors do
       [] ->
@@ -182,35 +172,18 @@ defmodule Erlkoenig.CLI do
 
       list when is_list(list) ->
         Enum.find_value(list, fn {mod, _} ->
-          if function_exported?(mod, :containers, 0) or
-               function_exported?(mod, :config, 0),
-             do: mod
-        end) || error("No module with containers/0 or config/0 found")
+          if function_exported?(mod, :containers, 0), do: mod
+        end) || error("No module with containers/0 found")
     end
   end
 
   defp extract_term(module) do
     cond do
       function_exported?(module, :containers, 0) ->
-        config = %{containers: module.containers()}
-
-        config =
-          if function_exported?(module, :watches, 0),
-            do: Map.put(config, :watches, module.watches()),
-            else: config
-
-        config =
-          if function_exported?(module, :guard_config, 0) and module.guard_config() != nil,
-            do: Map.put(config, :guard, module.guard_config()),
-            else: config
-
-        config
-
-      function_exported?(module, :config, 0) ->
-        module.config()
+        %{containers: module.containers()}
 
       true ->
-        error("Module #{inspect(module)} has no config/0 or containers/0 function")
+        error("Module #{inspect(module)} has no containers/0 function")
     end
   end
 
@@ -252,15 +225,6 @@ defmodule Erlkoenig.CLI do
       "duplicate host port #{port} in containers: #{Enum.join(names, ", ")}"
     end)
   end
-
-  defp validate_firewall(%{chains: chains}) when is_list(chains) do
-    Enum.flat_map(chains, fn
-      %{rules: []} -> ["empty chain (no rules)"]
-      _ -> []
-    end)
-  end
-
-  defp validate_firewall(_), do: []
 
   defp check_file!(path) do
     unless File.exists?(path) do

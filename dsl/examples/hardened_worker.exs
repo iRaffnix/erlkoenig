@@ -13,10 +13,4 @@ defmodule HardenedWorker do
 
     firewall :strict, allow_udp: [53]
   end
-
-  watch :worker_traffic do
-    counter :dropped, :packets, threshold: 100
-    interval 5000
-    on_alert :log
-  end
 end

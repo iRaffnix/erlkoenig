@@ -51,19 +51,4 @@ defmodule MicroserviceCluster do
     firewall :strict, allow_tcp: [5432]
   end
 
-  watch :cluster_health do
-    counter :gateway_pkts, :pps, threshold: 50_000
-    counter :auth_pkts, :pps, threshold: 10_000
-    counter :dropped, :packets, threshold: 500
-    interval 5000
-    on_alert :log
-    on_alert {:webhook, "https://monitoring.internal/alerts"}
-  end
-
-  guard do
-    detect :conn_flood, threshold: 200, window: 10
-    detect :port_scan, threshold: 15, window: 30
-    ban_duration 3600
-    whitelist {10, 0, 0, 1}
-  end
 end

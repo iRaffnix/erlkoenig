@@ -279,24 +279,7 @@ else
     fail "bash completion installed" "/etc/bash_completion.d/erlkoenig-dsl not found"
 fi
 
-# ── 8. Vim Plugin ────────────────────────────────────
-
-echo ""
-echo "--- Vim Plugin ---"
-
-if [ -f /opt/erlkoenig/share/vim/syntax/erlkoenig.vim ]; then
-    pass "vim syntax file deployed"
-else
-    fail "vim syntax file" "not found"
-fi
-
-if [ -f /opt/erlkoenig/share/vim/ftdetect/erlkoenig.vim ]; then
-    pass "vim ftdetect file deployed"
-else
-    fail "vim ftdetect file" "not found"
-fi
-
-# ── 9. Live Container Test ───────────────────────────
+# ── 8. Live Container Test ───────────────────────────
 
 echo ""
 echo "--- Live Container Test ---"

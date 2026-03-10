@@ -238,8 +238,6 @@ deploy-erl: release
 			$(ERL_INSTALL_DIR)/bin/erlkoenig-dsl && \
 		rm ~/erlkoenig-release.tar.gz'
 	scp -r dsl/examples $(HOST_ERL):$(ERL_INSTALL_DIR)/examples
-	ssh $(HOST_ERL) 'rm -rf $(ERL_INSTALL_DIR)/share/vim && mkdir -p $(ERL_INSTALL_DIR)/share'
-	scp -r dsl/vim $(HOST_ERL):$(ERL_INSTALL_DIR)/share/vim
 	@# ── Phase 2: Cookie + vm.args als erlkoenig ──
 	ssh $(HOST_ERL) '\
 		if [ ! -f /etc/erlkoenig/vm.args ]; then \

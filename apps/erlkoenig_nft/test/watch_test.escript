@@ -34,7 +34,7 @@ main(_) ->
     pg:join(erlkoenig_nft, counter_events, self()),
 
     %% Start watcher with 2s interval
-    {ok, Watcher} = erlk_watch:start_link(#{
+    {ok, Watcher} = erlkoenig_nft_watch:start_link(#{
         family => ?INET,
         table => T,
         counters => [<<"ssh_pkts">>, <<"dropped">>],
@@ -42,7 +42,7 @@ main(_) ->
     }),
 
     %% Add threshold: alert if SSH > 0 pps
-    erlk_watch:add_threshold(Watcher, ssh_alert,
+    erlkoenig_nft_watch:add_threshold(Watcher, ssh_alert,
         <<"ssh_pkts">>, pps,
         {fun(Name, _Metric, Val, _Thresh) ->
             io:format("  ALERT: ~s at ~.1f pps~n", [Name, Val])
@@ -54,10 +54,10 @@ main(_) ->
 
     %% Show final rates
     io:format("~n=== Final Rates ===~n"),
-    Rates = erlk_watch:get_rates(Watcher),
+    Rates = erlkoenig_nft_watch:get_rates(Watcher),
     io:format("~p~n", [Rates]),
 
-    erlk_watch:stop(Watcher),
+    erlkoenig_nft_watch:stop(Watcher),
     os:cmd("nft delete table inet wtest"),
     io:format("~n=== Done ===~n").
 

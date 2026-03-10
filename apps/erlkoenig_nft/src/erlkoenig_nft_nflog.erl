@@ -14,7 +14,7 @@
 %% limitations under the License.
 %%
 
--module(erlk_nflog).
+-module(erlkoenig_nft_nflog).
 -moduledoc """
 NFLOG receiver - receives firewall log messages directly from the kernel
 via a NETLINK_NETFILTER socket. No dmesg, no file parsing.
@@ -170,8 +170,8 @@ parse_ip_packet(M, <<4:4, IHL:4, _TOS:8, TotalLen:16/big,
                       SrcA:8, SrcB:8, SrcC:8, SrcD:8,
                       DstA:8, DstB:8, DstC:8, DstD:8,
                       Rest/binary>>) ->
-    Src = iolist_to_binary(erlk_ip:format(<<SrcA, SrcB, SrcC, SrcD>>)),
-    Dst = iolist_to_binary(erlk_ip:format(<<DstA, DstB, DstC, DstD>>)),
+    Src = iolist_to_binary(erlkoenig_nft_ip:format(<<SrcA, SrcB, SrcC, SrcD>>)),
+    Dst = iolist_to_binary(erlkoenig_nft_ip:format(<<DstA, DstB, DstC, DstD>>)),
     M1 = M#{src => Src, dst => Dst, len => TotalLen, proto => proto_name(Proto)},
     HeaderLen = IHL * 4,
     Skip = HeaderLen - 20,
@@ -185,8 +185,8 @@ parse_ip_packet(M, <<4:4, IHL:4, _TOS:8, TotalLen:16/big,
 parse_ip_packet(M, <<6:4, _TC:8, _FL:20, PayloadLen:16/big, NextHeader:8,
                       _HopLimit:8, Src:16/binary, Dst:16/binary,
                       Rest/binary>>) ->
-    SrcStr = iolist_to_binary(erlk_ip:format(Src)),
-    DstStr = iolist_to_binary(erlk_ip:format(Dst)),
+    SrcStr = iolist_to_binary(erlkoenig_nft_ip:format(Src)),
+    DstStr = iolist_to_binary(erlkoenig_nft_ip:format(Dst)),
     M1 = M#{src => SrcStr, dst => DstStr, len => 40 + PayloadLen,
              proto => proto_name(NextHeader)},
     case {NextHeader, Rest} of

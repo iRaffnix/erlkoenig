@@ -14,15 +14,15 @@
 %% limitations under the License.
 %%
 
--module(erlk_app).
+-module(erlkoenig_nft_app).
 -moduledoc """
 Erlkönig OTP application.
 
 Starts the supervision tree with a named nfnl_server process.
-The server is registered as `erlk_srv` and can be used
+The server is registered as `erlkoenig_nft_srv` and can be used
 directly from any process, including Elixir/Phoenix.
 
-    :erlk_srv
+    :erlkoenig_nft_srv
     |> :nfnl_server.apply_msgs([...])
 """.
 
@@ -32,7 +32,7 @@ directly from any process, including Elixir/Phoenix.
 
 -spec start(atom(), list()) -> {ok, pid()} | {error, term()}.
 start(_Type, _Args) ->
-    erlk_sup:start_link().
+    erlkoenig_nft_sup:start_link().
 
 -spec stop(any()) -> ok.
 stop(_State) ->

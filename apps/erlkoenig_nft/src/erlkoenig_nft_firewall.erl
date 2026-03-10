@@ -14,13 +14,13 @@
 %% limitations under the License.
 %%
 
--module(erlk_firewall).
+-module(erlkoenig_nft_firewall).
 -moduledoc """
 Firewall configuration owner and lifecycle manager.
 
 A gen_server that reads the declarative firewall config from
-priv/firewall.term, applies it via the shared erlk_srv Netlink
-server, and starts per-counter watchers in erlk_watch_sup.
+priv/firewall.term, applies it via the shared erlkoenig_nft_srv Netlink
+server, and starts per-counter watchers in erlkoenig_nft_watch_sup.
 
 On termination, the nf_tables table is deleted so the firewall
 is cleanly removed.
@@ -83,7 +83,7 @@ start_link(Config) when is_map(Config) ->
 -doc "Add an IP address to the blocklist (IPv4 or IPv6).".
 -spec ban(inet:ip_address() | binary() | string()) -> ok | {error, term()}.
 ban(IP) ->
-    case erlk_ip:normalize(IP) of
+    case erlkoenig_nft_ip:normalize(IP) of
         {ok, Bin} -> gen_server:call(?MODULE, {ban, Bin});
         Err -> Err
     end.
@@ -91,7 +91,7 @@ ban(IP) ->
 -doc "Remove an IP address from the blocklist (IPv4 or IPv6).".
 -spec unban(inet:ip_address() | binary() | string()) -> ok | {error, term()}.
 unban(IP) ->
-    case erlk_ip:normalize(IP) of
+    case erlkoenig_nft_ip:normalize(IP) of
         {ok, Bin} -> gen_server:call(?MODULE, {unban, Bin});
         Err -> Err
     end.
@@ -136,13 +136,13 @@ init(Config) ->
 handle_call({ban, IPBin}, _From, #{config := Config} = State) ->
     Result = apply_set_op(Config, IPBin, fun blocklist_name/2,
                           fun(T, S) -> nft_rules:ban_ip(T, S, IPBin) end,
-                          "Banned ~s", [erlk_ip:format(IPBin)]),
+                          "Banned ~s", [erlkoenig_nft_ip:format(IPBin)]),
     {reply, Result, State};
 
 handle_call({unban, IPBin}, _From, #{config := Config} = State) ->
     Result = apply_set_op(Config, IPBin, fun blocklist_name/2,
                           fun(T, S) -> nft_rules:unban_ip(T, S, IPBin) end,
-                          "Unbanned ~s", [erlk_ip:format(IPBin)]),
+                          "Unbanned ~s", [erlkoenig_nft_ip:format(IPBin)]),
     {reply, Result, State};
 
 handle_call(rates, _From, State) ->
@@ -163,14 +163,14 @@ handle_call(reload, _From, #{table := OldTable} = State) ->
         {ok, Path} ->
             case file:consult(Path) of
                 {ok, [NewConfig]} ->
-                    erlk_watch_sup:stop_counters(),
+                    erlkoenig_nft_watch_sup:stop_counters(),
                     case apply_config(NewConfig) of
                         ok ->
                             NewTable = maps:get(table, NewConfig),
                             %% Delete old table if name changed
                             case NewTable =/= OldTable of
                                 true ->
-                                    _ = nfnl_server:apply_msgs(erlk_srv, [
+                                    _ = nfnl_server:apply_msgs(erlkoenig_nft_srv, [
                                         fun(S) -> nft_delete:table(?INET, OldTable, S) end
                                     ]);
                                 false ->
@@ -207,8 +207,8 @@ handle_info(_Info, State) ->
 -spec terminate(term(), state()) -> ok.
 terminate(_Reason, #{table := Table}) ->
     logger:notice("[erlkoenig_nft] Tearing down firewall: table=~s", [Table]),
-    erlk_watch_sup:stop_counters(),
-    _ = nfnl_server:apply_msgs(erlk_srv, [
+    erlkoenig_nft_watch_sup:stop_counters(),
+    _ = nfnl_server:apply_msgs(erlkoenig_nft_srv, [
         fun(S) -> nft_delete:table(?INET, Table, S) end
     ]),
     ok.
@@ -221,7 +221,7 @@ apply_set_op(Config, IPBin, LookupFun, RuleFun, LogFmt, LogArgs) ->
     Table = maps:get(table, Config),
     case LookupFun(Config, IPBin) of
         {ok, SetName} ->
-            Result = nfnl_server:apply_msgs(erlk_srv, [RuleFun(Table, SetName)]),
+            Result = nfnl_server:apply_msgs(erlkoenig_nft_srv, [RuleFun(Table, SetName)]),
             case Result of
                 ok -> logger:notice("[erlkoenig_nft] " ++ LogFmt, LogArgs);
                 _  -> ok
@@ -241,7 +241,7 @@ apply_config(Config) ->
     Chains   = maps:get(chains, Config, []),
 
     %% Clean slate via Netlink (no os:cmd)
-    _ = nfnl_server:apply_msgs(erlk_srv, [
+    _ = nfnl_server:apply_msgs(erlkoenig_nft_srv, [
         fun(S) -> nft_delete:table(?INET, Table, S) end
     ]),
 
@@ -263,7 +263,7 @@ apply_config(Config) ->
         [build_chain(Table, Chain, Config) || Chain <- Chains]
     ]),
 
-    nfnl_server:apply_msgs(erlk_srv, Msgs).
+    nfnl_server:apply_msgs(erlkoenig_nft_srv, Msgs).
 
 %% --- Internal: Start Counters ---
 
@@ -283,7 +283,7 @@ start_counters(Config) ->
             lists:foreach(fun(Counter) ->
                 Name = counter_name(Counter),
                 CounterThresholds = build_thresholds(Name, Thresholds),
-                erlk_watch_sup:start_counter(#{
+                erlkoenig_nft_watch_sup:start_counter(#{
                     name       => Name,
                     family     => ?INET,
                     table      => Table,
@@ -396,10 +396,10 @@ build_rule(Table, Chain, {udp_accept_limited, Port, Counter, LimitOpts}, _Config
 
 %% Accept/drop from specific source IP
 build_rule(Table, Chain, {ip_saddr_accept, IP}, _Config) ->
-    {ok, Bin} = erlk_ip:normalize(IP),
+    {ok, Bin} = erlkoenig_nft_ip:normalize(IP),
     encode_rule(Table, Chain, nft_rules:ip_saddr_accept(Bin));
 build_rule(Table, Chain, {ip_saddr_drop, IP}, _Config) ->
-    {ok, Bin} = erlk_ip:normalize(IP),
+    {ok, Bin} = erlkoenig_nft_ip:normalize(IP),
     encode_rule(Table, Chain, nft_rules:ip_saddr_drop(Bin));
 
 %% Connection limit per IP
@@ -420,7 +420,7 @@ build_rule(Table, Chain, masq, _Config) ->
 
 %% NAT: destination NAT to internal IP:Port
 build_rule(Table, Chain, {dnat, IP, Port}, _Config) ->
-    {ok, Bin} = erlk_ip:normalize(IP),
+    {ok, Bin} = erlkoenig_nft_ip:normalize(IP),
     encode_rule(Table, Chain, nft_rules:dnat_rule(Bin, Port)).
 
 %% --- Internal: Encode a semantic rule to a msg_fun ---
@@ -462,7 +462,7 @@ with_index(List) ->
 -spec blocklist_name(map(), binary()) -> {ok, binary()} | {error, no_matching_set}.
 blocklist_name(Config, IPBin) ->
     Sets = maps:get(sets, Config, []),
-    TargetType = case erlk_ip:version(IPBin) of
+    TargetType = case erlkoenig_nft_ip:version(IPBin) of
         v4 -> ipv4_addr;
         v6 -> ipv6_addr
     end,
@@ -506,11 +506,11 @@ set_opts(Table, {SetName, SetType, Extra}, Idx) ->
     maps:merge(Base, Extra).
 
 config_path() ->
-    erlk_config:config_path().
+    erlkoenig_nft_config:config_path().
 
 -spec collect_rates() -> #{binary() => map()}.
 collect_rates() ->
-    Children = supervisor:which_children(erlk_watch_sup),
+    Children = supervisor:which_children(erlkoenig_nft_watch_sup),
     lists:foldl(fun({_, Pid, _, _}, Acc) when is_pid(Pid) ->
         try gen_server:call(Pid, get_rates, 1000) of
             Rate when is_map(Rate) ->
@@ -529,7 +529,7 @@ collect_rates() ->
 
 -spec counter_count() -> non_neg_integer().
 counter_count() ->
-    length(supervisor:which_children(erlk_watch_sup)).
+    length(supervisor:which_children(erlkoenig_nft_watch_sup)).
 
 -spec default_action(term()) -> fun().
 default_action(Id) ->

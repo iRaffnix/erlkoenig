@@ -62,11 +62,11 @@ Accepts IPv4 or IPv6 as tuple, binary, or string:
 """.
 -spec ban(inet:ip_address() | binary() | string()) -> ok | {error, term()}.
 ban(IP) ->
-    ok = erlk_firewall:ban(IP),
+    ok = erlkoenig_nft_firewall:ban(IP),
     %% Also kill existing connections from this IP
-    case erlk_ip:normalize(IP) of
+    case erlkoenig_nft_ip:normalize(IP) of
         {ok, Bin} ->
-            try erlk_ct:kill_by_src(Bin)
+            try erlkoenig_nft_ct:kill_by_src(Bin)
             catch exit:{noproc, _} -> ok
             end;
         _ -> ok
@@ -76,17 +76,17 @@ ban(IP) ->
 -doc "Remove an IP address from the blocklist (IPv4 or IPv6).".
 -spec unban(inet:ip_address() | binary() | string()) -> ok | {error, term()}.
 unban(IP) ->
-    erlk_firewall:unban(IP).
+    erlkoenig_nft_firewall:unban(IP).
 
 -doc "Get current rates for all watched counters.".
 -spec rates() -> #{binary() => map()}.
 rates() ->
-    erlk_firewall:rates().
+    erlkoenig_nft_firewall:rates().
 
 -doc "Get firewall status.".
 -spec status() -> map().
 status() ->
-    erlk_firewall:status().
+    erlkoenig_nft_firewall:status().
 
 -doc """
 Reload firewall config from priv/firewall.term.
@@ -96,53 +96,53 @@ Existing connections are preserved.
 """.
 -spec reload() -> ok | {error, term()}.
 reload() ->
-    erlk_firewall:reload().
+    erlkoenig_nft_firewall:reload().
 
 %% --- Conntrack API ---
 
 -doc "Total number of tracked connections.".
 -spec ct_count() -> non_neg_integer().
 ct_count() ->
-    erlk_ct:count().
+    erlkoenig_nft_ct:count().
 
 -doc "Number of connections from a specific source IP.".
 -spec ct_count(inet:ip_address() | binary() | string()) -> non_neg_integer().
 ct_count(IP) ->
-    case erlk_ip:normalize(IP) of
-        {ok, Bin} -> erlk_ct:count_by_src(Bin);
+    case erlkoenig_nft_ip:normalize(IP) of
+        {ok, Bin} -> erlkoenig_nft_ct:count_by_src(Bin);
         _ -> 0
     end.
 
 -doc "Top N source IPs by active connection count.".
 -spec ct_top(pos_integer()) -> [{binary(), non_neg_integer()}].
 ct_top(N) ->
-    erlk_ct:top_sources(N).
+    erlkoenig_nft_ct:top_sources(N).
 
 -doc "List all tracked connections (only in full mode).".
 -spec ct_connections() -> [map()].
 ct_connections() ->
-    erlk_ct:connections().
+    erlkoenig_nft_ct:connections().
 
 -doc "Current tracking mode: full or aggregate.".
 -spec ct_mode() -> full | aggregate.
 ct_mode() ->
-    erlk_ct:mode().
+    erlkoenig_nft_ct:mode().
 
 -doc "Conntrack operational statistics.".
 -spec ct_stats() -> map().
 ct_stats() ->
-    erlk_ct:stats().
+    erlkoenig_nft_ct:stats().
 
 %% --- Guard API ---
 
 -doc "Guard detection and ban statistics.".
 -spec guard_stats() -> map().
 guard_stats() ->
-    erlk_ct_guard:stats().
+    erlkoenig_nft_ct_guard:stats().
 
 -doc "List all IPs currently banned by the guard.".
 -spec guard_banned() -> [map()].
 guard_banned() ->
-    erlk_ct_guard:banned().
+    erlkoenig_nft_ct_guard:banned().
 
 

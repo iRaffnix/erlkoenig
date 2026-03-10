@@ -18,7 +18,7 @@ defmodule Erlkoenig.Guard.Builder do
   @moduledoc """
   Pure functional builder for threat detection configs.
 
-  Produces terms compatible with `erlk_ct_guard:start_link/1`.
+  Produces terms compatible with `erlkoenig_nft_ct_guard:start_link/1`.
   """
 
   def new do

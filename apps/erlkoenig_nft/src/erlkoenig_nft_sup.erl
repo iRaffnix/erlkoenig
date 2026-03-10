@@ -14,21 +14,21 @@
 %% limitations under the License.
 %%
 
--module(erlk_sup).
+-module(erlkoenig_nft_sup).
 -moduledoc """
 Top-level supervisor for the Erlkoenig application.
 
 Uses rest_for_one strategy. Children are ordered by dependency:
 
     1. {pg, erlkoenig_nft}  — Process group scope (events)
-    2. erlk_srv            — Shared Netlink server
-    3. erlk_nflog          — NFLOG packet receiver (optional)
-    4. erlk_ct             — Conntrack event monitor
-    5. erlk_ct_guard       — Automatic threat detection
-    6. erlk_watch_sup      — Dynamic supervisor for counters
-    7. erlk_firewall       — Config owner, lifecycle manager
+    2. erlkoenig_nft_srv            — Shared Netlink server
+    3. erlkoenig_nft_nflog          — NFLOG packet receiver (optional)
+    4. erlkoenig_nft_ct             — Conntrack event monitor
+    5. erlkoenig_nft_ct_guard       — Automatic threat detection
+    6. erlkoenig_nft_watch_sup      — Dynamic supervisor for counters
+    7. erlkoenig_nft_firewall       — Config owner, lifecycle manager
 
-If erlk_srv crashes, everything after it restarts. The firewall
+If erlkoenig_nft_srv crashes, everything after it restarts. The firewall
 gets re-applied automatically on restart.
 """.
 
@@ -61,8 +61,8 @@ init([]) ->
         },
         %% 2. Shared Netlink server — single socket for all ops
         #{
-            id       => erlk_srv,
-            start    => {nfnl_server, start_link, [[{name, erlk_srv}]]},
+            id       => erlkoenig_nft_srv,
+            start    => {nfnl_server, start_link, [[{name, erlkoenig_nft_srv}]]},
             restart  => permanent,
             shutdown => 5000,
             type     => worker,
@@ -70,48 +70,48 @@ init([]) ->
         },
         %% 3. NFLOG receiver — optional, won't take down the tree
         #{
-            id       => erlk_nflog,
-            start    => {erlk_nflog, start_link, [1]},
+            id       => erlkoenig_nft_nflog,
+            start    => {erlkoenig_nft_nflog, start_link, [1]},
             restart  => transient,
             shutdown => 5000,
             type     => worker,
-            modules  => [erlk_nflog]
+            modules  => [erlkoenig_nft_nflog]
         },
         %% 4. Conntrack event receiver — tracks connections in real time
         #{
-            id       => erlk_ct,
-            start    => {erlk_ct, start_link, []},
+            id       => erlkoenig_nft_ct,
+            start    => {erlkoenig_nft_ct, start_link, []},
             restart  => transient,
             shutdown => 5000,
             type     => worker,
-            modules  => [erlk_ct]
+            modules  => [erlkoenig_nft_ct]
         },
         %% 5. Conntrack guard — automatic threat detection
         #{
-            id       => erlk_ct_guard,
-            start    => {erlk_ct_guard, start_link, [#{}]},
+            id       => erlkoenig_nft_ct_guard,
+            start    => {erlkoenig_nft_ct_guard, start_link, [#{}]},
             restart  => transient,
             shutdown => 5000,
             type     => worker,
-            modules  => [erlk_ct_guard]
+            modules  => [erlkoenig_nft_ct_guard]
         },
         %% 6. Dynamic supervisor for per-counter workers
         #{
-            id       => erlk_watch_sup,
-            start    => {erlk_watch_sup, start_link, []},
+            id       => erlkoenig_nft_watch_sup,
+            start    => {erlkoenig_nft_watch_sup, start_link, []},
             restart  => permanent,
             shutdown => infinity,
             type     => supervisor,
-            modules  => [erlk_watch_sup]
+            modules  => [erlkoenig_nft_watch_sup]
         },
         %% 7. Firewall config owner — last, depends on all above
         #{
-            id       => erlk_firewall,
-            start    => {erlk_firewall, start_link, []},
+            id       => erlkoenig_nft_firewall,
+            start    => {erlkoenig_nft_firewall, start_link, []},
             restart  => permanent,
             shutdown => 10000,
             type     => worker,
-            modules  => [erlk_firewall]
+            modules  => [erlkoenig_nft_firewall]
         }
     ],
     {ok, {SupFlags, Children}}.

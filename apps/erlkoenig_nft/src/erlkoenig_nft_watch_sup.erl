@@ -14,18 +14,18 @@
 %% limitations under the License.
 %%
 
--module(erlk_watch_sup).
+-module(erlkoenig_nft_watch_sup).
 -moduledoc """
-Dynamic supervisor for erlk_counter workers.
+Dynamic supervisor for erlkoenig_nft_counter workers.
 
-Manages one erlk_counter process per named nf_tables counter.
+Manages one erlkoenig_nft_counter process per named nf_tables counter.
 Uses one_for_one strategy — if a counter worker crashes, only
 that counter restarts. Others keep running.
 
-Counter workers are started dynamically by erlk_firewall during
+Counter workers are started dynamically by erlkoenig_nft_firewall during
 boot via start_counter/1.
 
-    erlk_watch_sup:start_counter(#{
+    erlkoenig_nft_watch_sup:start_counter(#{
         name   => <<"ssh">>,
         family => 1,
         table  => <<"erlkoenig">>,
@@ -51,7 +51,7 @@ start_link() ->
 -doc """
 Start a counter worker under this supervisor.
 
-Config is passed to erlk_counter:start_link/1.
+Config is passed to erlkoenig_nft_counter:start_link/1.
 """.
 -spec start_counter(map()) -> {ok, pid()} | {error, term()}.
 start_counter(Config) ->
@@ -75,11 +75,11 @@ init([]) ->
         period    => 60
     },
     ChildSpec = #{
-        id       => erlk_counter,
-        start    => {erlk_counter, start_link, []},
+        id       => erlkoenig_nft_counter,
+        start    => {erlkoenig_nft_counter, start_link, []},
         restart  => permanent,
         shutdown => 5000,
         type     => worker,
-        modules  => [erlk_counter]
+        modules  => [erlkoenig_nft_counter]
     },
     {ok, {SupFlags, [ChildSpec]}}.

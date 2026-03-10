@@ -1,8 +1,8 @@
 {application, erlkoenig_nft, [
     {description, "Pure Erlang nf_tables firewall engine"},
     {vsn, "0.4.0"},
-    {registered, [erlk_sup, erlk_srv, erlk_firewall, erlk_watch_sup]},
-    {mod, {erlk_app, []}},
+    {registered, [erlkoenig_nft_sup, erlkoenig_nft_srv, erlkoenig_nft_firewall, erlkoenig_nft_watch_sup]},
+    {mod, {erlkoenig_nft_app, []}},
     {applications, [kernel, stdlib, crypto]},
     {env, []},
     {modules, []},

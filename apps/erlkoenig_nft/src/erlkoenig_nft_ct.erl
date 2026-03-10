@@ -14,7 +14,7 @@
 %% limitations under the License.
 %%
 
--module(erlk_ct).
+-module(erlkoenig_nft_ct).
 -moduledoc """
 Conntrack event receiver - tracks network connections in real time.
 
@@ -38,13 +38,13 @@ Events are broadcast via pg group `ct_events`:
     {ct_alert, {mode_switch, aggregate}}
 
 Public API:
-    erlk_ct:count()                  - total active connections
-    erlk_ct:count_by_src(IP)         - connections from a source IP
-    erlk_ct:top_sources(N)           - top N source IPs by connection count
-    erlk_ct:connections()            - list all tracked connections (full mode)
-    erlk_ct:mode()                   - current mode: full | aggregate
-    erlk_ct:stats()                  - operational statistics
-    erlk_ct:kill_by_src(IP)          - request kernel to kill connections from IP
+    erlkoenig_nft_ct:count()                  - total active connections
+    erlkoenig_nft_ct:count_by_src(IP)         - connections from a source IP
+    erlkoenig_nft_ct:top_sources(N)           - top N source IPs by connection count
+    erlkoenig_nft_ct:connections()            - list all tracked connections (full mode)
+    erlkoenig_nft_ct:mode()                   - current mode: full | aggregate
+    erlkoenig_nft_ct:stats()                  - operational statistics
+    erlkoenig_nft_ct:kill_by_src(IP)          - request kernel to kill connections from IP
 """.
 
 -behaviour(gen_server).
@@ -112,8 +112,8 @@ Public API:
 -define(DEFAULT_MAX_ENTRIES, 100000).
 
 %% ETS table names
--define(CT_TAB, erlk_ct_conns).
--define(CT_AGG, erlk_ct_agg).
+-define(CT_TAB, erlkoenig_nft_ct_conns).
+-define(CT_AGG, erlkoenig_nft_ct_agg).
 
 %% --- Types ---
 

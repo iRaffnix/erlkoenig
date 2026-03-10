@@ -33,7 +33,7 @@ defmodule Erlkoenig.GuardTest do
       assert {127, 0, 0, 1} in b.whitelist
     end
 
-    test "to_term matches erlk_ct_guard format" do
+    test "to_term matches erlkoenig_nft_ct_guard format" do
       term =
         Builder.new()
         |> Builder.add_detector(:conn_flood, 50, 10)

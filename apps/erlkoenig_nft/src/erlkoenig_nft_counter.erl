@@ -14,7 +14,7 @@
 %% limitations under the License.
 %%
 
--module(erlk_counter).
+-module(erlkoenig_nft_counter).
 -moduledoc """
 Per-counter watcher process.
 
@@ -97,7 +97,7 @@ init(Config) ->
     Thresholds = maps:get(thresholds, Config, []),
 
     %% Do an initial read to set the baseline
-    {PrevPkts, PrevBytes} = case nfnl_server:get_counter(erlk_srv, Family, Table, Name) of
+    {PrevPkts, PrevBytes} = case nfnl_server:get_counter(erlkoenig_nft_srv, Family, Table, Name) of
         {ok, #{packets := P, bytes := B}} -> {P, B};
         _ -> {0, 0}
     end,
@@ -135,7 +135,7 @@ handle_info(poll, #{name := Name, family := Family,
                     thresholds := Thresholds,
                     prev_pkts := PrevPkts,
                     prev_bytes := PrevBytes} = State) ->
-    case nfnl_server:get_counter(erlk_srv, Family, Table, Name) of
+    case nfnl_server:get_counter(erlkoenig_nft_srv, Family, Table, Name) of
         {ok, #{packets := CurPkts, bytes := CurBytes}} ->
             %% Delta since last poll
             DeltaPkts  = max(0, CurPkts - PrevPkts),
@@ -159,7 +159,7 @@ handle_info(poll, #{name := Name, family := Family,
                              prev_bytes => CurBytes,
                              last_rate => Rate}};
         {error, Reason} ->
-            logger:warning("[erlk_counter:~s] poll failed: ~p", [Name, Reason]),
+            logger:warning("[erlkoenig_nft_counter:~s] poll failed: ~p", [Name, Reason]),
             TimerRef = erlang:send_after(Interval, self(), poll),
             {noreply, State#{timer_ref => TimerRef}}
     end;
@@ -197,7 +197,7 @@ check_thresholds(Name, [#{metric := Metric, op := Op,
         true ->
             Id = maps:get(id, T, undefined),
             try Action(Name, Metric, CurrentVal, ThreshVal)
-            catch C:R -> logger:warning("[erlk_counter] threshold action failed: ~p:~p", [C, R]) end,
+            catch C:R -> logger:warning("[erlkoenig_nft_counter] threshold action failed: ~p:~p", [C, R]) end,
             broadcast({threshold_event, Id, Name, Metric,
                        CurrentVal, ThreshVal});
         false ->

@@ -14,7 +14,7 @@
 %% limitations under the License.
 %%
 
--module(erlk_watch).
+-module(erlkoenig_nft_watch).
 -moduledoc """
 Periodic counter monitor with rate calculation and event emission.
 
@@ -106,7 +106,7 @@ start_link(Config) ->
 Add a threshold that triggers when a metric exceeds a value.
 
 Example:
-    erlk_watch:add_threshold(Pid, ssh_alert,
+    erlkoenig_nft_watch:add_threshold(Pid, ssh_alert,
         <<"ssh_pkts">>, pps,
         {fun(Name, _, Val, _) ->
             logger:warning("SSH flood: ~s at ~.1f pps", [Name, Val])
@@ -251,7 +251,7 @@ check_thresholds([#{counter := Name, metric := Metric,
             case eval_op(Op, CurrentVal, ThreshVal) of
                 true ->
                     try Action(Name, Metric, CurrentVal, ThreshVal)
-                    catch C:R -> logger:warning("[erlk_watch] threshold action failed: ~p:~p", [C, R]) end,
+                    catch C:R -> logger:warning("[erlkoenig_nft_watch] threshold action failed: ~p:~p", [C, R]) end,
                     broadcast({threshold_event, Name, Metric,
                                CurrentVal, ThreshVal});
                 false ->

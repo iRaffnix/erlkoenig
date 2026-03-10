@@ -19,7 +19,7 @@
 Shared NFLOG socket setup for Netlink NETFILTER receivers.
 
 Opens an AF_NETLINK socket, binds to an NFLOG group, and configures
-copy mode. Used by erlk_nflog.
+copy mode. Used by erlkoenig_nft_nflog.
 """.
 
 -export([open/2, open/1]).

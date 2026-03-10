@@ -18,7 +18,7 @@ defmodule Erlkoenig.Watch.Builder do
   @moduledoc """
   Pure functional builder for counter-based monitoring configs.
 
-  Produces terms compatible with `erlk_watch:start_link/1`.
+  Produces terms compatible with `erlkoenig_nft_watch:start_link/1`.
   """
 
   def new(name) when is_atom(name) or is_binary(name) do

@@ -63,7 +63,7 @@ erlkoenig_nft:ban("203.0.113.42").
 ```
 
 `pg` delivers the message to every connected node. Each node's
-`erlk_firewall` adds the IP to its local nf_tables set independently.
+`erlkoenig_nft_firewall` adds the IP to its local nf_tables set independently.
 Latency is one Erlang message hop — microseconds on a local network.
 
 Conntrack events can be shared the same way. A port scan detected

@@ -34,7 +34,7 @@ main(_) ->
     },
 
     io:format("=== Applying Config ===~n"),
-    {ok, Watcher} = erlk_firewall:apply(Config),
+    {ok, Watcher} = erlkoenig_nft_firewall:apply(Config),
     io:format("Watcher: ~p~n~n", [Watcher]),
 
     io:format("~s~n", [os:cmd("nft list ruleset")]),
@@ -43,11 +43,11 @@ main(_) ->
     timer:sleep(3000),
 
     io:format("=== Rates ===~n"),
-    Rates = erlk_watch:get_rates(Watcher),
+    Rates = erlkoenig_nft_watch:get_rates(Watcher),
     io:format("~p~n~n", [Rates]),
 
     io:format("=== Teardown ===~n"),
-    ok = erlk_firewall:teardown(Config, Watcher),
+    ok = erlkoenig_nft_firewall:teardown(Config, Watcher),
 
     io:format("~s", [os:cmd("nft list ruleset")]),
     io:format("=== Done ===~n").

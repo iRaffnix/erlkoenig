@@ -42,7 +42,7 @@ main(_) ->
     io:format("  ╚══════════════════════════════════════╝~n~n"),
 
     io:format("Applying configuration...~n"),
-    {ok, Watcher} = erlk_firewall:apply(Config),
+    {ok, Watcher} = erlkoenig_nft_firewall:apply(Config),
     io:format("Watcher started: ~p~n~n", [Watcher]),
 
     io:format("~s~n", [os:cmd("nft list ruleset")]),

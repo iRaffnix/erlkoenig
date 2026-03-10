@@ -31,7 +31,7 @@ defmodule Erlkoenig.Guard do
         end
       end
 
-      MyGuard.guard_config()   # => erlk_ct_guard compatible term
+      MyGuard.guard_config()   # => erlkoenig_nft_ct_guard compatible term
   """
 
   alias Erlkoenig.Guard.Builder

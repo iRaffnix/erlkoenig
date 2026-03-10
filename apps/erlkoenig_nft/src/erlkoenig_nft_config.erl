@@ -14,7 +14,7 @@
 %% limitations under the License.
 %%
 
--module(erlk_config).
+-module(erlkoenig_nft_config).
 -moduledoc """
 Shared configuration utilities.
 

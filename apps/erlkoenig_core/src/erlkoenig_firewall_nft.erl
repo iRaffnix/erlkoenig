@@ -24,7 +24,7 @@
 %%%   - Prerouting chain (nat) for port-forwarding / DNAT
 %%%   - Per-container regular chains with isolation rules
 %%%
-%%% All operations go through nfnl_server (erlk_srv) as atomic
+%%% All operations go through nfnl_server (erlkoenig_nft_srv) as atomic
 %%% batches.
 %%% @end
 %%%-------------------------------------------------------------------
@@ -42,7 +42,7 @@
 -define(PREROUTING_CHAIN, <<"prerouting">>).
 -define(OUTPUT_CHAIN, <<"output">>).
 -define(BRIDGE_NAME, <<"erlkoenig_br0">>).
--define(SERVER, erlk_srv).
+-define(SERVER, erlkoenig_nft_srv).
 -define(IP_FORWARD_PATH, "/proc/sys/net/ipv4/ip_forward").
 -define(ROUTE_LOCALNET_FMT, "/proc/sys/net/ipv4/conf/~s/route_localnet").
 

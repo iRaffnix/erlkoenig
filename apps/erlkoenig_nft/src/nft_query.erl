@@ -388,8 +388,8 @@ extract_key(ElemAttrs) ->
 
 -spec format_set_val(binary()) -> binary().
 format_set_val(<<A, B, C, D>>) ->
-    iolist_to_binary(erlk_ip:format(<<A, B, C, D>>));
+    iolist_to_binary(erlkoenig_nft_ip:format(<<A, B, C, D>>));
 format_set_val(<<_:16/binary>> = V6) ->
-    iolist_to_binary(erlk_ip:format(V6));
+    iolist_to_binary(erlkoenig_nft_ip:format(V6));
 format_set_val(Val) ->
     Val.

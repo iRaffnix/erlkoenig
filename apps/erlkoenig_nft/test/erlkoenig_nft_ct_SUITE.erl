@@ -1,4 +1,4 @@
--module(erlk_ct_SUITE).
+-module(erlkoenig_nft_ct_SUITE).
 -moduledoc false.
 -include_lib("common_test/include/ct.hrl").
 -include_lib("stdlib/include/assert.hrl").

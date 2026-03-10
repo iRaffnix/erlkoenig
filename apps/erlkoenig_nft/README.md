@@ -114,14 +114,14 @@ Pkt = nft_vm_pkt:tcp(#{saddr => {10,0,0,5}, dport => 22}),
 ```
 erlkoenig_nft          Public API
     │
-erlk_sup               rest_for_one supervisor
+erlkoenig_nft_sup               rest_for_one supervisor
     │
     ├── nfnl_server     Shared netlink socket
-    ├── erlk_nflog      NFLOG packet receiver
-    ├── erlk_ct         Conntrack monitor (multicast)
-    ├── erlk_ct_guard   Threat detection + auto-ban
-    ├── erlk_watch_sup  Dynamic counter watchers
-    └── erlk_firewall   Config owner, rule lifecycle
+    ├── erlkoenig_nft_nflog      NFLOG packet receiver
+    ├── erlkoenig_nft_ct         Conntrack monitor (multicast)
+    ├── erlkoenig_nft_ct_guard   Threat detection + auto-ban
+    ├── erlkoenig_nft_watch_sup  Dynamic counter watchers
+    └── erlkoenig_nft_firewall   Config owner, rule lifecycle
 ```
 
 ~10,000 lines of Erlang. 83 modules (45 hand-written, 38 generated).

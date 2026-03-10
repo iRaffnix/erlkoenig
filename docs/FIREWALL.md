@@ -198,7 +198,7 @@ before they ever touch the kernel.
 
 ## Conntrack Monitor
 
-`erlk_ct` opens a second netlink socket subscribed to conntrack
+`erlkoenig_nft_ct` opens a second netlink socket subscribed to conntrack
 multicast groups:
 
 - `NFNLGRP_CONNTRACK_NEW` — new connection events
@@ -217,7 +217,7 @@ subscribe to `ct_events` and react.
 
 ### Dual-Mode Tracking
 
-Under normal load, `erlk_ct` tracks every connection individually
+Under normal load, `erlkoenig_nft_ct` tracks every connection individually
 in ETS (~100 bytes per connection). Under DDoS, it automatically
 switches to per-source-IP aggregation (~10 bytes per source).
 Memory drops 10x without losing threat visibility.
@@ -228,7 +228,7 @@ When the attack subsides, it switches back.
 
 ## Threat Detection
 
-`erlk_ct_guard` subscribes to conntrack events and watches for
+`erlkoenig_nft_ct_guard` subscribes to conntrack events and watches for
 two attack patterns:
 
 **Connection flood:** More than N connections from one source IP
@@ -292,7 +292,7 @@ and doesn't touch the rule chain at all.
 ## Counter Monitoring
 
 Named counters are nf_tables objects that track packet counts
-and byte counts per rule. `erlk_counter` workers poll each counter
+and byte counts per rule. `erlkoenig_nft_counter` workers poll each counter
 at a configurable interval and calculate rates:
 
 ```erlang
@@ -309,7 +309,7 @@ alerting, dashboards, or adaptive responses.
 ## NFLOG
 
 Rules can log packets via NFLOG instead of kernel `printk`.
-`erlk_nflog` opens a netlink socket subscribed to the NFLOG
+`erlkoenig_nft_nflog` opens a netlink socket subscribed to the NFLOG
 multicast group and parses incoming packets:
 
 ```erlang
@@ -324,16 +324,16 @@ no `ulogd`. The BEAM *is* the log processor.
 ## Supervision Tree
 
 ```
-erlk_sup (rest_for_one)
+erlkoenig_nft_sup (rest_for_one)
 │
 ├── pg (erlkoenig_nft)          Process groups for event broadcast
 ├── nfnl_server                 Shared netlink socket
-├── erlk_nflog                  NFLOG packet receiver
-├── erlk_ct                     Conntrack monitor (multicast)
-├── erlk_ct_guard               Threat detection + auto-ban
-├── erlk_watch_sup              Dynamic counter supervisor
-│   └── erlk_counter            One worker per named counter
-└── erlk_firewall               Config owner, rule lifecycle
+├── erlkoenig_nft_nflog                  NFLOG packet receiver
+├── erlkoenig_nft_ct                     Conntrack monitor (multicast)
+├── erlkoenig_nft_ct_guard               Threat detection + auto-ban
+├── erlkoenig_nft_watch_sup              Dynamic counter supervisor
+│   └── erlkoenig_nft_counter            One worker per named counter
+└── erlkoenig_nft_firewall               Config owner, rule lifecycle
 ```
 
 **`rest_for_one`**: If the netlink socket crashes, everything
@@ -341,13 +341,13 @@ downstream restarts — they all depend on it. But `pg` at the
 top stays alive, so event subscribers don't lose their group
 membership.
 
-**`erlk_firewall` last**: It depends on `nfnl_server` (to send
-rules) and `erlk_ct_guard` (to register ban callbacks). Starting
+**`erlkoenig_nft_firewall` last**: It depends on `nfnl_server` (to send
+rules) and `erlkoenig_nft_ct_guard` (to register ban callbacks). Starting
 it last ensures all dependencies are ready.
 
-**Crash recovery**: If `erlk_ct` crashes, it reopens the
+**Crash recovery**: If `erlkoenig_nft_ct` crashes, it reopens the
 conntrack multicast socket and resumes — in-kernel connections
-are unaffected. If `erlk_firewall` crashes, it re-reads the
+are unaffected. If `erlkoenig_nft_firewall` crashes, it re-reads the
 config and re-applies all rules via a fresh batch transaction.
 The kernel's atomic batches mean rules are either fully applied
 or not at all.
@@ -467,11 +467,11 @@ never sees Elixir — it loads a plain Erlang term.
 
 | Module | LOC | Role |
 |--------|-----|------|
-| `erlk_firewall` | ~550 | Config lifecycle, ban/unban, reload |
-| `erlk_ct` | ~500 | Conntrack multicast, dual-mode tracking |
-| `erlk_ct_guard` | ~400 | Flood/scan detection, auto-ban |
-| `erlk_counter` | ~200 | Per-counter polling + rate calculation |
-| `erlk_nflog` | ~200 | NFLOG packet parsing |
+| `erlkoenig_nft_firewall` | ~550 | Config lifecycle, ban/unban, reload |
+| `erlkoenig_nft_ct` | ~500 | Conntrack multicast, dual-mode tracking |
+| `erlkoenig_nft_ct_guard` | ~400 | Flood/scan detection, auto-ban |
+| `erlkoenig_nft_counter` | ~200 | Per-counter polling + rate calculation |
+| `erlkoenig_nft_nflog` | ~200 | NFLOG packet parsing |
 
 ### Object Operations
 

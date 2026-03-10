@@ -37,7 +37,7 @@ defmodule Erlkoenig.WatchTest do
       assert b.actions == [{:webhook, "https://x.io"}]
     end
 
-    test "to_term produces erlk_watch compatible config" do
+    test "to_term produces erlkoenig_nft_watch compatible config" do
       term =
         Builder.new(:traffic)
         |> Builder.add_counter(:ssh)
@@ -55,7 +55,7 @@ defmodule Erlkoenig.WatchTest do
       assert term.actions == [:log]
     end
 
-    test "thresholds format matches erlk_watch" do
+    test "thresholds format matches erlkoenig_nft_watch" do
       term =
         Builder.new(:t)
         |> Builder.add_counter(:c)

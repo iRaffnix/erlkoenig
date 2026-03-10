@@ -164,13 +164,13 @@ maybe_add_health_check(_Pid, _Ct) ->
 
 -spec maybe_configure_guard(map()) -> ok.
 maybe_configure_guard(#{guard := GuardConfig}) when is_map(GuardConfig) ->
-    case erlang:whereis(erlk_ct_guard) of
+    case erlang:whereis(erlkoenig_nft_ct_guard) of
         undefined ->
-            logger:warning("erlkoenig_config: erlk_ct_guard not running, "
+            logger:warning("erlkoenig_config: erlkoenig_nft_ct_guard not running, "
                            "guard config ignored"),
             ok;
         _Pid ->
-            erlk_ct_guard:reconfigure(GuardConfig),
+            erlkoenig_nft_ct_guard:reconfigure(GuardConfig),
             ok
     end;
 maybe_configure_guard(_) ->
@@ -189,7 +189,7 @@ start_watch(#{counters := Counters, actions := Actions} = Watch) ->
     CounterBins = [iolist_to_binary(C) || C <- Counters],
     WatchConfig = #{family => Family, table => Table,
                     counters => CounterBins, interval => Interval},
-    case erlk_watch:start_link(WatchConfig) of
+    case erlkoenig_nft_watch:start_link(WatchConfig) of
         {ok, Pid} ->
             Thresholds = maps:get(thresholds, Watch, []),
             ActionFun = compile_actions(Actions, Name),
@@ -211,7 +211,7 @@ start_watch(_) ->
 add_threshold(Pid, {Counter, _Obj, Metric, Op, Value}, ActionFun) ->
     CounterBin = iolist_to_binary(Counter),
     Id = {CounterBin, Metric},
-    erlk_watch:add_threshold(Pid, Id, CounterBin, Metric,
+    erlkoenig_nft_watch:add_threshold(Pid, Id, CounterBin, Metric,
                              {ActionFun, Op, Value});
 add_threshold(_Pid, Unknown, _ActionFun) ->
     logger:warning("erlkoenig_config: unknown threshold format: ~p", [Unknown]),

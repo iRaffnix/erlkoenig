@@ -14,7 +14,7 @@
 %% limitations under the License.
 %%
 
--module(erlk_ip).
+-module(erlkoenig_nft_ip).
 -moduledoc """
 Shared IP address utility module - single source of truth for
 normalize/format/version across the entire codebase.

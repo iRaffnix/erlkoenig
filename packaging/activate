@@ -319,7 +319,7 @@ ek-load() {
         ek-compile "$file" -o "$term_file" || return 1
     fi
 
-    ek-eval "ek:load(\"${term_file}\")."
+    ek-eval "ek:load(\"$(pwd)/${term_file}\")."
 }
 
 # Compile + reload DSL file (delta-update: stop removed, start new)

@@ -336,7 +336,7 @@ ek-reload() {
         ek-compile "$file" -o "$term_file" || return 1
     fi
 
-    ek-eval "ek:reload(\"${term_file}\")."
+    ek-eval "ek:load(\"$(pwd)/${term_file}\")."
 }
 
 # Live dashboard (refreshes every N seconds, default 2)

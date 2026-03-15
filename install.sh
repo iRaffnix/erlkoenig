@@ -241,6 +241,7 @@ Environment=VMARGS_PATH=/etc/erlkoenig/vm.args
 
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 Delegate=yes
+DelegateSubgroup=init
 LimitNOFILE=65536
 LimitMEMLOCK=infinity
 
@@ -257,7 +258,6 @@ PrivateTmp=yes
 ProtectClock=yes
 RestrictSUIDSGID=yes
 ProtectKernelTunables=yes
-ProtectControlGroups=yes
 
 [Install]
 WantedBy=multi-user.target

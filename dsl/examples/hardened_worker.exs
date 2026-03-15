@@ -11,6 +11,11 @@ defmodule HardenedWorker do
     restart {:on_failure, 10}
     health_check port: 9090, interval: 15_000, retries: 5
 
-    firewall :strict, allow_udp: [53]
+    firewall do
+      accept :established
+      accept :icmp
+      accept_udp 53
+      log_and_drop "DROP: "
+    end
   end
 end

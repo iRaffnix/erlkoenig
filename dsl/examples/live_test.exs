@@ -7,7 +7,12 @@ defmodule LiveTest do
     args ["7777"]
     restart :on_failure
     health_check port: 7777, interval: 5000, retries: 3
-    firewall :standard
+    firewall do
+      accept :established
+      accept :icmp
+      accept_udp 53
+      accept :all
+    end
   end
 
   container :echo_b do
@@ -17,6 +22,12 @@ defmodule LiveTest do
     ports [{9080, 8888}]
     restart {:on_failure, 3}
     health_check port: 8888, interval: 5000, retries: 3
-    firewall :strict, allow_tcp: [8888]
+
+    firewall do
+      accept :established
+      accept :icmp
+      accept_tcp 8888
+      log_and_drop "DROP: "
+    end
   end
 end

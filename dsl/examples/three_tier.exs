@@ -47,7 +47,12 @@ defmodule ThreeTier do
     limits cpu: 2, memory: "256M", pids: 100
     restart :always
     health_check port: 8080, interval: 5000, retries: 3
-    firewall :strict, allow_tcp: [8080]
+    firewall do
+      accept :established
+      accept :icmp
+      accept_tcp 8080
+      log_and_drop "DROP: "
+    end
   end
 
   # === App: internal application tier ===
@@ -60,7 +65,13 @@ defmodule ThreeTier do
     limits cpu: 4, memory: "512M", pids: 200
     restart {:on_failure, 5}
     health_check port: 4000, interval: 10_000, retries: 3
-    firewall :strict, allow_tcp: [4000]
+
+    firewall do
+      accept :established
+      accept :icmp
+      accept_tcp 4000
+      log_and_drop "DROP: "
+    end
   end
 
   container :worker do
@@ -70,7 +81,13 @@ defmodule ThreeTier do
     args ["5000"]
     limits cpu: 2, memory: "256M", pids: 50
     restart :on_failure
-    firewall :standard
+
+    firewall do
+      accept :established
+      accept :icmp
+      accept_udp 53
+      accept :all
+    end
   end
 
   # === Data: isolated storage tier ===
@@ -83,7 +100,13 @@ defmodule ThreeTier do
     limits cpu: 1, memory: "128M", pids: 30
     restart :always
     health_check port: 6379, interval: 5000, retries: 5
-    firewall :strict, allow_tcp: [6379]
+
+    firewall do
+      accept :established
+      accept :icmp
+      accept_tcp 6379
+      log_and_drop "DROP: "
+    end
   end
 
 end

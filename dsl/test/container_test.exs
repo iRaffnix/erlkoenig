@@ -54,15 +54,21 @@ defmodule Erlkoenig.ContainerTest do
       assert b.env == %{"PORT" => "80"}
     end
 
-    test "set_firewall_profile uses Profiles" do
-      b = Builder.new(:web) |> Builder.set_firewall_profile(:standard)
-      assert is_map(b.firewall)
-      assert Map.has_key?(b.firewall, :chains)
+    test "add_fw_rule builds rules list" do
+      b = Builder.new(:web)
+          |> Builder.add_fw_rule(:ct_established_accept)
+          |> Builder.add_fw_rule({:tcp_accept, 443})
+      assert b.fw_rules == [:ct_established_accept, {:tcp_accept, 443}]
     end
 
-    test "set_firewall_profile with opts" do
-      b = Builder.new(:web) |> Builder.set_firewall_profile(:strict, allow_tcp: [443])
-      [chain] = b.firewall.chains
+    test "firewall rules appear in spawn_opts" do
+      b = Builder.new(:web)
+          |> Builder.set_ip({10, 0, 0, 10})
+          |> Builder.add_fw_rule(:ct_established_accept)
+          |> Builder.add_fw_rule({:tcp_accept, 443})
+      opts = Builder.to_spawn_opts(b)
+      assert Map.has_key?(opts, :firewall)
+      [chain] = opts.firewall.chains
       assert {:tcp_accept, 443} in chain.rules
     end
 

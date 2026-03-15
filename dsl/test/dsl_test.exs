@@ -4,28 +4,45 @@ defmodule Erlkoenig.DslTest do
   defmodule FullExample do
     use Erlkoenig.DSL
 
-    defaults do
-      firewall :standard
-    end
-
     container :web_api do
       binary "/opt/bin/api_server"
       ip {10, 0, 0, 10}
       ports [{8080, 80}, {8443, 443}]
       env %{"PORT" => "80", "ENV" => "prod"}
-      firewall :strict, allow_tcp: [80, 443]
+
+      firewall do
+        accept :established
+        accept :icmp
+        accept_tcp 80
+        accept_tcp 443
+        log_and_drop "DROP: "
+      end
     end
 
     container :worker do
       binary "/opt/bin/worker"
       ip {10, 0, 0, 20}
       args ["--threads", "4"]
+
+      firewall do
+        accept :established
+        accept :icmp
+        accept_udp 53
+        accept :all
+      end
     end
 
     container :cache do
       binary "/opt/bin/redis"
       ip {10, 0, 0, 30}
-      firewall :strict, allow_tcp: [6379]
+
+      firewall do
+        accept :established
+        accept :icmp
+        accept_tcp 6379
+        log_and_drop "DROP: "
+      end
+
       limits cpu: 2, memory: "512M", pids: 50
       seccomp :standard
     end
@@ -45,7 +62,7 @@ defmodule Erlkoenig.DslTest do
       refute :accept in chain.rules
     end
 
-    test "worker inherits default standard firewall" do
+    test "worker has standard firewall" do
       containers = FullExample.containers()
       worker = Enum.find(containers, &(&1.name == "worker"))
       [chain] = worker.firewall.chains

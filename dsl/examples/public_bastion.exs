@@ -9,10 +9,6 @@
 defmodule PublicBastion do
   use Erlkoenig.DSL
 
-  defaults do
-    firewall :strict, allow_udp: [53]
-  end
-
   container :bastion do
     binary "/usr/sbin/dropbear"
     ip {10, 0, 0, 20}
@@ -21,6 +17,13 @@ defmodule PublicBastion do
     limits memory: "128M", pids: 50, pps: 1000
     restart :permanent
     health_check port: 22, interval: 15_000, retries: 3
+
+    firewall do
+      accept :established
+      accept :icmp
+      accept_udp 53
+      log_and_drop "DROP: "
+    end
   end
 
 end

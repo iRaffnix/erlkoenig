@@ -33,17 +33,27 @@ defmodule Erlkoenig.Container.Builder do
       firewall: %{},
       limits: %{},
       seccomp: nil,
+      caps: [],
+      fw_rules: nil,
+      fw_counters: [],
+      fw_sets: [],
+      guard: nil,
+      watch: nil,
       restart: nil,
       files: %{},
       dns_name: nil,
       health_check: nil,
-      zone: nil
+      zone: nil,
+      signature: nil
     }
   end
 
   def set_binary(state, path) when is_binary(path) do
     %{state | binary: path}
   end
+
+  def set_signature(state, :required), do: %{state | signature: :required}
+  def set_signature(state, path) when is_binary(path), do: %{state | signature: path}
 
   def set_ip(state, {a, b, c, d} = ip)
       when is_integer(a) and a >= 0 and a <= 255
@@ -78,42 +88,31 @@ defmodule Erlkoenig.Container.Builder do
     %{state | env: Map.put(state.env, to_string(key), to_string(value))}
   end
 
-  def set_firewall(state, term) when is_map(term) do
-    %{state | firewall: term}
+  # --- Firewall (inline nftables rules) ---
+
+  def add_fw_rule(state, rule) do
+    rules = (state.fw_rules || []) ++ [rule]
+    %{state | fw_rules: rules}
   end
 
-  def set_firewall_profile(state, profile, opts \\ []) when is_atom(profile) do
-    term = firewall_profile(profile, opts)
-    %{state | firewall: term}
+  def set_fw_counters(state, counters) when is_list(counters) do
+    %{state | fw_counters: Enum.map(counters, &to_string/1)}
   end
 
-  defp firewall_profile(:strict, opts) do
-    allow_tcp = Keyword.get(opts, :allow_tcp, [])
-    allow_udp = Keyword.get(opts, :allow_udp, [])
-
-    rules =
-      [:ct_established_accept, :icmp_accept] ++
-        Enum.map(allow_tcp, &{:tcp_accept, &1}) ++
-        Enum.map(allow_udp, &{:udp_accept, &1})
-
-    %{chains: [%{name: "inbound", hook: :input, type: :filter, priority: 0, policy: :drop, rules: rules}]}
+  def add_fw_set(state, name, type) do
+    %{state | fw_sets: state.fw_sets ++ [{to_string(name), type}]}
   end
 
-  defp firewall_profile(:standard, opts) do
-    allow_tcp = Keyword.get(opts, :allow_tcp, [])
-    allow_udp = Keyword.get(opts, :allow_udp, [])
-
-    rules =
-      [:ct_established_accept, :icmp_accept, {:udp_accept, 53}] ++
-        Enum.map(allow_tcp, &{:tcp_accept, &1}) ++
-        Enum.map(allow_udp, &{:udp_accept, &1}) ++
-        [:accept]
-
-    %{chains: [%{name: "inbound", hook: :input, type: :filter, priority: 0, policy: :drop, rules: rules}]}
+  def set_guard(state, guard) when is_map(guard) do
+    %{state | guard: guard}
   end
 
-  defp firewall_profile(:open, _opts) do
-    %{chains: [%{name: "inbound", hook: :input, type: :filter, priority: 0, policy: :accept, rules: []}]}
+  def set_watch(state, watch) when is_map(watch) do
+    %{state | watch: watch}
+  end
+
+  def set_caps(state, caps) when is_list(caps) do
+    %{state | caps: caps}
   end
 
   def set_limits(state, limits) when is_map(limits) do
@@ -155,13 +154,38 @@ defmodule Erlkoenig.Container.Builder do
     opts = if state.ports != [], do: Map.put(opts, :ports, state.ports), else: opts
     opts = if state.args != [], do: Map.put(opts, :args, state.args), else: opts
     opts = if state.env != %{}, do: Map.put(opts, :env, state.env), else: opts
-    opts = if state.firewall != %{}, do: Map.put(opts, :firewall, state.firewall), else: opts
+    opts = if state.fw_rules do
+      fw_term = %{
+        chains: [%{
+          name: "inbound",
+          hook: :input,
+          type: :filter,
+          priority: 0,
+          policy: :drop,
+          rules: state.fw_rules
+        }]
+      }
+      fw_term = if state.fw_counters != [], do: Map.put(fw_term, :counters, state.fw_counters), else: fw_term
+      fw_term = if state.fw_sets != [], do: Map.put(fw_term, :sets, state.fw_sets), else: fw_term
+      Map.put(opts, :firewall, fw_term)
+    else
+      opts
+    end
+    opts = if state.guard, do: Map.put(opts, :guard, state.guard), else: opts
+    opts = if state.watch, do: Map.put(opts, :watch, state.watch), else: opts
     opts = if state.limits != %{}, do: Map.put(opts, :limits, state.limits), else: opts
     opts = if state.seccomp, do: Map.put(opts, :seccomp, state.seccomp), else: opts
+    opts = if state.caps != [], do: Map.put(opts, :caps, state.caps), else: opts
     opts = if state.restart, do: Map.put(opts, :restart, state.restart), else: opts
     opts = if state.files != %{}, do: Map.put(opts, :files, state.files), else: opts
     opts = if state.health_check, do: Map.put(opts, :health_check, state.health_check), else: opts
     opts = if state.zone, do: Map.put(opts, :zone, state.zone), else: opts
+
+    opts = case state.signature do
+      nil       -> opts
+      :required -> Map.put(opts, :signature_required, true)
+      path      -> Map.put(opts, :sig_path, path)
+    end
 
     # DNS name: use explicit dns_name, or fall back to container definition name
     name = state.dns_name || state.name

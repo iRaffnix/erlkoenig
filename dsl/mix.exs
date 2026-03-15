@@ -19,7 +19,7 @@ defmodule ErlkoenigEx.MixProject do
   end
 
   def application do
-    [extra_applications: [:logger]]
+    [extra_applications: [:logger, :crypto, :public_key]]
   end
 
   defp deps do

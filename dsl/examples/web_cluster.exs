@@ -1,10 +1,6 @@
 defmodule WebCluster do
   use Erlkoenig.DSL
 
-  defaults do
-    firewall :standard
-  end
-
   container :web_api do
     binary "/opt/bin/api_server"
     ip {10, 0, 0, 10}
@@ -14,7 +10,14 @@ defmodule WebCluster do
     seccomp :standard
     restart {:on_failure, 5}
     health_check port: 80, interval: 10_000, retries: 3
-    firewall :strict, allow_tcp: [80, 443]
+
+    firewall do
+      accept :established
+      accept :icmp
+      accept_tcp 80
+      accept_tcp 443
+      log_and_drop "DROP: "
+    end
   end
 
   container :worker do
@@ -24,6 +27,13 @@ defmodule WebCluster do
     limits cpu: 4, memory: "1G"
     seccomp :standard
     restart :on_failure
+
+    firewall do
+      accept :established
+      accept :icmp
+      accept_udp 53
+      accept :all
+    end
   end
 
   container :cache do
@@ -33,7 +43,13 @@ defmodule WebCluster do
     seccomp :strict
     restart :always
     health_check port: 6379, interval: 5000, retries: 5
-    firewall :strict, allow_tcp: [6379]
+
+    firewall do
+      accept :established
+      accept :icmp
+      accept_tcp 6379
+      log_and_drop "DROP: "
+    end
   end
 
 end

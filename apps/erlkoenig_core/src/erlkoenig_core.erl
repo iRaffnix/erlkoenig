@@ -38,7 +38,8 @@
          remove_health_check/1,
          health_status/0,
          subscribe/2,
-         unsubscribe/2]).
+         unsubscribe/2,
+         find_by_id/1]).
 
 -export_type([container_id/0, container_pid/0, spawn_opts/0,
               container_info/0, net_info/0, exit_info/0,
@@ -158,6 +159,26 @@ list() ->
 inspect(Pid) ->
     try erlkoenig_ct:get_info(Pid)
     catch exit:{noproc, _} -> {error, not_found}
+    end.
+
+%% @doc Find a container PID by its ID (binary string).
+-spec find_by_id(binary()) -> {ok, pid()} | {error, not_found}.
+find_by_id(Id) ->
+    Pids = try pg:get_members(erlkoenig_pg, erlkoenig_cts)
+           catch error:_ -> []
+           end,
+    find_pid_by_id(Pids, Id).
+
+find_pid_by_id([], _Id) -> {error, not_found};
+find_pid_by_id([Pid | Rest], Id) ->
+    try
+        Info = erlkoenig_ct:get_info(Pid),
+        case maps:get(id, Info, undefined) of
+            Id -> {ok, Pid};
+            _  -> find_pid_by_id(Rest, Id)
+        end
+    catch
+        _:_ -> find_pid_by_id(Rest, Id)
     end.
 
 %% @doc Get live resource stats for a container (cgroup v2).

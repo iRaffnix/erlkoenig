@@ -90,7 +90,11 @@
     files         = #{}        :: #{binary() => binary()},
     handshake     = false      :: boolean(),
     pty           = false      :: boolean(),
-    extra_opts    = #{}        :: map()
+    firewall      = #{}        :: map(),
+    extra_opts    = #{}        :: map(),
+    sig_path      = undefined  :: binary() | undefined,
+    sig_verified  = false      :: boolean(),
+    sig_meta      = undefined  :: map() | undefined
 }).
 
 -define(SPAWN_TIMEOUT, application:get_env(erlkoenig_core, spawn_timeout, 30_000)).
@@ -159,9 +163,12 @@ init({BinaryPath, Opts}) ->
         name        = maps:get(name, Opts, undefined),
         files       = maps:get(files, Opts, #{}),
         pty         = maps:get(pty, Opts, false),
+        firewall    = maps:get(firewall, Opts, #{}),
+        sig_path    = maps:get(sig_path, Opts, undefined),
         extra_opts  = maps:without([args, env, uid, gid, ip, restart,
                                     limits, seccomp, caps, output, name,
-                                    files, zone, pty], Opts)
+                                    files, zone, pty, firewall, sig_path,
+                                    signature_required], Opts)
     },
     {ok, creating, Data}.
 
@@ -194,8 +201,14 @@ creating(info, {Port, {data, Reply}}, #ct_data{port = Port, handshake = false} =
     %% First message: protocol handshake reply
     case erlkoenig_proto:check_handshake_reply(Reply) of
         ok ->
-            creating_send_spawn(Data),
-            {keep_state, Data#ct_data{handshake = true}};
+            case maybe_verify_signature(Data) of
+                {ok, Data2} ->
+                    creating_send_spawn(Data2),
+                    {keep_state, Data2#ct_data{handshake = true}};
+                {error, SigReason} ->
+                    {next_state, failed,
+                     Data#ct_data{error_reason = {signature_rejected, SigReason}}}
+            end;
         {error, Reason} ->
             {next_state, failed,
              Data#ct_data{error_reason = Reason}}
@@ -583,7 +596,7 @@ do_container_net_setup(#ct_data{port = Port, id = Id, ip = Ip,
     end,
     case NetResult of
         {ok, NetInfo} ->
-            firewall_add(Id, NetInfo, Data#ct_data.extra_opts),
+            firewall_add(Id, NetInfo, Data#ct_data.firewall),
             write_container_files(Port, Data#ct_data.files),
             port_command(Port, erlkoenig_proto:encode_cmd_go()),
             Data2 = case Ip of
@@ -727,9 +740,8 @@ safe_port_close(_) ->
 %% -- Firewall (direct nft integration) ----------------------------
 
 -spec firewall_add(binary(), map(), map()) -> ok.
-firewall_add(ContainerId, #{ip := Ip, host_veth := Veth} = _NetInfo, ExtraOpts) ->
-    Ports = maps:get(ports, ExtraOpts, []),
-    FwTerm = maps:get(firewall, ExtraOpts, #{}),
+firewall_add(ContainerId, #{ip := Ip, host_veth := Veth} = _NetInfo, FwTerm) ->
+    Ports = [],  %% Port mappings handled via firewall term
     case erlkoenig_firewall_nft:add_container(ContainerId, Ip, Veth, Ports, FwTerm) of
         ok -> ok;
         {error, Reason} ->
@@ -1026,3 +1038,69 @@ maybe_reply_stop(#ct_data{from = undefined} = Data, _Reply) ->
 maybe_reply_stop(#ct_data{from = From} = Data, Reply) ->
     gen_statem:reply(From, Reply),
     Data#ct_data{from = undefined}.
+
+%% --- Signature verification ---
+
+-spec maybe_verify_signature(#ct_data{}) -> {ok, #ct_data{}} | {error, term()}.
+maybe_verify_signature(Data) ->
+    case erlkoenig_pki:mode() of
+        off ->
+            {ok, Data};
+        Mode ->
+            SigPath = resolve_sig_path(Data),
+            case erlkoenig_sig:verify(Data#ct_data.binary_path, SigPath) of
+                {ok, Meta} ->
+                    erlkoenig_audit:log(#{
+                        type => binary_verify,
+                        subject => Data#ct_data.id,
+                        result => ok,
+                        details => maps:without([chain], Meta)
+                    }),
+                    case erlkoenig_pki:verify_chain(maps:get(chain, Meta)) of
+                        ok ->
+                            {ok, Data#ct_data{sig_verified = true, sig_meta = Meta}};
+                        {error, ChainErr} when Mode =:= warn ->
+                            logger:warning("[~s] chain verification failed: ~p (warn mode)",
+                                          [Data#ct_data.id, ChainErr]),
+                            erlkoenig_audit:log(#{
+                                type => binary_verify,
+                                subject => Data#ct_data.id,
+                                result => {error, ChainErr},
+                                details => #{mode => warn}
+                            }),
+                            {ok, Data};
+                        {error, ChainErr} ->
+                            erlkoenig_audit:log(#{
+                                type => binary_reject,
+                                subject => Data#ct_data.id,
+                                result => {error, ChainErr},
+                                details => #{binary => Data#ct_data.binary_path}
+                            }),
+                            {error, {chain_invalid, ChainErr}}
+                    end;
+                {error, Err} when Mode =:= warn ->
+                    logger:warning("[~s] signature verification failed: ~p (warn mode)",
+                                  [Data#ct_data.id, Err]),
+                    erlkoenig_audit:log(#{
+                        type => binary_verify,
+                        subject => Data#ct_data.id,
+                        result => {error, Err},
+                        details => #{mode => warn}
+                    }),
+                    {ok, Data};
+                {error, Err} ->
+                    erlkoenig_audit:log(#{
+                        type => binary_reject,
+                        subject => Data#ct_data.id,
+                        result => {error, Err},
+                        details => #{binary => Data#ct_data.binary_path}
+                    }),
+                    {error, Err}
+            end
+    end.
+
+-spec resolve_sig_path(#ct_data{}) -> binary().
+resolve_sig_path(#ct_data{sig_path = undefined, binary_path = Bin}) ->
+    <<Bin/binary, ".sig">>;
+resolve_sig_path(#ct_data{sig_path = Path}) ->
+    Path.

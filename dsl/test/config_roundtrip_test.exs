@@ -33,21 +33,21 @@ defmodule Erlkoenig.ConfigRoundtripTest do
 
     # 01: Lifecycle
     container :lifecycle do
-      binary "/usr/lib/erlkoenig/demo/test-erlkoenig-sleeper"
+      binary "/opt/erlkoenig/rt/demo/test-erlkoenig-sleeper"
       ip {10, 0, 0, 1}
       args ["5"]
     end
 
     # 02: Networking
     container :echo_net do
-      binary "/usr/lib/erlkoenig/demo/test-erlkoenig-echo_server"
+      binary "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server"
       ip {10, 0, 0, 10}
       args ["7001"]
     end
 
     # 03: Port forwarding
     container :echo_ports do
-      binary "/usr/lib/erlkoenig/demo/test-erlkoenig-echo_server"
+      binary "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server"
       ip {10, 0, 0, 20}
       args ["7777"]
       ports [{9080, 7777}]
@@ -55,7 +55,7 @@ defmodule Erlkoenig.ConfigRoundtripTest do
 
     # 04: Memory limits
     container :mem_limited do
-      binary "/usr/lib/erlkoenig/demo/test-erlkoenig-sleeper"
+      binary "/opt/erlkoenig/rt/demo/test-erlkoenig-sleeper"
       ip {10, 0, 0, 30}
       args ["30"]
       limits memory: "32M"
@@ -63,7 +63,7 @@ defmodule Erlkoenig.ConfigRoundtripTest do
 
     # 05: PID limits
     container :pid_limited do
-      binary "/usr/lib/erlkoenig/demo/test-erlkoenig-sleeper"
+      binary "/opt/erlkoenig/rt/demo/test-erlkoenig-sleeper"
       ip {10, 0, 0, 40}
       args ["30"]
       limits pids: 10
@@ -71,7 +71,7 @@ defmodule Erlkoenig.ConfigRoundtripTest do
 
     # 06: Restart
     container :restarter do
-      binary "/usr/lib/erlkoenig/demo/test-erlkoenig-sleeper"
+      binary "/opt/erlkoenig/rt/demo/test-erlkoenig-sleeper"
       ip {10, 0, 0, 50}
       args ["1"]
       restart {:on_failure, 3}
@@ -79,7 +79,7 @@ defmodule Erlkoenig.ConfigRoundtripTest do
 
     # 07: Seccomp
     container :seccomp_echo do
-      binary "/usr/lib/erlkoenig/demo/test-erlkoenig-echo_server"
+      binary "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server"
       ip {10, 0, 0, 60}
       args ["7777"]
       seccomp :standard
@@ -87,7 +87,7 @@ defmodule Erlkoenig.ConfigRoundtripTest do
 
     # 08: File injection
     container :file_inject do
-      binary "/usr/lib/erlkoenig/demo/test-erlkoenig-sleeper"
+      binary "/opt/erlkoenig/rt/demo/test-erlkoenig-sleeper"
       ip {10, 0, 0, 70}
       args ["30"]
       files %{
@@ -98,27 +98,27 @@ defmodule Erlkoenig.ConfigRoundtripTest do
 
     # 09: DNS
     container :webserver do
-      binary "/usr/lib/erlkoenig/demo/test-erlkoenig-echo_server"
+      binary "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server"
       ip {10, 0, 0, 80}
       args ["7001"]
     end
 
     container :database do
-      binary "/usr/lib/erlkoenig/demo/test-erlkoenig-echo_server"
+      binary "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server"
       ip {10, 0, 0, 81}
       args ["7002"]
     end
 
     # 10: Firewall
     container :fw_open do
-      binary "/usr/lib/erlkoenig/demo/test-erlkoenig-echo_server"
+      binary "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server"
       ip {10, 0, 0, 90}
       args ["7001"]
       firewall :standard
     end
 
     container :fw_strict do
-      binary "/usr/lib/erlkoenig/demo/test-erlkoenig-echo_server"
+      binary "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server"
       ip {10, 0, 0, 91}
       args ["7002"]
       firewall :strict, allow_tcp: [7002]
@@ -126,7 +126,7 @@ defmodule Erlkoenig.ConfigRoundtripTest do
 
     # 11: Output capture (just needs binary + ip)
     container :output_ct do
-      binary "/usr/lib/erlkoenig/demo/test-erlkoenig-sleeper"
+      binary "/opt/erlkoenig/rt/demo/test-erlkoenig-sleeper"
       ip {10, 0, 0, 100}
       args ["2"]
     end

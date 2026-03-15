@@ -2,7 +2,7 @@
 
 Everything is `make`. One Makefile, no wrapper scripts, no plugins.
 The Makefile orchestrates three toolchains (CMake for C, rebar3 for
-Erlang, Mix for the Elixir DSL) and two deploy targets.
+Erlang, Mix for the Elixir DSL).
 
 ## Quick start
 
@@ -27,10 +27,10 @@ make release     # OTP release tarball
 | Target | What it does | Root needed |
 |--------|-------------|-------------|
 | `make all` | `rt` + `erl` + `check` + `release` | no |
-| `make rt` | C runtime via CMake + musl-gcc → `build/release/erlkoenig_rt` (68 KB static binary) | no |
-| `make rt-san` | C runtime with AddressSanitizer + UBSan → `build/san/erlkoenig_rt` | no |
-| `make erl` | `rebar3 compile` — all Erlang apps | no |
-| `make release` | OTP release tarball → `dist/erlkoenig-*.tar.gz` + `dist/erlkoenig-dsl` | no |
+| `make rt` | C runtime via CMake + musl-gcc -> `build/release/erlkoenig_rt` (68 KB static binary) | no |
+| `make rt-san` | C runtime with AddressSanitizer + UBSan -> `build/san/erlkoenig_rt` | no |
+| `make erl` | `rebar3 compile` -- all Erlang apps | no |
+| `make release` | OTP release tarball -> `dist/erlkoenig-*.tar.gz` + `dist/erlkoenig-dsl` | no |
 | `make dsl` | Elixir DSL (`mix compile`) | no |
 | `make dsl-escript` | Standalone DSL binary (1.4 MB, needs only `erl`) | no |
 | `make go-demos` | Static Go binaries (echo-server, reverse-proxy, api-server) | no |
@@ -39,21 +39,35 @@ make release     # OTP release tarball
 
 | Target | What it does | Root needed |
 |--------|-------------|-------------|
-| `make check` | `test` + `dialyzer` + `test-dsl` — all tests without root | no |
-| `make test` | `rebar3 eunit` — Erlang unit tests | no |
+| `make check` | `test` + `dialyzer` + `test-dsl` -- all tests without root | no |
+| `make test` | `rebar3 eunit` -- Erlang unit tests | no |
 | `make dialyzer` | Dialyzer type analysis (filters noise, fails on real errors) | no |
-| `make test-dsl` | `mix test` — Elixir DSL tests (compiles all examples) | no |
+| `make test-dsl` | `mix test` -- Elixir DSL tests (compiles all examples) | no |
 | `make test-rt` | C runtime unit tests (libcheck, 12 tests) | **yes** (namespaces, mounts) |
 | `make integration` | Integration tests (escripts, real containers) | **yes** |
 
-### Deploy
+### Install
 
-| Target | What it does | Root needed |
-|--------|-------------|-------------|
-| `make deploy` | `deploy-rt` + `deploy-erl` (in order) | remote root |
-| `make deploy-rt` | scp binary + setcap capabilities | remote root |
-| `make deploy-erl` | scp release + systemd restart | remote root |
-| `make verify` | Post-deploy smoke tests via SSH | no (SSH) |
+Install from a GitHub Release or local CI artifacts:
+
+```bash
+# From GitHub release
+sudo sh install.sh --version v0.2.0
+
+# From local CI artifacts (testing)
+sudo sh install.sh --local /tmp/artifacts
+```
+
+See [INSTALL.md](INSTALL.md) for details.
+
+### Release
+
+Tag a release (from `main` only):
+
+```bash
+make tag VERSION=0.2.0
+git push origin main v0.2.0
+```
 
 ### Clean
 
@@ -90,10 +104,10 @@ The output is a fully static ELF binary. It runs on any Linux kernel
 
 > **Warning:** These binaries (`crasher`, `mem_eater`, etc.) are
 > designed to crash, consume RAM, or attempt forbidden syscalls.
-> They exist to test container isolation — **do not run them on a
+> They exist to test container isolation -- **do not run them on a
 > host system outside of an Erlkoenig container.**
 
-On the server they are deployed to `/usr/lib/erlkoenig/demo/` with
+On the server they are installed to `/opt/erlkoenig/rt/demo/` with
 `chmod 700` (root-only). They are not included in the OTP release
 tarball and are never added to `$PATH`.
 
@@ -122,7 +136,7 @@ build/san/erlkoenig_rt
 ```
 
 This uses the system gcc (not musl-gcc) and links dynamically.
-Only for development — the output is not deployable.
+Only for development -- the output is not deployable.
 
 ### C runtime tests
 
@@ -147,7 +161,7 @@ apps/
 └── erlkoenig_core/    Control plane (containers, zones, networking)
 
 # External dependency (fetched by rebar3):
-# erlkoenig_nft — Firewall engine (https://github.com/iRaffnix/erlkoenig_nft)
+# erlkoenig_nft -- Firewall engine (https://github.com/iRaffnix/erlkoenig_nft)
 ```
 
 ```bash
@@ -168,11 +182,11 @@ The DSL lives in `dsl/` and compiles `.exs` files into Erlang term files:
 
 ```bash
 make dsl             # mix compile
-make dsl-escript     # standalone binary → dsl/erlkoenig-dsl
+make dsl-escript     # standalone binary -> dsl/erlkoenig-dsl
 make test-dsl        # mix test (compiles all examples)
 ```
 
-The escript bundles the Elixir compiler — the output binary (1.4 MB)
+The escript bundles the Elixir compiler -- the output binary (1.4 MB)
 needs only `erl` on the target system, not Elixir.
 
 ## OTP Release
@@ -189,9 +203,9 @@ dist/
 └── erlkoenig-dsl             Standalone DSL binary (1.4 MB)
 ```
 
-The release includes ERTS — no Erlang installation needed on the
-target server. The C runtime is **not** included; it's deployed
-separately via `make deploy-rt`.
+The release includes ERTS -- no Erlang installation needed on the
+target server. The C runtime is **not** included; it's installed
+separately via `install.sh`.
 
 ### Release overlay
 
@@ -212,67 +226,12 @@ examples/
 └── ... (11 .exs files)
 ```
 
-## Deploy
-
-Deploy requires two SSH hosts pointing to the same server:
-
-```bash
-# In ~/.ssh/config:
-Host erlk-trixie__root
-    HostName server.example.com
-    User root
-
-Host erlk-trixie__erlkoenig
-    HostName server.example.com
-    User erlkoenig
-```
-
-Root is needed for `setcap` and `systemctl`. Everything else runs
-as the unprivileged `erlkoenig` user.
-
-```bash
-# Deploy everything
-make deploy
-
-# Or override hosts
-make deploy HOST_ROOT=root@myserver HOST_ERL=erlkoenig@myserver
-```
-
-### What deploy-rt does
-
-1. Build `erlkoenig_rt` (static musl) + Go demo binaries
-2. `scp` to `/usr/lib/erlkoenig/` on the server
-3. `setcap` with 10 capabilities:
-   `cap_sys_admin`, `cap_net_admin`, `cap_sys_chroot`, `cap_sys_ptrace`,
-   `cap_setpcap`, `cap_setuid`, `cap_setgid`, `cap_dac_override`,
-   `cap_bpf`, `cap_sys_resource`
-4. Copy to release dir if it exists (for running systems)
-
-### What deploy-erl does
-
-1. Build OTP release tarball + DSL escript
-2. `scp` tarball to server as `erlkoenig` user
-3. Extract to `/opt/erlkoenig/`
-4. Fix escript shebang to use bundled ERTS
-5. Copy DSL examples and Vim syntax files
-6. Generate cookie if first deploy (random 32-char base64)
-7. As root: install systemd unit, restart service
-
-### Post-deploy verification
-
-```bash
-make verify
-```
-
-Runs `scripts/verify-deploy.sh` on the server via SSH. Checks:
-security (capabilities, permissions), operator shell, DSL compilation,
-bash completion, Vim syntax, and a live container spawn.
-
 ## Directory layout
 
 ```
 Makefile                 The one Makefile
 rebar.config             Erlang build config + release overlay
+install.sh               Production installer (ships with releases)
 c-runtime/               C source (rt, namespaces, seccomp, netcfg)
   CMakeLists.txt         CMake build for C runtime
   test/                  libcheck test suite
@@ -284,8 +243,6 @@ dsl/                     Elixir DSL
   vim/                   Vim syntax highlighting
 demos/                   Go demo binaries (echo, proxy, api)
 integration-tests/       Integration test scripts
-packaging/               systemd unit, activate script, PKGBUILD
-scripts/                 Deploy verification
 docs/                    Public documentation
 docs-intern/             Internal documentation (gitignored)
 ```

@@ -12,7 +12,7 @@ defmodule ThreeTierLive do
   """
 
   container :db do
-    binary "/usr/lib/erlkoenig/rqlited"
+    binary "/opt/erlkoenig/rt/rqlited"
     ip {10, 0, 0, 30}
     args ["-node-id", "1",
           "-http-addr", "10.0.0.30:4001",
@@ -24,7 +24,7 @@ defmodule ThreeTierLive do
   end
 
   container :api do
-    binary "/usr/lib/erlkoenig/api-server"
+    binary "/opt/erlkoenig/rt/api-server"
     ip {10, 0, 0, 20}
     args ["8080", "http://10.0.0.30:4001"]
     limits cpu: 1, memory: "64M", pids: 50
@@ -33,7 +33,7 @@ defmodule ThreeTierLive do
   end
 
   container :proxy do
-    binary "/usr/lib/erlkoenig/reverse-proxy"
+    binary "/opt/erlkoenig/rt/reverse-proxy"
     ip {10, 0, 0, 10}
     args [":8080", "http://10.0.0.20:8080"]
     ports [{80, 8080}]

@@ -2,7 +2,7 @@ defmodule SimpleEcho do
   use Erlkoenig.DSL
 
   container :echo do
-    binary "/usr/lib/erlkoenig/demo/test-erlkoenig-echo_server"
+    binary "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server"
     ip {10, 0, 0, 5}
     args ["7777"]
     ports [{9080, 7777}]

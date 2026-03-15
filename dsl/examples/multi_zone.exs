@@ -19,7 +19,7 @@ defmodule MultiZone do
 
   # Public-facing echo server in the frontend zone
   container :web do
-    binary "/usr/lib/erlkoenig/demo/test-erlkoenig-echo_server"
+    binary "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server"
     zone :frontend
     ip {10, 0, 1, 10}
     args ["8080"]
@@ -29,7 +29,7 @@ defmodule MultiZone do
 
   # Internal worker in the backend zone (no port mapping = not reachable from host)
   container :worker do
-    binary "/usr/lib/erlkoenig/demo/test-erlkoenig-echo_server"
+    binary "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server"
     zone :backend
     ip {10, 0, 2, 10}
     args ["9090"]

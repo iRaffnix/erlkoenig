@@ -22,7 +22,6 @@ defmodule ThreeTier do
 
   Setup:
 
-      source /opt/erlkoenig/activate
       ek-net create dmz  10.0.1.0/24
       ek-net create app  10.0.2.0/24
       ek-net create data 10.0.3.0/24 isolate
@@ -40,7 +39,7 @@ defmodule ThreeTier do
   # === DMZ: public-facing reverse proxy ===
 
   container :proxy do
-    binary "/usr/lib/erlkoenig/demo/test-erlkoenig-echo_server"
+    binary "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server"
     zone :dmz
     ip {10, 0, 1, 10}
     args ["8080"]
@@ -54,7 +53,7 @@ defmodule ThreeTier do
   # === App: internal application tier ===
 
   container :api do
-    binary "/usr/lib/erlkoenig/demo/test-erlkoenig-echo_server"
+    binary "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server"
     zone :app
     ip {10, 0, 2, 10}
     args ["4000"]
@@ -65,7 +64,7 @@ defmodule ThreeTier do
   end
 
   container :worker do
-    binary "/usr/lib/erlkoenig/demo/test-erlkoenig-echo_server"
+    binary "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server"
     zone :app
     ip {10, 0, 2, 20}
     args ["5000"]
@@ -77,7 +76,7 @@ defmodule ThreeTier do
   # === Data: isolated storage tier ===
 
   container :cache do
-    binary "/usr/lib/erlkoenig/demo/test-erlkoenig-echo_server"
+    binary "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server"
     zone :data
     ip {10, 0, 3, 10}
     args ["6379"]

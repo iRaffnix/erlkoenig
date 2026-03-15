@@ -18,6 +18,9 @@ erlkoenig_sup (rest_for_one)
 ├── erlkoenig_cgroup                 cgroups v2 manager
 ├── erlkoenig_events                 gen_event lifecycle bus
 ├── erlkoenig_health                 TCP liveness probes
+├── erlkoenig_audit                  Append-only security event log
+├── erlkoenig_pki                    X.509 trust store + chain validation
+├── erlkoenig_ctl                    Unix socket management interface
 └── erlkoenig_ct_sup (simple_one_for_one)
     └── erlkoenig_ct                 One gen_statem per container
 ```
@@ -64,6 +67,13 @@ containing the child's OS PID and netns path.
 
 The child is now alive in its namespaces but **blocked** — it hasn't called
 `exec()` yet. It waits for `CMD_GO`.
+
+Before sending `CMD_GO`, the control plane verifies the binary signature
+(if `signature mode` is `on`). The SHA-256 hash is checked against the
+`.sig` file, the Ed25519 signature is validated, and the X.509 certificate
+chain is verified against the configured trust roots. If any check fails,
+the container transitions to `failed` and the event is recorded in the
+audit log.
 
 ### State: `namespace_ready`
 
@@ -282,6 +292,18 @@ IP assignment — all done via `AF_NETLINK` sockets from Erlang. No
 `os:cmd("ip link add ...")`. This eliminates shell injection risks, removes
 the `iproute2` dependency, and is faster (no fork+exec per operation).
 
+**Unix socket, not Erlang distribution.** Management happens over
+`/run/erlkoenig/ctl.sock`, not via `epmd` or the Erlang distribution
+protocol. No TCP ports for administration. Permissions enforced by the
+kernel (filesystem permissions on the socket file). Every command is
+logged to the audit log.
+
+**Signature verification at exec(), not at deployment.** Most container
+runtimes verify image signatures when pulling from a registry or via an
+admission controller. Erlkoenig verifies at the moment of execution —
+including after automatic crash restarts. An attacker who replaces a
+binary between restarts is caught.
+
 **Temporary children with self-managed restarts.** OTP's built-in restart
 strategies are designed for long-lived services. Container restart policies
 need exponential backoff, max-retry limits, and failure classification
@@ -308,7 +330,11 @@ gives full control without fighting the supervisor.
 | `erlkoenig_health` | TCP probes with configurable retry and restart trigger |
 | `erlkoenig_firewall_nft` | Per-container nf_tables chains |
 | `erlkoenig_events` | gen_event bus for lifecycle hooks |
-| `ek` | Operator shell (`ps`, `top`, `inspect`, `logs`) |
+| `erlkoenig_audit` | Append-only JSON Lines security event log |
+| `erlkoenig_pki` | X.509 trust store, certificate chain validation |
+| `erlkoenig_sig` | Ed25519 binary signing and verification |
+| `erlkoenig_ctl` | Unix socket management server (`/run/erlkoenig/ctl.sock`) |
+| `erlkoenig_ctl_proto` | Binary request/response protocol for ctl socket |
 
 ### C Runtime
 

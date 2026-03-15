@@ -127,12 +127,8 @@ $ ls -lh echo
 
 Copy the binary to the server and spawn a container:
 
-```erlang
-{ok, Pid} = erlkoenig_core:spawn(<<"/opt/bin/echo">>, #{
-    name => <<"echo">>,
-    ip   => {10, 0, 0, 10},
-    args => [<<"8080">>]
-}).
+```bash
+erlkoenig spawn /opt/bin/echo --ip 10.0.0.10 --args 8080
 ```
 
 Test from the host:

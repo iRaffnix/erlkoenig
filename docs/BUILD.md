@@ -215,7 +215,6 @@ The release tarball includes documentation and examples:
 doc/
 ├── README.md
 ├── ARCHITECTURE.md
-├── ROADMAP.md
 └── STATIC_BINARIES.md
 
 examples/

@@ -49,8 +49,7 @@ sudo sh install.sh --local /tmp/artifacts
 4. Extracts OTP release to `/opt/erlkoenig/`
 5. Installs DSL escript (if present in artifacts)
 6. Installs demo binaries to `/opt/erlkoenig/rt/demo/` (if present)
-7. Generates Erlang cookie on first install
-8. Installs and enables systemd service
+7. Installs and configures systemd service
 
 ## Verify
 
@@ -80,7 +79,8 @@ getcap /opt/erlkoenig/rt/erlkoenig_rt
 └── demo/                  C test binaries (optional, root-only)
 
 /etc/erlkoenig/
-└── vm.args                Erlang VM config + cookie
+├── ca/                    Trust root certificates (for binary signing)
+└── vm.args                Erlang VM config
 ```
 
 ## Usage
@@ -89,11 +89,13 @@ getcap /opt/erlkoenig/rt/erlkoenig_rt
 # Start the service
 sudo systemctl start erlkoenig
 
-# Connect to the running node
-/opt/erlkoenig/bin/erlkoenig remote_console
+# Deploy a stack
+erlkoenig deploy stack.exs
 
-# Load a DSL config
-/opt/erlkoenig/bin/erlkoenig-dsl examples/simple_echo.exs
+# Manage containers
+erlkoenig ps
+erlkoenig status
+erlkoenig audit
 ```
 
 ## Uninstall
@@ -101,7 +103,7 @@ sudo systemctl start erlkoenig
 ```bash
 sudo systemctl stop erlkoenig
 sudo systemctl disable erlkoenig
-sudo rm /usr/lib/systemd/system/erlkoenig.service
+sudo rm /etc/systemd/system/erlkoenig.service
 sudo systemctl daemon-reload
 sudo rm -rf /opt/erlkoenig /etc/erlkoenig
 sudo userdel -r erlkoenig
@@ -116,9 +118,6 @@ If empty, re-run: `sudo setcap cap_sys_admin,... /opt/erlkoenig/rt/erlkoenig_rt`
 **"Cannot bind to port 53":**
 The BEAM needs `CAP_NET_BIND_SERVICE`. Check the systemd unit has
 `AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE`.
-
-**Cookie mismatch on remote_console:**
-Ensure `VMARGS_PATH=/etc/erlkoenig/vm.args` is set in the environment.
 
 **Release doesn't start:**
 Check the journal: `journalctl -u erlkoenig -e`. Common issue:

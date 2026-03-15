@@ -72,11 +72,6 @@ end
 Deploy, inspect, and manage your containers live without restarting the daemon.
 
 ```bash
-source /opt/erlkoenig/activate
-ek-load mystack.exs     # compile + start
-ek-reload mystack.exs   # delta update (no downtime)
-ek-export backup.exs    # running state → config file
-
 $ /opt/erlkoenig/bin/erlkoenig remote_console
 
 1> ek:ps().
@@ -129,12 +124,19 @@ make rt          # C runtime (static musl binary, 68 KB)
 make erl         # Erlang control plane
 make check       # all tests without root (eunit + dialyzer + DSL)
 make release     # OTP release tarball
-make deploy      # ship to server (scp + setcap + systemd)
 ```
 See [**docs/BUILD.md**](docs/BUILD.md) and [**docs/STATIC_BINARIES.md**](docs/STATIC_BINARIES.md) for details.
 
 ### Install from Release
-Don't want to build from source? Grab the pre-built release. It includes its own Erlang runtime — no dependencies, no conflicts with a system Erlang. See [**docs/INSTALL.md**](docs/INSTALL.md).
+Don't want to build from source? Download, review, run:
+
+```bash
+curl -fsSL -o install.sh https://github.com/iRaffnix/erlkoenig/releases/latest/download/install.sh
+less install.sh        # review first
+sudo sh install.sh --version v0.1.0
+```
+
+See [**docs/INSTALL.md**](docs/INSTALL.md) for details.
 
 ## Roadmap: Active Development
 

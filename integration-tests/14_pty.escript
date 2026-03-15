@@ -220,7 +220,7 @@ assert_file_exists(Path) ->
     end.
 
 %% Find erlkoenig_rt binary.
-%% Search order: $ERLKOENIG_RT_PATH -> /usr/lib/erlkoenig -> build/release
+%% Search order: $ERLKOENIG_RT_PATH -> /opt/erlkoenig/rt -> build/release
 find_rt(ProjectDir) ->
     case os:getenv("ERLKOENIG_RT_PATH") of
         false -> find_rt_installed(ProjectDir);
@@ -228,7 +228,7 @@ find_rt(ProjectDir) ->
     end.
 
 find_rt_installed(ProjectDir) ->
-    Installed = "/usr/lib/erlkoenig/erlkoenig_rt",
+    Installed = "/opt/erlkoenig/rt/erlkoenig_rt",
     case filelib:is_regular(Installed) of
         true  -> Installed;
         false ->
@@ -237,7 +237,7 @@ find_rt_installed(ProjectDir) ->
     end.
 
 %% Find a demo binary by short name (e.g. "stdin_echo").
-%% Search order: $ERLKOENIG_DEMO_DIR -> /usr/lib/erlkoenig/demo -> build/release/demo
+%% Search order: $ERLKOENIG_DEMO_DIR -> /opt/erlkoenig/rt/demo -> build/release/demo
 find_demo(ProjectDir, Name) ->
     BinName = "test-erlkoenig-" ++ Name,
     case os:getenv("ERLKOENIG_DEMO_DIR") of
@@ -246,7 +246,7 @@ find_demo(ProjectDir, Name) ->
     end.
 
 find_demo_installed(ProjectDir, BinName) ->
-    Installed = filename:join("/usr/lib/erlkoenig/demo", BinName),
+    Installed = filename:join("/opt/erlkoenig/rt/demo", BinName),
     case filelib:is_regular(Installed) of
         true  -> Installed;
         false ->

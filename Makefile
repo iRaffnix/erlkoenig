@@ -16,39 +16,24 @@
 #   make dsl-escript  — Standalone erlkoenig-dsl Binary (1.4 MB, braucht nur erl)
 #   make test-dsl     — Elixir-DSL Tests
 #
-# Deploy:
-#   make deploy-rt    — C-Runtime auf Zielserver (scp + setcap)
-#   make deploy-erl   — OTP Release auf Zielserver
-#   make deploy       — Beides (rt zuerst, dann erl)
-#   make verify       — Post-Deploy Smoke Tests (SSH)
+# Install:
+#   sudo sh install.sh --version vX.Y.Z
+#   sudo sh install.sh --local /tmp/artifacts
 #
-# Deploy braucht zwei SSH-Hosts (gleicher Server, zwei User):
-#   HOST_ROOT=root@server        — setcap, systemctl
-#   HOST_ERL=erlkoenig@server    — Release-Dateien, Config
+# Release:
+#   make tag VERSION=0.2.0
 #
 #   make clean        — Alles aufraeumen
 
 .PHONY: all check rt rt-san erl test test-rt dialyzer integration release \
         dsl dsl-escript test-dsl go-demos \
-        deploy deploy-rt deploy-erl verify clean clean-rt clean-erl clean-dsl
+        tag clean clean-rt clean-erl clean-dsl
 
 BUILD_DIR       := build/release
 BUILD_SAN       := build/san
 RT_BIN          := $(BUILD_DIR)/erlkoenig_rt
 RT_BIN_SAN      := $(BUILD_SAN)/erlkoenig_rt
 INT_TESTS       := integration-tests
-RT_INSTALL_DIR  := /usr/lib/erlkoenig
-ERL_INSTALL_DIR := /opt/erlkoenig
-
-# Deploy-Hosts: root fuer privilegierte Ops, erlkoenig fuer den Rest.
-# Beide muessen im SSH-Config definiert sein (gleicher Server, anderer User).
-#   make deploy HOST_ROOT=root@server HOST_ERL=erlkoenig@server
-HOST_ROOT       := erlk-trixie__root
-HOST_ERL        := erlk-trixie__erlkoenig
-# Rueckwaerts-kompatibel: HOST setzt beide
-ifdef HOST
-HOST_ROOT       := $(HOST)
-endif
 
 # ── Hauptziel ─────────────────────────────────────────────
 
@@ -152,8 +137,8 @@ test-dsl:
 #
 # OTP Release: BEAM + ERTS + erlkoenig_core + erlkoenig_nft
 # Kein Erlang auf dem Zielserver noetig.
-# C-Runtime ist NICHT enthalten — wird separat via deploy-rt installiert.
-# Discovery: {rt_path, auto} findet /usr/lib/erlkoenig/erlkoenig_rt
+# C-Runtime ist NICHT enthalten — wird separat via install.sh installiert.
+# Discovery: {rt_path, auto} findet /opt/erlkoenig/rt/erlkoenig_rt
 
 release: erl dsl-escript
 	rebar3 release
@@ -164,22 +149,6 @@ release: erl dsl-escript
 	@echo ""
 	@echo "==> dist/$$(cd dist && ls erlkoenig-*.tar.gz)"
 	@echo "==> dist/erlkoenig-dsl"
-
-# ── Deploy ───────────────────────────────────────────────
-#
-# deploy-rt:  Statisches Binary via scp + setcap (root)
-# deploy-erl: OTP Release via scp + tar + systemd
-#             Dateien als erlkoenig, privilegierte Ops als root.
-# deploy:     Beides, in der richtigen Reihenfolge.
-#
-# Zwei SSH-Hosts:
-#   HOST_ROOT  — root@server (setcap, systemctl, systemd-Unit)
-#   HOST_ERL   — erlkoenig@server (Release-Dateien, Config, Cookie)
-#
-# Ueberschreibbar:
-#   make deploy HOST_ROOT=root@server HOST_ERL=erlkoenig@server
-
-deploy: deploy-rt deploy-erl
 
 # ── Go-Demos (statisch gelinkt) ────────────────────────────────────
 
@@ -196,82 +165,40 @@ $(BUILD_DIR)/reverse-proxy: demos/reverse-proxy/main.go
 $(BUILD_DIR)/api-server: demos/api-server/main.go
 	CGO_ENABLED=0 go build -ldflags="-s -w" -o $@ $<
 
-# ── deploy-rt: Braucht root (setcap, /usr/lib ownership) ──────────
+# ── Version Tag ─────────────────────────────────────────
+CURRENT_VERSION = $(shell grep -oP '(?<=\{release, \{erlkoenig, ")[^"]+' rebar.config)
+VERSION_FILES = rebar.config apps/erlkoenig_core/src/erlkoenig_core.app.src dsl/mix.exs install.sh
 
-deploy-rt: rt go-demos
+tag:
+ifndef VERSION
+	$(error Usage: make tag VERSION=X.Y.Z)
+endif
+	@if ! echo "$(VERSION)" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$$'; then \
+		echo "Error: VERSION must be semver (e.g., 0.2.0)" >&2; exit 1; \
+	fi
+	@BRANCH=$$(git branch --show-current); \
+	if [ "$$BRANCH" != "main" ]; then \
+		echo "Error: tags are only allowed from main (currently on $$BRANCH)" >&2; \
+		echo "  git checkout main && git merge dev-rudi && make tag VERSION=$(VERSION)" >&2; \
+		exit 1; \
+	fi
+	@if [ -n "$$(git status --porcelain)" ]; then \
+		echo "Error: working tree is dirty — commit or stash first" >&2; exit 1; \
+	fi
+	@if git rev-parse "v$(VERSION)" >/dev/null 2>&1; then \
+		echo "Error: tag v$(VERSION) already exists" >&2; exit 1; \
+	fi
+	@echo "Bumping version: $(CURRENT_VERSION) -> $(VERSION)"
+	sed -i 's/{release, {erlkoenig, "[^"]*"}/{release, {erlkoenig, "$(VERSION)"}/' rebar.config
+	sed -i 's/{vsn, "[^"]*"}/{vsn, "$(VERSION)"}/' apps/erlkoenig_core/src/erlkoenig_core.app.src
+	sed -i 's/version: "[^"]*"/version: "$(VERSION)"/' dsl/mix.exs
+	sed -i 's/--version v[0-9]*\.[0-9]*\.[0-9]*/--version v$(VERSION)/' install.sh
+	git add $(VERSION_FILES)
+	git commit -m "chore: bump version to $(VERSION)"
+	git tag -a "v$(VERSION)" -m "$(if $(MSG),$(MSG),v$(VERSION))"
 	@echo ""
-	@echo "==> Deploy C-Runtime to $(HOST_ROOT):$(RT_INSTALL_DIR)"
-	ssh $(HOST_ROOT) 'mkdir -p $(RT_INSTALL_DIR)/demo'
-	scp $(RT_BIN) $(HOST_ROOT):$(RT_INSTALL_DIR)/erlkoenig_rt
-	scp $(BUILD_DIR)/demo/test-erlkoenig-* $(HOST_ROOT):$(RT_INSTALL_DIR)/demo/
-	scp $(BUILD_DIR)/echo-server $(BUILD_DIR)/reverse-proxy $(BUILD_DIR)/api-server $(HOST_ROOT):$(RT_INSTALL_DIR)/
-	ssh $(HOST_ROOT) '\
-		chown root:root $(RT_INSTALL_DIR)/erlkoenig_rt && \
-		chmod 755 $(RT_INSTALL_DIR)/erlkoenig_rt && \
-		setcap cap_sys_admin,cap_net_admin,cap_sys_chroot,cap_sys_ptrace,cap_setpcap,cap_setuid,cap_setgid,cap_dac_override,cap_bpf,cap_sys_resource+ep \
-			$(RT_INSTALL_DIR)/erlkoenig_rt && \
-		if [ -f $(ERL_INSTALL_DIR)/bin/erlkoenig_rt ]; then \
-			cp $(RT_INSTALL_DIR)/erlkoenig_rt $(ERL_INSTALL_DIR)/bin/erlkoenig_rt && \
-			setcap cap_sys_admin,cap_net_admin,cap_sys_chroot,cap_sys_ptrace,cap_setpcap,cap_setuid,cap_setgid,cap_dac_override,cap_bpf,cap_sys_resource+ep \
-				$(ERL_INSTALL_DIR)/bin/erlkoenig_rt; \
-		fi && \
-		chmod 755 $(RT_INSTALL_DIR)/echo-server $(RT_INSTALL_DIR)/reverse-proxy $(RT_INSTALL_DIR)/api-server && \
-		chown -R root:root $(RT_INSTALL_DIR)/demo && \
-		chmod 700 $(RT_INSTALL_DIR)/demo/*'
-	@echo "==> erlkoenig_rt installed on $(HOST_ROOT)"
-
-# ── deploy-erl: Dateien als erlkoenig, dann root fuer systemd ────
-
-deploy-erl: release
-	@echo ""
-	@echo "==> Deploy OTP Release (erlkoenig@) to $(ERL_INSTALL_DIR)"
-	@# ── Phase 1: Dateien als erlkoenig (kein root noetig) ──
-	scp dist/erlkoenig-*.tar.gz $(HOST_ERL):~/erlkoenig-release.tar.gz
-	scp dist/erlkoenig-dsl $(HOST_ERL):~/erlkoenig-dsl
-	ssh $(HOST_ERL) '\
-		mkdir -p $(ERL_INSTALL_DIR) && \
-		tar xzf ~/erlkoenig-release.tar.gz -C $(ERL_INSTALL_DIR) && \
-		mv ~/erlkoenig-dsl $(ERL_INSTALL_DIR)/bin/erlkoenig-dsl && \
-		chmod 755 $(ERL_INSTALL_DIR)/bin/erlkoenig-dsl && \
-		ERTS_DIR=$$(ls -d $(ERL_INSTALL_DIR)/erts-*/bin | head -1) && \
-		sed -i "1s|.*|#!$$ERTS_DIR/escript|" \
-			$(ERL_INSTALL_DIR)/bin/erlkoenig-dsl && \
-		rm ~/erlkoenig-release.tar.gz'
-	@# ── Phase 2: Cookie + vm.args als erlkoenig ──
-	ssh $(HOST_ERL) '\
-		if [ ! -f /etc/erlkoenig/vm.args ]; then \
-			COOKIE=$$(openssl rand -base64 32 | tr -d "/+=" | head -c 32) && \
-			sed "s/erlkoenig_dev/$$COOKIE/" \
-				$(ERL_INSTALL_DIR)/releases/0.1.0/vm.args \
-				> /etc/erlkoenig/vm.args && \
-			chmod 600 /etc/erlkoenig/vm.args && \
-			echo "==> Generated new cookie in /etc/erlkoenig/vm.args"; \
-		else \
-			echo "==> Keeping existing /etc/erlkoenig/vm.args"; \
-		fi && \
-		if grep -q "erlkoenig_dev" /etc/erlkoenig/vm.args 2>/dev/null; then \
-			echo "WARNING: /etc/erlkoenig/vm.args still has default cookie!"; \
-		fi'
-	@# ── Phase 3: Nur diese Schritte brauchen root ──
-	@echo "==> Activating service (root@)"
-	ssh $(HOST_ROOT) '\
-		$(ERL_INSTALL_DIR)/bin/erlkoenig-dsl --completions bash \
-			> /etc/bash_completion.d/erlkoenig-dsl 2>/dev/null || true && \
-		cp $(ERL_INSTALL_DIR)/erlkoenig.service /usr/lib/systemd/system/ && \
-		systemctl daemon-reload && \
-		pkill -x epmd 2>/dev/null; sleep 1; \
-		systemctl restart erlkoenig'
-	@echo "==> OTP Release deployed to $(ERL_INSTALL_DIR)"
-
-# ── Verify (Post-Deploy) ───────────────────────────────
-#
-# Smoke Tests via SSH: Security, ek-Shell, DSL, Completion, Vim, Container.
-# Laeuft auf dem Zielserver, prueft ob alles funktioniert.
-
-verify:
-	@echo ""
-	@echo "==> Verify deployment on $(HOST_ROOT)"
-	ssh $(HOST_ROOT) 'bash -s' < scripts/verify-deploy.sh
+	@echo "Tagged v$(VERSION). Push with:"
+	@echo "  git push origin main v$(VERSION)"
 
 # ── Clean ────────────────────────────────────────────────
 

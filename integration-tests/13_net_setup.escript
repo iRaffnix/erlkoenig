@@ -222,7 +222,7 @@ main([]) ->
     halt(0).
 
 %% Find erlkoenig_rt binary.
-%% Search order: $ERLKOENIG_RT_PATH -> /usr/lib/erlkoenig -> build/release
+%% Search order: $ERLKOENIG_RT_PATH -> /opt/erlkoenig/rt -> build/release
 find_rt() ->
     case os:getenv("ERLKOENIG_RT_PATH") of
         false -> find_rt_installed();
@@ -230,14 +230,14 @@ find_rt() ->
     end.
 
 find_rt_installed() ->
-    Installed = "/usr/lib/erlkoenig/erlkoenig_rt",
+    Installed = "/opt/erlkoenig/rt/erlkoenig_rt",
     case filelib:is_regular(Installed) of
         true  -> Installed;
         false -> filename:absname("build/release/erlkoenig_rt")
     end.
 
 %% Find a demo binary by short name (e.g. "sleeper").
-%% Search order: $ERLKOENIG_DEMO_DIR -> /usr/lib/erlkoenig/demo -> build/release/demo
+%% Search order: $ERLKOENIG_DEMO_DIR -> /opt/erlkoenig/rt/demo -> build/release/demo
 find_demo(Name) ->
     BinName = "test-erlkoenig-" ++ Name,
     case os:getenv("ERLKOENIG_DEMO_DIR") of
@@ -246,7 +246,7 @@ find_demo(Name) ->
     end.
 
 find_demo_installed(BinName) ->
-    Installed = filename:join("/usr/lib/erlkoenig/demo", BinName),
+    Installed = filename:join("/opt/erlkoenig/rt/demo", BinName),
     case filelib:is_regular(Installed) of
         true  -> Installed;
         false -> filename:absname(filename:join("build/release/demo", BinName))

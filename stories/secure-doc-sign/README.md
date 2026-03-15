@@ -23,13 +23,14 @@ installiert hat. Eine einzige Schwachstelle — und der Schlüssel ist weg.
 
 ## Die Lösung
 
-Drei Container. Drei Netzwerkzonen. Der Signaturschlüssel existiert
-ausschließlich im mittleren Container, der keinen Internetzugang hat.
+Drei Container. Komplett voneinander isoliert. Jeder in eigenen
+Linux-Namespaces (PID, NET, MNT, UTS, IPC). Der Signaturschlüssel
+existiert ausschließlich im mittleren Container, der keinen
+Internetzugang hat.
 
 ```
                 Internet
                    │
-    Zone: dmz      │      Zone: sign         Zone: store
     ┌──────────┐   │   ┌──────────────┐   ┌──────────────┐
     │   web    │◄──┘   │   signer     │   │   archive    │
     │          │──────►│              │──►│              │
@@ -49,35 +50,65 @@ Ist nur vom Web-Gateway aus erreichbar (Firewall). Kein Internetzugang.
 **archive** — Unveränderliches Protokoll. Speichert jedes signierte
 Dokument mit Hash und Zeitstempel. Nur vom Signer aus erreichbar.
 
+## Honeypot-Firewall
+
+Jeder Port der nicht explizit geöffnet ist, ist eine Falle.
+Ein einziges Paket am falschen Port — und die IP wird sofort
+für 24 Stunden gesperrt.
+
+```elixir
+firewall do
+  counters [:sign_req, :trap]
+
+  accept :established
+  accept_from {10, 0, 0, 10}             # NUR vom Web-Gateway
+  accept_tcp 8081, counter: :sign_req    # EINZIGER offener Port
+  log_and_drop "TRAP: ", counter: :trap  # Alles andere ist eine Falle
+end
+
+guard do
+  detect :port_scan, threshold: 1, window: 60  # 1 Paket = Ban
+  ban_duration 86400                             # 24 Stunden
+end
+```
+
+Was passiert wenn jemand Port 22 auf dem Signer versucht:
+
+```
+1. accept_from 10.0.0.10  → nein (andere IP)
+2. accept_tcp 8081         → nein (Port 22)
+3. log_and_drop "TRAP: "   → geloggt, DROP
+4. Guard: port_scan         → threshold 1 erreicht
+5. IP → blocklist           → 24h gesperrt
+6. Alle weiteren Pakete     → DROP (Kernel, Millisekunden)
+```
+
+Die Erkennung passiert in Echtzeit. Kein Polling, kein Cronjob.
+Der Linux-Kernel meldet den Verbindungsversuch über Conntrack-Netlink,
+der Guard reagiert sofort — in Millisekunden, nicht in Sekunden.
+
 ## Was ein Angreifer NICHT tun kann
 
 | Angriff | Warum er scheitert |
 |---------|-------------------|
-| Web hacken → Schlüssel stehlen | Schlüssel ist in einem anderen Container, einer anderen Zone |
-| Schlüssel über Internet exfiltrieren | Signer hat kein Internet (Firewall blockiert ausgehenden Verkehr) |
-| Signierte Dokumente verändern | Archiv ist append-only, Dateisystem ist schreibgeschützt |
-| Hintertür-Binary deployen | Ed25519-Signaturprüfung schlägt fehl → Container startet nicht |
-| Shell im Container öffnen | Keine Shell vorhanden — statisches Binary, sonst nichts |
+| Web hacken → Schlüssel stehlen | Schlüssel ist in einem anderen Container, einem anderen Namespace |
+| Schlüssel über Internet exfiltrieren | Signer hat kein Internet (Firewall blockiert) |
+| Port-Scan auf Signer | 1 Paket am falschen Port = 24h Ban (Honeypot) |
+| Signierte Dokumente verändern | Archiv ist append-only, Dateisystem schreibgeschützt |
+| Hintertür-Binary deployen | Ed25519-Signaturprüfung schlägt fehl → startet nicht |
+| Shell im Container öffnen | Keine Shell — statisches Binary, sonst nichts |
 | Tools installieren (curl, nc) | Kein Paketmanager, keine Bibliotheken |
 
 ## Voraussetzungen
 
 - erlkoenig installiert (`sudo sh install.sh --version v0.1.0`)
-- Go-Compiler (zum Bauen der Demo-Binaries)
+- Go >= 1.21 (zum Bauen der Demo-Binaries)
 
 ## Schritt 1: Binaries bauen
 
 ```bash
 cd stories/secure-doc-sign
-
-CGO_ENABLED=0 go build -ldflags="-s -w" -o web     ./src/web/
-CGO_ENABLED=0 go build -ldflags="-s -w" -o signer  ./src/signer/
-CGO_ENABLED=0 go build -ldflags="-s -w" -o archive ./src/archive/
-
-ls -lh web signer archive
-# web      5,8 MB  (statisch, keine Abhängigkeiten)
-# signer   6,1 MB  (statisch, keine Abhängigkeiten)
-# archive  5,3 MB  (statisch, keine Abhängigkeiten)
+sh build.sh
 ```
 
 Alle drei sind statisch gelinkt. Keine libc, keine Bibliotheken, keine Shell.
@@ -85,26 +116,17 @@ Alle drei sind statisch gelinkt. Keine libc, keine Bibliotheken, keine Shell.
 ## Schritt 2: Signaturidentität erstellen
 
 ```bash
-# Root-CA erstellen (in Produktion: Ihre Unternehmens-CA)
 erlkoenig pki create-root-ca \
   --cn "Document Services Root CA" \
-  --out root-ca.pem \
-  --key-out root-ca.key \
-  --validity 10y
+  --out root-ca.pem --key-out root-ca.key --validity 10y
 
-# Signaturzertifikat für die CI/CD-Pipeline erstellen
 erlkoenig pki create-signing-cert \
   --cn "doc-sign-pipeline" \
-  --ca root-ca.pem \
-  --ca-key root-ca.key \
-  --out signing.pem \
-  --key-out signing.key
+  --ca root-ca.pem --ca-key root-ca.key \
+  --out signing.pem --key-out signing.key
 ```
 
 ## Schritt 3: Binaries signieren
-
-Jedes Binary bekommt eine kryptographische Signatur. erlkoenig weigert
-sich, ein Binary ohne gültige Signatur zu starten.
 
 ```bash
 erlkoenig sign web     --cert signing.pem --key signing.key
@@ -120,11 +142,7 @@ erlkoenig verify signer  --trust-root root-ca.pem
 erlkoenig verify archive --trust-root root-ca.pem
 ```
 
-Jedes sollte `Result: OK` zeigen.
-
-## Schritt 4: Deployen
-
-Binaries und Signaturen ins Laufzeitverzeichnis kopieren:
+## Schritt 4: Installieren
 
 ```bash
 sudo cp web     /opt/erlkoenig/rt/demo/doc-sign-web
@@ -134,37 +152,37 @@ sudo cp web.sig     /opt/erlkoenig/rt/demo/doc-sign-web.sig
 sudo cp signer.sig  /opt/erlkoenig/rt/demo/doc-sign-signer.sig
 sudo cp archive.sig /opt/erlkoenig/rt/demo/doc-sign-archive.sig
 sudo chmod 755 /opt/erlkoenig/rt/demo/doc-sign-*
-```
-
-Root-CA als Vertrauensanker installieren:
-
-```bash
 sudo cp root-ca.pem /etc/erlkoenig/ca/root-ca.pem
 ```
 
-Container starten (Reihenfolge beachten — von hinten nach vorne):
+## Schritt 5: Deployen
+
+Ein Befehl. Drei Container.
 
 ```bash
-erlkoenig spawn /opt/erlkoenig/rt/demo/doc-sign-archive \
-  --ip 10.0.0.30 --args 8082
-
-erlkoenig spawn /opt/erlkoenig/rt/demo/doc-sign-signer \
-  --ip 10.0.0.20 --args "8081,http://10.0.0.30:8082"
-
-erlkoenig spawn /opt/erlkoenig/rt/demo/doc-sign-web \
-  --ip 10.0.0.10 --args "8080,http://10.0.0.20:8081"
+erlkoenig deploy stack.exs
 ```
 
-Prüfen ob alle drei laufen:
+Ausgabe:
 
-```bash
-erlkoenig ps
+```
+Compiling stack.exs ...
+  3 container(s) found
+
+Deploying archive (10.0.0.30) ...
+  Started: archive
+Deploying signer (10.0.0.20) ...
+  Started: signer
+Deploying web (10.0.0.10) ...
+  Started: web
+
+3/3 containers running.
 ```
 
-## Schritt 5: Dokument signieren
+## Schritt 6: Dokument signieren
 
 ```bash
-curl http://localhost:8080/sign \
+curl http://10.0.0.10:8080/sign \
   -d '{"document":"Kaufvertrag Grundstück Berlin-Mitte Nr. 2026-001",
        "signer":"Dr. Anna Schmidt"}'
 ```
@@ -174,8 +192,8 @@ Antwort:
 ```json
 {
   "id": "DOC-2026-0001",
-  "hash": "sha256:857d63b8...",
-  "signature": "ed25519:OJU7NCAg...",
+  "hash": "sha256:d9d61c0e...",
+  "signature": "ed25519:lRSNnsIF...",
   "signer": "Dr. Anna Schmidt",
   "timestamp": "2026-03-15T18:00:00Z",
   "seq": 1,
@@ -183,135 +201,49 @@ Antwort:
 }
 ```
 
-Noch ein Dokument signieren:
+## Schritt 7: Archiv und Audit
 
 ```bash
-curl http://localhost:8080/sign \
-  -d '{"document":"Arbeitsvertrag Max Mustermann","signer":"HR Abteilung"}'
-```
+curl http://10.0.0.10:8080/archive
 
-## Schritt 6: Archiv einsehen
-
-```bash
-curl http://localhost:8080/archive
-```
-
-Jedes signierte Dokument ist mit Hash, Signatur und Zeitstempel gespeichert.
-
-## Schritt 7: Audit-Log prüfen
-
-```bash
 erlkoenig audit
 ```
-
-Zeigt jede Aktion: PKI geladen, Binaries verifiziert, Container gestartet.
 
 ## Schritt 8: Angriff simulieren
 
-Ein unsigniertes Binary deployen:
-
 ```bash
-# Signatur entfernen
-sudo rm /opt/erlkoenig/rt/demo/doc-sign-web.sig
-
-# Versuch es zu starten
-erlkoenig spawn /opt/erlkoenig/rt/demo/doc-sign-web \
-  --ip 10.0.0.40 --args "9090,http://10.0.0.20:8081"
-
-# Audit-Log prüfen
+sudo cp web /opt/erlkoenig/rt/demo/doc-sign-fake
+sudo chmod 755 /opt/erlkoenig/rt/demo/doc-sign-fake
+erlkoenig spawn /opt/erlkoenig/rt/demo/doc-sign-fake --ip 10.0.0.40 --args "9090,x"
 erlkoenig audit
 # → binary_reject: sig_not_found
 ```
-
-Der Container startet nicht. Das Audit-Log dokumentiert die Ablehnung.
 
 ## Verzeichnisstruktur
 
 ```
 stories/secure-doc-sign/
-├── README.md          Diese Datei
-├── src/
-│   ├── web/           HTTP-Gateway (Go, ~70 Zeilen)
-│   │   └── main.go
-│   ├── signer/        Ed25519-Dokumentensignierer (Go, ~130 Zeilen)
-│   │   └── main.go
-│   └── archive/       Unveränderliches Protokoll (Go, ~80 Zeilen)
-│       └── main.go
-├── stack.exs          Erlkoenig-DSL-Definition
-└── go.mod             Go-Moduldatei
-```
-
-## Firewall-Konfiguration
-
-Jeder Container bekommt eine eigene nftables-Chain mit `policy: drop` —
-nur explizit erlaubter Verkehr kommt durch. Die `stack.exs` zeigt die
-vollständige Konfiguration mit der erlkoenig_nft DSL:
-
-**Web-Gateway** — öffentlich, aber geschützt:
-```elixir
-chain "inbound", hook: :input, policy: :drop do
-  accept :established
-  accept :loopback
-  connlimit_drop 100                    # max 100 Verbindungen pro IP
-  accept_tcp 8080, counter: :http
-  accept :icmp
-  log_and_drop "WEB-DROP: ", counter: :dropped
-end
-```
-
-**Signer** — nur vom Web-Gateway erreichbar:
-```elixir
-chain "inbound", hook: :input, policy: :drop do
-  accept :established
-  accept_from {10, 0, 0, 10}           # NUR vom Web-Gateway
-  accept_tcp 8081, counter: :sign_req
-  log_and_drop "SIGN-DROP: ", counter: :dropped
-end
-```
-
-**Archiv** — nur vom Signer erreichbar:
-```elixir
-chain "inbound", hook: :input, policy: :drop do
-  accept :established
-  accept_from {10, 0, 0, 20}           # NUR vom Signer
-  accept_tcp 8082, counter: :log_req
-  log_and_drop "ARCH-DROP: ", counter: :dropped
-end
-```
-
-Zusätzlich: automatische Angriffserkennung und Echtzeit-Monitoring:
-
-```elixir
-# Angriffe erkennen und blockieren
-guard do
-  detect :conn_flood, threshold: 50, window: 10   # 50 Verbindungen in 10s → Sperre
-  detect :port_scan, threshold: 10, window: 30    # 10 Ports in 30s → Sperre
-  ban_duration 3600                                # 1 Stunde
-end
-
-# Firewall-Counter beobachten
-watch "doc-sign" do
-  counter :http, :pps, threshold: 500              # Alarm bei > 500 req/s
-  counter :sign_req, :pps, threshold: 100          # Alarm bei > 100 Signaturen/s
-  counter :dropped, :pps, threshold: 50            # Alarm bei > 50 drops/s
-  interval 2000
-  on_alert :log
-end
+├── README.md              Diese Datei
+├── SICHERHEITSKONZEPT.md  Technisches Expertendokument
+├── build.sh               Baut die drei Go-Binaries
+├── stack.exs              erlkoenig deploy-Definition (kommentiert)
+├── go.mod                 Go-Moduldatei
+└── src/
+    ├── web/main.go        HTTP-Gateway (~70 Zeilen)
+    ├── signer/main.go     Ed25519-Dokumentensignierer (~130 Zeilen)
+    └── archive/main.go    Unveränderliches Protokoll (~80 Zeilen)
 ```
 
 ## Sicherheitsschichten pro Container
 
 | Schicht | web | signer | archive |
 |---------|-----|--------|---------|
-| Binary-Signatur | Ed25519 + X.509-Kette | Ed25519 + X.509-Kette | Ed25519 + X.509-Kette |
-| Seccomp | network (60 Syscalls) | network (60 Syscalls) | network (60 Syscalls) |
-| Capabilities | keine (alle entfernt) | keine (alle entfernt) | keine (alle entfernt) |
-| Firewall | TCP 8080, connlimit 100 | TCP 8081, nur von web | TCP 8082, nur von signer |
-| IP-Blocklist | ja (nftables set) | — | — |
-| Flood-Erkennung | 50 conn/10s → ban | — | — |
-| Port-Scan-Erkennung | 10 ports/30s → ban | — | — |
-| Counter-Monitoring | http, dropped | sign_req, dropped | log_req, dropped |
+| Binary-Signatur | Ed25519 + X.509 | Ed25519 + X.509 | Ed25519 + X.509 |
+| Seccomp | 60 Syscalls | 60 Syscalls | 60 Syscalls |
+| Capabilities | alle entfernt | alle entfernt | alle entfernt |
+| Firewall | TCP 8080, connlimit | TCP 8081, nur von web | TCP 8082, nur von signer |
+| Honeypot | jeder andere Port = Ban | jeder andere Port = Ban | jeder andere Port = Ban |
+| Guard | flood + scan | scan (threshold 1) | scan (threshold 1) |
+| Namespaces | PID, NET, MNT, UTS, IPC | PID, NET, MNT, UTS, IPC | PID, NET, MNT, UTS, IPC |
 | Dateisystem | schreibgeschützt | schreibgeschützt | schreibgeschützt |
 | /proc | maskiert | maskiert | maskiert |
-| Neustart | automatisch | bei Fehler | automatisch |
-| Healthcheck | Port 8080, 5s | Port 8081, 5s | Port 8082, 5s |

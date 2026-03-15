@@ -168,7 +168,8 @@ echo "  $RT_DIR/erlkoenig_rt ($(wc -c < "$RT_DIR/erlkoenig_rt") bytes)"
 # ── Install OTP release ───────────────────────────────────
 
 echo "Installing OTP release..."
-sudo -u erlkoenig tar xzf "$WORKDIR/erlkoenig-release.tar.gz" -C "$INSTALL_DIR"
+tar xzf "$WORKDIR/erlkoenig-release.tar.gz" -C "$INSTALL_DIR"
+chown -R erlkoenig:erlkoenig "$INSTALL_DIR"
 echo "  $INSTALL_DIR/"
 
 # ── Install DSL escript (optional) ─────────────────────────
@@ -220,11 +221,49 @@ fi
 
 # ── Systemd service ───────────────────────────────────────
 
-if [ -f "$INSTALL_DIR/erlkoenig.service" ]; then
-    cp "$INSTALL_DIR/erlkoenig.service" /usr/lib/systemd/system/
+if [ -d /etc/systemd/system ]; then
+    cat > /etc/systemd/system/erlkoenig.service <<UNIT
+[Unit]
+Description=Erlkoenig Container Runtime
+After=network.target
+Wants=network.target
+
+[Service]
+Type=exec
+User=erlkoenig
+Group=erlkoenig
+WorkingDirectory=${INSTALL_DIR}
+ExecStart=${INSTALL_DIR}/bin/erlkoenig foreground
+ExecStop=${INSTALL_DIR}/bin/erlkoenig stop
+Environment=HOME=${INSTALL_DIR}
+Environment=ERL_EPMD_ADDRESS=127.0.0.1
+Environment=VMARGS_PATH=/etc/erlkoenig/vm.args
+
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+Delegate=yes
+LimitNOFILE=65536
+LimitMEMLOCK=infinity
+
+Restart=on-failure
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=erlkoenig
+
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateTmp=yes
+ProtectClock=yes
+RestrictSUIDSGID=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+
+[Install]
+WantedBy=multi-user.target
+UNIT
     systemctl daemon-reload
-    systemctl enable erlkoenig
-    echo "Enabled systemd service: erlkoenig"
+    echo "Systemd unit: erlkoenig.service"
 fi
 
 # ── Done ──────────────────────────────────────────────────

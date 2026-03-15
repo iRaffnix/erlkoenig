@@ -20,22 +20,28 @@ defmodule Erlkoenig.ContainerDslTest do
     end
   end
 
-  defmodule WithDefaults do
+  defmodule WithFirewall do
     use Erlkoenig.Container
-
-    defaults do
-      firewall :standard
-    end
 
     container :app do
       binary "/opt/bin/app"
       ip {10, 0, 0, 10}
+      firewall do
+        accept :established
+        accept :icmp
+        accept_udp 53
+        accept :all
+      end
     end
 
     container :api do
       binary "/opt/bin/api"
       ip {10, 0, 0, 20}
-      firewall :strict, allow_tcp: [443]
+      firewall do
+        accept :established
+        accept :icmp
+        accept_tcp 443
+      end
     end
   end
 
@@ -131,27 +137,24 @@ defmodule Erlkoenig.ContainerDslTest do
       assert opts.ip == {10, 0, 0, 10}
     end
 
-    test "WithDefaults applies default firewall to :app" do
-      containers = WithDefaults.containers()
+    test "firewall block produces chain with rules" do
+      containers = WithFirewall.containers()
       app = Enum.find(containers, &(&1.name == "app"))
 
       assert Map.has_key?(app, :firewall)
       assert is_map(app.firewall)
       [chain] = app.firewall.chains
-      # :standard profile includes DNS and accept
       assert {:udp_accept, 53} in chain.rules
       assert :accept in chain.rules
     end
 
-    test "WithDefaults explicit firewall overrides default" do
-      containers = WithDefaults.containers()
+    test "firewall block with strict rules (no accept :all)" do
+      containers = WithFirewall.containers()
       api = Enum.find(containers, &(&1.name == "api"))
 
       assert Map.has_key?(api, :firewall)
       [chain] = api.firewall.chains
-      # :strict with allow_tcp: [443]
       assert {:tcp_accept, 443} in chain.rules
-      # :strict has NO outbound accept
       refute :accept in chain.rules
     end
 

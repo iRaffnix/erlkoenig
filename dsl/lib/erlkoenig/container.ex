@@ -54,7 +54,9 @@ defmodule Erlkoenig.Container do
       Module.register_attribute(__MODULE__, :ct_builders, accumulate: true)
       Module.register_attribute(__MODULE__, :ct_current, accumulate: false)
       Module.register_attribute(__MODULE__, :ct_defaults, accumulate: false)
+      Module.register_attribute(__MODULE__, :ct_guard_acc, accumulate: false)
       @ct_defaults %{}
+      @ct_guard_acc %{}
 
       @before_compile Erlkoenig.Container
     end
@@ -102,19 +104,7 @@ defmodule Erlkoenig.Container do
     quote do
       @ct_current Builder.new(unquote(name))
       unquote(block)
-      # Apply defaults for firewall if not set explicitly
-      builder =
-        if @ct_current.firewall == %{} do
-          case Map.get(@ct_defaults, :firewall) do
-            nil -> @ct_current
-            {profile, opts} -> Builder.set_firewall_profile(@ct_current, profile, opts)
-            profile when is_atom(profile) -> Builder.set_firewall_profile(@ct_current, profile)
-          end
-        else
-          @ct_current
-        end
-
-      @ct_builders builder
+      @ct_builders @ct_current
     end
   end
 
@@ -122,6 +112,10 @@ defmodule Erlkoenig.Container do
 
   defmacro binary(path) do
     quote do: @ct_current Builder.set_binary(@ct_current, unquote(path))
+  end
+
+  defmacro signature(mode_or_path) do
+    quote do: @ct_current Builder.set_signature(@ct_current, unquote(mode_or_path))
   end
 
   defmacro ip(addr) do
@@ -140,30 +134,117 @@ defmodule Erlkoenig.Container do
     quote do: @ct_current Builder.set_env(@ct_current, unquote(env_map))
   end
 
-  # --- Firewall (profile reference or inline term) ---
+  # --- Firewall (inline nftables rules) ---
 
-  defmacro firewall(profile) when is_atom(profile) do
+  defmacro firewall(do: block) do
     quote do
-      if Module.has_attribute?(__MODULE__, :ct_current) and @ct_current != nil do
-        @ct_current Builder.set_firewall_profile(@ct_current, unquote(profile))
-      else
-        @ct_defaults Map.put(@ct_defaults, :firewall, unquote(profile))
-      end
+      unquote(block)
     end
   end
 
-  defmacro firewall(profile, opts) do
+  # Firewall rules
+  defmacro accept(:established) do
+    quote do: @ct_current Builder.add_fw_rule(@ct_current, :ct_established_accept)
+  end
+  defmacro accept(:loopback) do
+    quote do: @ct_current Builder.add_fw_rule(@ct_current, {:iifname_accept, "lo"})
+  end
+  defmacro accept(:icmp) do
+    quote do: @ct_current Builder.add_fw_rule(@ct_current, :icmp_accept)
+  end
+  defmacro accept(:all) do
+    quote do: @ct_current Builder.add_fw_rule(@ct_current, :accept)
+  end
+
+  defmacro accept_tcp(port) do
+    quote do: @ct_current Builder.add_fw_rule(@ct_current, {:tcp_accept, unquote(port)})
+  end
+  defmacro accept_tcp(port, opts) do
     quote do
-      if Module.has_attribute?(__MODULE__, :ct_current) and @ct_current != nil do
-        @ct_current Builder.set_firewall_profile(@ct_current, unquote(profile), unquote(opts))
-      else
-        @ct_defaults Map.put(@ct_defaults, :firewall, {unquote(profile), unquote(opts)})
+      rule = case unquote(opts) do
+        [counter: c] ->
+          {:tcp_accept, unquote(port), to_string(c)}
+        [counter: c, limit: {rate, burst: b}] ->
+          {:tcp_accept_limited, unquote(port), to_string(c), %{rate: rate, burst: b}}
+        [limit: {rate, burst: b}] ->
+          {:tcp_accept_limited, unquote(port), "limited", %{rate: rate, burst: b}}
+        _ ->
+          {:tcp_accept, unquote(port)}
       end
+      @ct_current Builder.add_fw_rule(@ct_current, rule)
     end
   end
 
-  defmacro firewall_term(term) do
-    quote do: @ct_current Builder.set_firewall(@ct_current, unquote(term))
+  defmacro accept_udp(port) do
+    quote do: @ct_current Builder.add_fw_rule(@ct_current, {:udp_accept, unquote(port)})
+  end
+
+  defmacro accept_from(ip) do
+    quote do: @ct_current Builder.add_fw_rule(@ct_current, {:ip_saddr_accept, unquote(ip)})
+  end
+
+  defmacro accept_protocol(proto) do
+    quote do: @ct_current Builder.add_fw_rule(@ct_current, {:protocol_accept, unquote(proto)})
+  end
+
+  defmacro connlimit_drop(max) do
+    quote do: @ct_current Builder.add_fw_rule(@ct_current, {:connlimit_drop, unquote(max), 0})
+  end
+
+  defmacro drop_if_in_set(set_name) do
+    quote do: @ct_current Builder.add_fw_rule(@ct_current, {:set_lookup_drop, unquote(set_name)})
+  end
+  defmacro drop_if_in_set(set_name, opts) do
+    quote do
+      rule = case unquote(opts) do
+        [counter: c] -> {:set_lookup_drop, unquote(set_name), to_string(c)}
+        _ -> {:set_lookup_drop, unquote(set_name)}
+      end
+      @ct_current Builder.add_fw_rule(@ct_current, rule)
+    end
+  end
+
+  defmacro log_and_drop(prefix) do
+    quote do: @ct_current Builder.add_fw_rule(@ct_current, {:log_drop, unquote(prefix)})
+  end
+  defmacro log_and_drop(prefix, opts) do
+    quote do
+      rule = case unquote(opts) do
+        [counter: c] -> {:log_drop, unquote(prefix), to_string(c)}
+        _ -> {:log_drop, unquote(prefix)}
+      end
+      @ct_current Builder.add_fw_rule(@ct_current, rule)
+    end
+  end
+
+  defmacro counters(names) do
+    quote do: @ct_current Builder.set_fw_counters(@ct_current, unquote(names))
+  end
+
+  defmacro set(name, type) do
+    quote do: @ct_current Builder.add_fw_set(@ct_current, unquote(name), unquote(type))
+  end
+
+  # --- Guard (threat detection) ---
+
+  defmacro guard(do: block) do
+    quote do
+      @ct_guard_acc %{}
+      unquote(block)
+      @ct_current Builder.set_guard(@ct_current, @ct_guard_acc)
+    end
+  end
+
+  defmacro detect(type, opts) do
+    quote do
+      threshold = Keyword.fetch!(unquote(opts), :threshold)
+      window = Keyword.fetch!(unquote(opts), :window)
+      @ct_guard_acc Map.put(@ct_guard_acc, unquote(type), {threshold, window})
+    end
+  end
+
+  defmacro ban_duration(seconds) do
+    quote do: @ct_guard_acc Map.put(@ct_guard_acc, :ban_duration, unquote(seconds))
   end
 
   # --- Restart ---
@@ -209,6 +290,12 @@ defmodule Erlkoenig.Container do
 
   defmacro zone(name) when is_atom(name) do
     quote do: @ct_current Builder.set_zone(@ct_current, unquote(name))
+  end
+
+  # --- Capabilities ---
+
+  defmacro caps(cap_list) do
+    quote do: @ct_current Builder.set_caps(@ct_current, unquote(cap_list))
   end
 
   # --- Seccomp ---

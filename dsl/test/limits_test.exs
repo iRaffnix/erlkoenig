@@ -102,7 +102,7 @@ defmodule Erlkoenig.LimitsTest do
     end
 
     test "list returns all profiles" do
-      assert Erlkoenig.Seccomp.list() == [:strict, :standard, :permissive]
+      assert Erlkoenig.Seccomp.list() == [:strict, :standard, :network, :permissive]
     end
   end
 end

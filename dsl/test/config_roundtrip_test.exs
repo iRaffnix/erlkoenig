@@ -9,21 +9,30 @@ defmodule Erlkoenig.ConfigRoundtripTest do
   defmodule TestCluster do
     use Erlkoenig.DSL
 
-    defaults do
-      firewall :standard
-    end
-
     container :alpha do
       binary "/opt/bin/alpha"
       ip {10, 0, 0, 10}
       ports [{9080, 80}]
       limits cpu: 2, memory: "256M"
-      firewall :strict, allow_tcp: [80]
+
+      firewall do
+        accept :established
+        accept :icmp
+        accept_tcp 80
+        log_and_drop "DROP: "
+      end
     end
 
     container :beta do
       binary "/opt/bin/beta"
       ip {10, 0, 0, 20}
+
+      firewall do
+        accept :established
+        accept :icmp
+        accept_udp 53
+        accept :all
+      end
     end
   end
 
@@ -114,14 +123,26 @@ defmodule Erlkoenig.ConfigRoundtripTest do
       binary "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server"
       ip {10, 0, 0, 90}
       args ["7001"]
-      firewall :standard
+
+      firewall do
+        accept :established
+        accept :icmp
+        accept_udp 53
+        accept :all
+      end
     end
 
     container :fw_strict do
       binary "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server"
       ip {10, 0, 0, 91}
       args ["7002"]
-      firewall :strict, allow_tcp: [7002]
+
+      firewall do
+        accept :established
+        accept :icmp
+        accept_tcp 7002
+        log_and_drop "DROP: "
+      end
     end
 
     # 11: Output capture (just needs binary + ip)
@@ -163,7 +184,7 @@ defmodule Erlkoenig.ConfigRoundtripTest do
       assert chain.policy == :drop
       assert {:tcp_accept, 80} in chain.rules
 
-      # Verify beta inherited :standard default
+      # Verify beta has standard firewall
       beta = Enum.find(term.containers, fn c -> c.name == "beta" end)
       [beta_chain] = beta.firewall.chains
       assert :accept in beta_chain.rules

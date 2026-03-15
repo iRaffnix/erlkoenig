@@ -204,19 +204,10 @@ if [ -f "$WORKDIR/static-demo-binaries.tar.gz" ]; then
     echo "  $RT_DIR/demo/"
 fi
 
-# ── Generate cookie (first install only) ──────────────────
+# ── Make erlkoenig_run executable ─────────────────────────
 
-if [ ! -f /etc/erlkoenig/vm.args ]; then
-    RELEASE_VSN=$(ls "$INSTALL_DIR/releases/" | grep -E '^[0-9]' | head -1)
-    if [ -n "$RELEASE_VSN" ] && [ -f "$INSTALL_DIR/releases/$RELEASE_VSN/vm.args" ]; then
-        COOKIE=$(openssl rand -base64 32 | tr -d "/+=" | head -c 32)
-        sed "s/erlkoenig_dev/$COOKIE/" \
-            "$INSTALL_DIR/releases/$RELEASE_VSN/vm.args" \
-            > /etc/erlkoenig/vm.args
-        chown erlkoenig:erlkoenig /etc/erlkoenig/vm.args
-        chmod 600 /etc/erlkoenig/vm.args
-        echo "Generated cookie in /etc/erlkoenig/vm.args"
-    fi
+if [ -f "$INSTALL_DIR/bin/erlkoenig_run" ]; then
+    chmod +x "$INSTALL_DIR/bin/erlkoenig_run"
 fi
 
 # ── Systemd service ───────────────────────────────────────
@@ -229,15 +220,16 @@ After=network.target
 Wants=network.target
 
 [Service]
-Type=exec
+Type=simple
 User=erlkoenig
 Group=erlkoenig
 WorkingDirectory=${INSTALL_DIR}
-ExecStart=${INSTALL_DIR}/bin/erlkoenig foreground
-ExecStop=${INSTALL_DIR}/bin/erlkoenig stop
+ExecStart=${INSTALL_DIR}/bin/erlkoenig_run
+KillSignal=SIGTERM
+TimeoutStopSec=15
 Environment=HOME=${INSTALL_DIR}
-Environment=ERL_EPMD_ADDRESS=127.0.0.1
-Environment=VMARGS_PATH=/etc/erlkoenig/vm.args
+RuntimeDirectory=erlkoenig
+RuntimeDirectoryMode=0755
 
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 Delegate=yes
@@ -276,4 +268,6 @@ echo "  Release: $INSTALL_DIR/"
 echo "  Config:  /etc/erlkoenig/"
 echo ""
 echo "Start:    sudo systemctl start erlkoenig"
-echo "Console:  $INSTALL_DIR/bin/erlkoenig remote_console"
+echo "Status:   sudo systemctl status erlkoenig"
+echo "Stop:     sudo systemctl stop erlkoenig"
+echo "Logs:     journalctl -u erlkoenig -f"

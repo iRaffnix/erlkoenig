@@ -56,6 +56,9 @@ init([]) ->
     %%   ├── erlkoenig_cgroup
     %%   ├── erlkoenig_events
     %%   ├── erlkoenig_health
+    %%   ├── erlkoenig_audit
+    %%   ├── erlkoenig_pki
+    %%   ├── erlkoenig_ctl
     %%   └── erlkoenig_ct_sup (simple_one_for_one for containers)
     SupFlags = #{
         strategy => rest_for_one,
@@ -98,13 +101,31 @@ init([]) ->
         restart => permanent,
         type => worker
     },
+    AuditSpec = #{
+        id => erlkoenig_audit,
+        start => {erlkoenig_audit, start_link, []},
+        restart => permanent,
+        type => worker
+    },
+    PkiSpec = #{
+        id => erlkoenig_pki,
+        start => {erlkoenig_pki, start_link, []},
+        restart => permanent,
+        type => worker
+    },
+    CtlSpec = #{
+        id => erlkoenig_ctl,
+        start => {erlkoenig_ctl, start_link, []},
+        restart => permanent,
+        type => worker
+    },
     CtSupSpec = #{
         id => erlkoenig_ct_sup,
         start => {supervisor, start_link, [{local, erlkoenig_ct_sup}, ?MODULE, ct_sup]},
         restart => permanent,
         type => supervisor
     },
-    {ok, {SupFlags, [PgSpec, ZoneSpec, ZoneSupSpec, CgroupSpec, EventsSpec, HealthSpec, CtSupSpec]}};
+    {ok, {SupFlags, [PgSpec, ZoneSpec, ZoneSupSpec, CgroupSpec, EventsSpec, HealthSpec, AuditSpec, PkiSpec, CtlSpec, CtSupSpec]}};
 
 init(ct_sup) ->
     SupFlags = #{

@@ -68,9 +68,13 @@ defmodule Erlkoenig.Seccomp do
     %{profile: :standard, syscalls: @standard_syscalls}
   end
 
+  def get(:network) do
+    %{profile: :network, syscalls: @standard_syscalls}
+  end
+
   def get(:permissive) do
     %{profile: :permissive, blocked: @blocked_dangerous}
   end
 
-  def list, do: [:strict, :standard, :permissive]
+  def list, do: [:strict, :standard, :network, :permissive]
 end

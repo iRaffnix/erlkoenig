@@ -4,7 +4,8 @@
     {registered, [erlkoenig_sup, erlkoenig_zone, erlkoenig_zone_sup,
                   erlkoenig_bridge, erlkoenig_dns,
                   erlkoenig_ip_pool, erlkoenig_cgroup, erlkoenig_events,
-                  erlkoenig_health]},
+                  erlkoenig_health, erlkoenig_audit, erlkoenig_pki,
+                  erlkoenig_ctl]},
     {mod, {erlkoenig_app, []}},
     {applications, [
         kernel,

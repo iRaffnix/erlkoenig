@@ -1,10 +1,6 @@
 defmodule MicroserviceCluster do
   use Erlkoenig.DSL
 
-  defaults do
-    firewall :standard
-  end
-
   # --- DMZ Zone: Internet-facing ---
 
   container :gateway do
@@ -16,7 +12,14 @@ defmodule MicroserviceCluster do
     seccomp :standard
     restart :always
     health_check port: 8080, interval: 5000, retries: 3
-    firewall :strict, allow_tcp: [8080, 8443]
+
+    firewall do
+      accept :established
+      accept :icmp
+      accept_tcp 8080
+      accept_tcp 8443
+      log_and_drop "DROP: "
+    end
   end
 
   # --- Default Zone: Internal services ---
@@ -28,7 +31,13 @@ defmodule MicroserviceCluster do
     seccomp :standard
     restart {:on_failure, 5}
     health_check port: 3000, interval: 10_000, retries: 3
-    firewall :strict, allow_tcp: [3000]
+
+    firewall do
+      accept :established
+      accept :icmp
+      accept_tcp 3000
+      log_and_drop "DROP: "
+    end
   end
 
   container :api_service do
@@ -38,7 +47,13 @@ defmodule MicroserviceCluster do
     seccomp :standard
     restart {:on_failure, 5}
     health_check port: 4000, interval: 10_000, retries: 3
-    firewall :strict, allow_tcp: [4000]
+
+    firewall do
+      accept :established
+      accept :icmp
+      accept_tcp 4000
+      log_and_drop "DROP: "
+    end
   end
 
   container :database do
@@ -48,7 +63,13 @@ defmodule MicroserviceCluster do
     seccomp :strict
     restart :always
     health_check port: 5432, interval: 5000, retries: 5
-    firewall :strict, allow_tcp: [5432]
+
+    firewall do
+      accept :established
+      accept :icmp
+      accept_tcp 5432
+      log_and_drop "DROP: "
+    end
   end
 
 end

@@ -3,9 +3,16 @@
 -include_lib("eunit/include/eunit.hrl").
 
 fixture(Name) ->
-    %% Find the project root by looking for rebar.config
     {ok, Cwd} = file:get_cwd(),
-    filename:join([Cwd, "apps", "erlkoenig_core", "test", "fixtures", Name]).
+    Dir = filename:join([Cwd, "apps", "erlkoenig_core", "test", "fixtures"]),
+    ensure_fixtures(Dir),
+    filename:join(Dir, Name).
+
+ensure_fixtures(Dir) ->
+    case filelib:is_regular(filename:join(Dir, "root-ca.pem")) of
+        true -> ok;
+        false -> os:cmd("bash " ++ filename:join(Dir, "generate.sh"))
+    end.
 
 test_binary() ->
     Path = "/tmp/erlkoenig_sig_test_binary_" ++
@@ -84,9 +91,9 @@ tampered_signature_test() ->
     try
         {ok, SigData} = erlkoenig_sig:sign(
             BinPath, fixture("signing.pem"), fixture("signing.key"), #{}),
-        %% Flip a byte in the sig file
+        %% Flip a byte near the start (inside the signature block, not the cert)
         SigBin = iolist_to_binary(SigData),
-        Pos = byte_size(SigBin) div 2,
+        Pos = 80,  %% inside the base64 signature payload
         <<Pre:Pos/binary, Byte:8, Post/binary>> = SigBin,
         Tampered = <<Pre/binary, (Byte bxor 16#FF):8, Post/binary>>,
         ok = file:write_file(SigPath, Tampered),

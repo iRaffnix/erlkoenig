@@ -4,7 +4,15 @@
 
 fixture(Name) ->
     {ok, Cwd} = file:get_cwd(),
-    filename:join([Cwd, "apps", "erlkoenig_core", "test", "fixtures", Name]).
+    Dir = filename:join([Cwd, "apps", "erlkoenig_core", "test", "fixtures"]),
+    ensure_fixtures(Dir),
+    filename:join(Dir, Name).
+
+ensure_fixtures(Dir) ->
+    case filelib:is_regular(filename:join(Dir, "root-ca.pem")) of
+        true -> ok;
+        false -> os:cmd("bash " ++ filename:join(Dir, "generate.sh"))
+    end.
 
 read_cert(Name) ->
     {ok, PemBin} = file:read_file(fixture(Name)),

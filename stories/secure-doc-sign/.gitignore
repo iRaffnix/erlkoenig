@@ -1,6 +1,6 @@
-web
-signer
-archive
-*.sig
+/web
+/signer
+/archive
 *.pem
 *.key
+*.sig

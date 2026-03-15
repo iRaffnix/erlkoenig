@@ -927,7 +927,7 @@ rt_path() ->
 find_rt() ->
     Candidates = [
         fun() -> os:find_executable("erlkoenig_rt") end,
-        fun() -> check_path("/usr/lib/erlkoenig/erlkoenig_rt") end,
+        fun() -> check_path("/opt/erlkoenig/rt/erlkoenig_rt") end,
         fun() -> check_priv_dir() end,
         fun() -> check_build_dir() end
     ],

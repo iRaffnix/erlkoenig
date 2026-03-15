@@ -169,7 +169,7 @@ find_rt(ProjectDir) ->
     end.
 
 find_rt_installed(ProjectDir) ->
-    Installed = "/usr/lib/erlkoenig/erlkoenig_rt",
+    Installed = "/opt/erlkoenig/rt/erlkoenig_rt",
     case filelib:is_regular(Installed) of
         true  -> Installed;
         false ->
@@ -185,7 +185,7 @@ find_demo(ProjectDir, Name) ->
     end.
 
 find_demo_installed(ProjectDir, BinName) ->
-    Installed = filename:join("/usr/lib/erlkoenig/demo", BinName),
+    Installed = filename:join("/opt/erlkoenig/rt/demo", BinName),
     case filelib:is_regular(Installed) of
         true  -> Installed;
         false ->

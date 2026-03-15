@@ -2,7 +2,7 @@ defmodule LiveTest do
   use Erlkoenig.DSL
 
   container :echo_a do
-    binary "/usr/lib/erlkoenig/demo/test-erlkoenig-echo_server"
+    binary "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server"
     ip {10, 0, 0, 10}
     args ["7777"]
     restart :on_failure
@@ -11,7 +11,7 @@ defmodule LiveTest do
   end
 
   container :echo_b do
-    binary "/usr/lib/erlkoenig/demo/test-erlkoenig-echo_server"
+    binary "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server"
     ip {10, 0, 0, 20}
     args ["8888"]
     ports [{9080, 8888}]

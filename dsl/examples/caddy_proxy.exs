@@ -12,7 +12,7 @@ defmodule ReverseProxyDemo do
   """
 
   container :echo do
-    binary "/usr/lib/erlkoenig/echo-server"
+    binary "/opt/erlkoenig/rt/echo-server"
     ip {10, 0, 0, 20}
     args ["8080"]
     limits cpu: 1, memory: "64M", pids: 50
@@ -21,7 +21,7 @@ defmodule ReverseProxyDemo do
   end
 
   container :proxy do
-    binary "/usr/lib/erlkoenig/reverse-proxy"
+    binary "/opt/erlkoenig/rt/reverse-proxy"
     ip {10, 0, 0, 10}
     args [":8080", "http://10.0.0.20:8080"]
     ports [{80, 8080}]

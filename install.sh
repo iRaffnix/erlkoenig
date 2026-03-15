@@ -67,16 +67,21 @@ fi
 
 # ── Conflict detection ────────────────────────────────────
 
-if systemctl is-active --quiet erlkoenig_nft.service 2>/dev/null; then
-    echo "Error: erlkoenig_nft.service is running" >&2
-    echo "  This conflicts with the integrated firewall." >&2
-    echo "  Stop it first: sudo systemctl stop erlkoenig_nft" >&2
+if [ -f /etc/systemd/system/erlkoenig_nft.service ] || systemctl is-active --quiet erlkoenig_nft 2>/dev/null; then
+    echo "" >&2
+    echo "  [E] erlkoenig_nft.service is installed as a standalone service." >&2
+    echo "" >&2
+    echo "  erlkoenig bundles erlkoenig_nft as an OTP application." >&2
+    echo "  Running both will cause nftables conflicts." >&2
+    echo "" >&2
+    echo "  To resolve, disable the standalone service first:" >&2
+    echo "    sudo systemctl stop erlkoenig_nft" >&2
+    echo "    sudo systemctl disable erlkoenig_nft" >&2
+    echo "    sudo rm /etc/systemd/system/erlkoenig_nft.service" >&2
+    echo "" >&2
+    echo "  Your firewall config is preserved at:" >&2
+    echo "    /opt/erlkoenig_nft/etc/firewall.term" >&2
     exit 1
-fi
-
-if systemctl is-enabled --quiet erlkoenig_nft.service 2>/dev/null; then
-    echo "Warning: erlkoenig_nft.service is enabled but not running" >&2
-    echo "  Consider disabling it: sudo systemctl disable erlkoenig_nft" >&2
 fi
 
 # ── Create user + directories ─────────────────────────────
@@ -127,9 +132,11 @@ if [ -n "$LOCAL_DIR" ]; then
         cp "$DEMO_TAR" "$WORKDIR/static-demo-binaries.tar.gz"
     fi
 
-    # Detect version from tarball name
-    VERSION=$(basename "$TARBALL" | sed 's/erlkoenig-//;s/.tar.gz//')
-    VERSION="v$VERSION"
+    # Detect version from tarball content
+    VERSION=$(tar xzf "$WORKDIR/erlkoenig-release.tar.gz" -O releases/start_erl.data 2>/dev/null | awk '{print "v"$2}' || true)
+    if [ -z "$VERSION" ]; then
+        VERSION="unknown"
+    fi
 else
     # ── Remote mode: download from GitHub ──
     echo "Downloading erlkoenig $VERSION from GitHub..."

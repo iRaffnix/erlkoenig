@@ -4,16 +4,14 @@
 %% Licensed under the Apache License, Version 2.0
 %%
 
-%%%-------------------------------------------------------------------
-%% @doc Unix socket control server.
-%%
-%% Listens on /run/erlkoenig/ctl.sock for management commands.
-%% Each connection is handled in a spawned process.
-%% All commands are logged to erlkoenig_audit.
-%% @end
-%%%-------------------------------------------------------------------
-
 -module(erlkoenig_ctl).
+-moduledoc """
+Unix socket control server.
+
+Listens on /run/erlkoenig/ctl.sock for management commands.
+Each connection is handled in a spawned process.
+All commands are logged to erlkoenig_audit.
+""".
 
 -behaviour(gen_server).
 
@@ -41,6 +39,7 @@ start_link() ->
 %%%===================================================================
 
 init([]) ->
+    proc_lib:set_label(erlkoenig_ctl),
     Path = application:get_env(erlkoenig_core, ctl_socket, ?DEFAULT_SOCK),
     %% Remove stale socket file
     _ = file:delete(Path),
@@ -163,42 +162,39 @@ conn_loop(Sock, PeerInfo) ->
 %%%===================================================================
 
 dispatch(spawn, Payload, PeerInfo) ->
-    case parse_spawn_payload(Payload) of
-        {ok, BinaryPath, OptsJson} ->
-            Opts = decode_spawn_opts(OptsJson),
-            erlkoenig_audit:log(#{
-                type => ctl_spawn,
-                subject => BinaryPath,
-                result => ok,
-                details => maps:merge(PeerInfo, #{opts => OptsJson})
-            }),
-            case erlkoenig_sup:start_container(BinaryPath, Opts) of
-                {ok, Pid} ->
-                    {ok, iolist_to_binary(io_lib:format("~p", [Pid]))};
-                {error, Reason} ->
-                    {error, iolist_to_binary(io_lib:format("~p", [Reason]))}
-            end;
+    maybe
+        {ok, BinaryPath, OptsJson} ?= parse_spawn_payload(Payload),
+        Opts = decode_spawn_opts(OptsJson),
+        erlkoenig_audit:log(#{
+            type => ctl_spawn,
+            subject => BinaryPath,
+            result => ok,
+            details => maps:merge(PeerInfo, #{opts => OptsJson})
+        }),
+        {ok, Pid} ?= erlkoenig_sup:start_container(BinaryPath, Opts),
+        {ok, iolist_to_binary(io_lib:format("~p", [Pid]))}
+    else
         {error, Reason} ->
             {error, iolist_to_binary(io_lib:format("~p", [Reason]))}
     end;
 
 dispatch(stop, Payload, PeerInfo) ->
     {ContainerId, _} = erlkoenig_ctl_proto:decode_str(Payload),
-    case erlkoenig_core:find_by_id(ContainerId) of
-        {ok, Pid} ->
-            erlkoenig_audit:log(#{
-                type => ctl_stop,
-                subject => ContainerId,
-                result => ok,
-                details => PeerInfo
-            }),
-            case erlkoenig_core:stop(Pid) of
-                ok -> {ok, <<"stopped">>};
-                {error, Reason} ->
-                    {error, iolist_to_binary(io_lib:format("~p", [Reason]))}
-            end;
+    maybe
+        {ok, Pid} ?= erlkoenig_core:find_by_id(ContainerId),
+        erlkoenig_audit:log(#{
+            type => ctl_stop,
+            subject => ContainerId,
+            result => ok,
+            details => PeerInfo
+        }),
+        ok ?= erlkoenig_core:stop(Pid),
+        {ok, <<"stopped">>}
+    else
         {error, not_found} ->
-            {error, <<"container not found">>}
+            {error, <<"container not found">>};
+        {error, Reason} ->
+            {error, iolist_to_binary(io_lib:format("~p", [Reason]))}
     end;
 
 dispatch(ps, _Payload, _PeerInfo) ->
@@ -236,7 +232,138 @@ dispatch(status, _Payload, _PeerInfo) ->
         process_count => erlang:system_info(process_count),
         pki_mode => erlkoenig_pki:mode()
     },
-    {ok, iolist_to_binary(io_lib:format("~p", [Info]))}.
+    {ok, iolist_to_binary(io_lib:format("~p", [Info]))};
+
+%% --- Ingestion commands (ETF payloads) ---
+
+dispatch(push, Payload, PeerInfo) ->
+    PushInfo = binary_to_term(Payload),
+    #{name := Name, binary := BinaryData} = PushInfo,
+    Tags = maps:get(tags, PushInfo, []),
+    Files = maps:get(files, PushInfo, []),
+    Signature = maps:get(signature, PushInfo, undefined),
+
+    erlkoenig_audit:log(#{
+        type => ctl_push,
+        subject => Name,
+        result => ok,
+        details => maps:merge(PeerInfo, #{
+            binary_size => byte_size(BinaryData),
+            tags => Tags,
+            files_count => length(Files),
+            signed => Signature =/= undefined
+        })
+    }),
+
+    %% Verify signature if present (optional — erlkoenig_sig may not be loaded)
+    case Signature of
+        undefined -> ok;
+        SigData ->
+            try
+                TrustRoots = application:get_env(erlkoenig_core, trust_roots, []),
+                case erlkoenig_sig:verify_binary(BinaryData, SigData, TrustRoots) of
+                    ok -> ok;
+                    {error, SigReason} -> throw({signature_error, SigReason})
+                end
+            catch
+                error:undef ->
+                    %% erlkoenig_sig not available — skip verification in Phase 1
+                    logger:warning("[ctl] push: signature provided but erlkoenig_sig not available, skipping verification"),
+                    ok
+            end
+    end,
+
+    %% Store binary + files via erlkoenig_ingest (if available)
+    %% or fall back to direct artifact_store registration
+    BinaryHash = crypto:hash(sha256, BinaryData),
+    Result = try
+        StorePid = whereis(erlkoenig_fuse_store),
+        case StorePid of
+            undefined -> throw(fuse_store_not_available);
+            _ ->
+                {ok, IngestResult} = erlkoenig_ingest:ingest_binary(
+                    BinaryData, <<"app">>, StorePid),
+                #{manifest := Manifest} = IngestResult,
+
+                %% Ingest extra files
+                lists:foreach(fun({FilePath, FileData}) ->
+                    erlkoenig_ingest:ingest_inline(FileData, FilePath, StorePid)
+                end, Files),
+
+                ManifestHash = maps:get(hash, Manifest),
+                {ok, ManifestHash}
+        end
+    catch
+        error:undef ->
+            %% erlkoenig_ingest not available — store metadata only
+            logger:warning("[ctl] push: erlkoenig_ingest not available, storing metadata only"),
+            {ok, BinaryHash};
+        throw:fuse_store_not_available ->
+            logger:warning("[ctl] push: fuse_store not running, storing metadata only"),
+            {ok, BinaryHash}
+    end,
+
+    case Result of
+        {ok, Hash} ->
+            ok = erlkoenig_artifact_store:register(Name, #{
+                manifest_hash => Hash,
+                binary_hash => BinaryHash,
+                binary_size => byte_size(BinaryData),
+                signature => Signature,
+                pushed_at => erlang:system_time(second),
+                tags => Tags,
+                files => [{P, byte_size(D)} || {P, D} <- Files]
+            }),
+            RespTerm = #{manifest_hash => Hash, name => Name},
+            {ok, term_to_binary(RespTerm)};
+        {error, Reason} ->
+            {error, iolist_to_binary(io_lib:format("~p", [Reason]))}
+    end;
+
+dispatch(artifacts, Payload, _PeerInfo) ->
+    Opts = case Payload of
+        <<>> -> #{};
+        _    -> binary_to_term(Payload)
+    end,
+    AllArtifacts = erlkoenig_artifact_store:list(),
+    Filtered = case maps:get(tag, Opts, undefined) of
+        undefined -> AllArtifacts;
+        Tag ->
+            [A || A <- AllArtifacts,
+                  lists:member(Tag, maps:get(tags, A, []))]
+    end,
+    {ok, term_to_binary(Filtered)};
+
+dispatch(artifact_info, Payload, _PeerInfo) ->
+    Name = binary_to_term(Payload),
+    case erlkoenig_artifact_store:lookup(Name) of
+        {ok, Info} ->
+            {ok, term_to_binary(Info)};
+        {error, not_found} ->
+            {error, <<"not found">>}
+    end;
+
+dispatch(artifact_tag, Payload, PeerInfo) ->
+    {Name, Tag} = binary_to_term(Payload),
+    erlkoenig_audit:log(#{
+        type => ctl_artifact_tag,
+        subject => Name,
+        result => ok,
+        details => maps:merge(PeerInfo, #{tag => Tag})
+    }),
+    ok = erlkoenig_artifact_store:tag(Name, Tag),
+    {ok, <<"ok">>};
+
+dispatch(artifact_delete, Payload, PeerInfo) ->
+    Name = binary_to_term(Payload),
+    erlkoenig_audit:log(#{
+        type => ctl_artifact_delete,
+        subject => Name,
+        result => ok,
+        details => PeerInfo
+    }),
+    ok = erlkoenig_artifact_store:delete(Name),
+    {ok, <<"ok">>}.
 
 %%%===================================================================
 %%% Helpers

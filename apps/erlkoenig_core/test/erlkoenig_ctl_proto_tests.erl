@@ -1,5 +1,6 @@
 -module(erlkoenig_ctl_proto_tests).
 -include_lib("eunit/include/eunit.hrl").
+-include_lib("stdlib/include/assert.hrl").
 
 roundtrip_test_() ->
     Cmds = [spawn, stop, ps, inspect, audit, status],

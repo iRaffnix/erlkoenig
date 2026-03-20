@@ -29,7 +29,7 @@ defmodule Erlkoenig.CLI do
       COMPREPLY=()
       cur="${COMP_WORDS[COMP_CWORD]}"
       prev="${COMP_WORDS[COMP_CWORD-1]}"
-      commands="compile validate sign verify pki"
+      commands="compile validate sign verify pki push artifacts artifact tag"
 
       case "$COMP_CWORD" in
           1)
@@ -68,6 +68,10 @@ defmodule Erlkoenig.CLI do
           'sign:Sign a static binary with Ed25519'
           'verify:Verify a binary signature and certificate chain'
           'pki:Create certificates (root-ca, sub-ca, signing-cert)'
+          'push:Push a binary artifact to the daemon'
+          'artifacts:List artifacts'
+          'artifact:Show or delete an artifact'
+          'tag:Add a tag to an artifact'
       )
 
       _arguments -C \
@@ -98,18 +102,22 @@ defmodule Erlkoenig.CLI do
 
   def main(args) do
     case args do
-      ["deploy" | rest]   -> deploy(rest)
-      ["compile" | rest]  -> compile(rest)
-      ["validate" | rest] -> validate(rest)
-      ["sign" | rest]     -> sign(rest)
-      ["verify" | rest]   -> verify(rest)
-      ["pki" | rest]      -> pki(rest)
-      ["spawn" | rest]    -> ctl_spawn(rest)
-      ["stop" | rest]     -> ctl_stop(rest)
-      ["ps" | _]          -> ctl_ps()
-      ["inspect" | rest]  -> ctl_inspect(rest)
-      ["audit" | rest]    -> ctl_audit(rest)
-      ["status" | _]      -> ctl_status()
+      ["deploy" | rest]    -> deploy(rest)
+      ["compile" | rest]   -> compile(rest)
+      ["validate" | rest]  -> validate(rest)
+      ["sign" | rest]      -> sign(rest)
+      ["verify" | rest]    -> verify(rest)
+      ["pki" | rest]       -> pki(rest)
+      ["spawn" | rest]     -> ctl_spawn(rest)
+      ["stop" | rest]      -> ctl_stop(rest)
+      ["ps" | _]           -> ctl_ps()
+      ["inspect" | rest]   -> ctl_inspect(rest)
+      ["audit" | rest]     -> ctl_audit(rest)
+      ["status" | _]       -> ctl_status()
+      ["push" | rest]      -> ctl_push(rest)
+      ["artifacts" | rest] -> ctl_artifacts(rest)
+      ["artifact" | rest]  -> ctl_artifact(rest)
+      ["tag" | rest]       -> ctl_tag(rest)
       ["--completions", shell] -> completions(shell)
       [flag] when flag in ["--help", "-h"] -> usage()
       _ -> usage()
@@ -536,6 +544,162 @@ defmodule Erlkoenig.CLI do
     end
   end
 
+  defp ctl_push(args) do
+    {opts, files, _} =
+      OptionParser.parse(args,
+        strict: [name: :string, tag: :keep, files: :string,
+                 sign: :boolean, key: :string, cert: :string],
+        aliases: [n: :name, t: :tag, f: :files])
+
+    case files do
+      [binary_path] ->
+        check_file!(binary_path)
+
+        push_opts = [
+          name: opts[:name],
+          tag: Keyword.get_values(opts, :tag),
+          files: opts[:files],
+          sign: opts[:sign],
+          key: opts[:key],
+          cert: opts[:cert]
+        ]
+
+        info("Pushing #{binary_path} ...")
+
+        case Erlkoenig.Ctl.push(binary_path, push_opts) do
+          {:ok, resp_payload} ->
+            result = Erlkoenig.Ctl.decode_push_response(resp_payload)
+            name = Map.get(result, :name, "?")
+            hash = Map.get(result, :manifest_hash, <<>>)
+            info("Pushed #{name} -> manifest:#{hex(hash)}")
+
+          {:error, msg} ->
+            error("Push failed: #{msg}")
+        end
+
+      _ ->
+        error("Usage: erlkoenig push <binary> [--name NAME] [--tag TAG] [--files DIR]")
+    end
+  end
+
+  defp ctl_artifacts(args) do
+    {opts, _, _} =
+      OptionParser.parse(args, strict: [tag: :string], aliases: [t: :tag])
+
+    case Erlkoenig.Ctl.artifacts(tag: opts[:tag]) do
+      {:ok, resp_payload} ->
+        artifacts = Erlkoenig.Ctl.decode_artifacts_response(resp_payload)
+
+        case artifacts do
+          [] ->
+            info("(no artifacts)")
+
+          _ ->
+            # Header
+            IO.puts(pad("NAME", 20) <> pad("TAGS", 24) <> "PUSHED")
+
+            Enum.each(artifacts, fn a ->
+              name = Map.get(a, :name, "?")
+              tags = Map.get(a, :tags, []) |> Enum.join(",")
+              pushed = Map.get(a, :pushed_at, 0) |> format_unix_time()
+              IO.puts(pad(to_string(name), 20) <> pad(tags, 24) <> pushed)
+            end)
+        end
+
+      {:error, msg} ->
+        error("artifacts failed: #{msg}")
+    end
+  end
+
+  defp ctl_artifact(args) do
+    case args do
+      ["delete", name] ->
+        case Erlkoenig.Ctl.delete_artifact(name) do
+          {:ok, _} -> info("Deleted: #{name}")
+          {:error, msg} -> error("Delete failed: #{msg}")
+        end
+
+      [name] ->
+        case Erlkoenig.Ctl.artifact_info(name) do
+          {:ok, resp_payload} ->
+            a = Erlkoenig.Ctl.decode_artifact_info_response(resp_payload)
+            name_str = Map.get(a, :name, "?")
+            manifest = Map.get(a, :manifest_hash, <<>>) |> hex()
+            binary_hash = Map.get(a, :binary_hash, <<>>) |> hex()
+            tags = Map.get(a, :tags, []) |> Enum.join(", ")
+            pushed = Map.get(a, :pushed_at, 0) |> format_unix_time()
+            binary_size = Map.get(a, :binary_size, 0)
+            files = Map.get(a, :files, [])
+
+            IO.puts("Name:     #{name_str}")
+            IO.puts("Manifest: #{manifest}")
+            IO.puts("Binary:   #{binary_hash}")
+            IO.puts("Size:     #{format_bytes(binary_size)}")
+            IO.puts("Tags:     #{tags}")
+            IO.puts("Pushed:   #{pushed}")
+
+            if files != [] do
+              IO.puts("Files:    #{length(files)}")
+
+              Enum.each(files, fn
+                {path, size} ->
+                  IO.puts("  #{path} (#{format_bytes(size)})")
+                other ->
+                  IO.puts("  #{inspect(other)}")
+              end)
+            end
+
+          {:error, msg} ->
+            error("artifact failed: #{msg}")
+        end
+
+      _ ->
+        error("Usage: erlkoenig artifact <name> | erlkoenig artifact delete <name>")
+    end
+  end
+
+  defp ctl_tag(args) do
+    case args do
+      [name, tag] ->
+        case Erlkoenig.Ctl.tag_artifact(name, tag) do
+          {:ok, _} -> info("Tagged #{name} with #{tag}")
+          {:error, msg} -> error("Tag failed: #{msg}")
+        end
+
+      _ ->
+        error("Usage: erlkoenig tag <name> <tag>")
+    end
+  end
+
+  defp hex(bin) when is_binary(bin) and byte_size(bin) > 0 do
+    Base.encode16(bin, case: :lower) |> String.slice(0, 16)
+  end
+  defp hex(_), do: "-"
+
+  defp pad(str, width) do
+    len = String.length(str)
+    if len >= width, do: str <> " ", else: str <> String.duplicate(" ", width - len)
+  end
+
+  defp format_unix_time(0), do: "-"
+  defp format_unix_time(ts) when is_integer(ts) do
+    {{y, mo, d}, {h, mi, _s}} =
+      :calendar.gregorian_seconds_to_datetime(ts + 62_167_219_200)
+
+    :io_lib.format("~4..0B-~2..0B-~2..0B ~2..0B:~2..0B", [y, mo, d, h, mi])
+    |> to_string()
+  end
+  defp format_unix_time(_), do: "-"
+
+  defp format_bytes(n) when is_integer(n) and n >= 1_048_576 do
+    "#{Float.round(n / 1_048_576, 1)} MB"
+  end
+  defp format_bytes(n) when is_integer(n) and n >= 1024 do
+    "#{Float.round(n / 1024, 1)} KB"
+  end
+  defp format_bytes(n) when is_integer(n), do: "#{n} B"
+  defp format_bytes(_), do: "-"
+
   defp encode_simple_json(map) when map_size(map) == 0, do: "{}"
   defp encode_simple_json(map) do
     pairs = Enum.map(map, fn {k, v} ->
@@ -579,6 +743,11 @@ defmodule Erlkoenig.CLI do
         erlkoenig compile <file.exs> [-o output.term]
         erlkoenig sign <binary> --cert <cert.pem> --key <key.pem>
         erlkoenig verify <binary> [--trust-root <ca.pem>]
+        erlkoenig push <binary> [--name NAME] [--tag TAG] [--files DIR]
+        erlkoenig artifacts [--tag TAG]
+        erlkoenig artifact <name>
+        erlkoenig artifact delete <name>
+        erlkoenig tag <name> <tag>
         erlkoenig pki create-root-ca --cn <name> --out <cert.pem> --key-out <key.pem>
         erlkoenig --help
 
@@ -590,6 +759,12 @@ defmodule Erlkoenig.CLI do
         inspect     Show container details
         status      Show daemon status
         audit       Query audit log
+
+    Artifact management:
+        push        Push a binary artifact to the daemon
+        artifacts   List artifacts [--tag TAG]
+        artifact    Show artifact details / delete
+        tag         Add a tag to an artifact
 
     Build & Security:
         compile     Compile a DSL .exs file to an Erlang .term file

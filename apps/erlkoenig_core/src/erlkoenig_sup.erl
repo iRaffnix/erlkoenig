@@ -14,15 +14,13 @@
 %% limitations under the License.
 %%
 
-%%%-------------------------------------------------------------------
-%% @doc erlkoenig top level supervisor.
-%%
-%% Uses a simple_one_for_one strategy for dynamic container children.
-%% Each child is a erlkoenig_ct gen_statem started via start_container/2.
-%% @end
-%%%-------------------------------------------------------------------
-
 -module(erlkoenig_sup).
+-moduledoc """
+Erlkoenig top level supervisor.
+
+Uses a simple_one_for_one strategy for dynamic container children.
+Each child is a erlkoenig_ct gen_statem started via start_container/2.
+""".
 
 -behaviour(supervisor).
 
@@ -39,7 +37,7 @@
 start_link() ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
-%% @doc Start a new container as a child of erlkoenig_ct_sup.
+-doc "Start a new container as a child of erlkoenig_ct_sup.".
 -spec start_container(binary(), erlkoenig_core:spawn_opts()) -> {ok, pid()} | {error, term()}.
 start_container(BinaryPath, Opts) ->
     supervisor:start_child(erlkoenig_ct_sup, [BinaryPath, Opts]).

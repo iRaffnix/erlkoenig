@@ -14,18 +14,16 @@
 %% limitations under the License.
 %%
 
-%%%-------------------------------------------------------------------
-%% @doc erlkoenig - Public API for container management.
-%%
-%% Usage from the Erlang shell:
-%%   {ok, Pid} = erlkoenig_core:spawn(Path).
-%%   erlkoenig_core:list().
-%%   erlkoenig_core:inspect(Pid).
-%%   erlkoenig_core:stop(Pid).
-%% @end
-%%%-------------------------------------------------------------------
-
 -module(erlkoenig_core).
+-moduledoc """
+Public API for container management.
+
+Usage from the Erlang shell:
+  {ok, Pid} = erlkoenig_core:spawn(Path).
+  erlkoenig_core:list().
+  erlkoenig_core:inspect(Pid).
+  erlkoenig_core:stop(Pid).
+""".
 
 -export([spawn/1, spawn/2,
          stop/1,
@@ -126,27 +124,27 @@
 %%% API
 %%% ====================================================================
 
-%% @doc Spawn a container running the given static binary.
+-doc "Spawn a container running the given static binary.".
 -spec spawn(binary()) -> {ok, container_pid()} | {error, term()}.
 spawn(BinaryPath) ->
     ?MODULE:spawn(BinaryPath, #{}).
 
-%% @doc Spawn a container with options.
+-doc "Spawn a container with options.".
 -spec spawn(binary(), spawn_opts()) -> {ok, container_pid()} | {error, term()}.
 spawn(BinaryPath, Opts) ->
     erlkoenig_sup:start_container(BinaryPath, Opts).
 
-%% @doc Stop a container (SIGTERM, then SIGKILL after timeout).
+-doc "Stop a container (SIGTERM, then SIGKILL after timeout).".
 -spec stop(container_pid()) -> ok | {error, term()}.
 stop(Pid) ->
     erlkoenig_ct:stop_container(Pid).
 
-%% @doc Send a signal to the container.
+-doc "Send a signal to the container.".
 -spec kill(container_pid(), non_neg_integer()) -> ok | {error, term()}.
 kill(Pid, Signal) ->
     erlkoenig_ct:kill(Pid, Signal).
 
-%% @doc List all running containers.
+-doc "List all running containers.".
 -spec list() -> [container_info()].
 list() ->
     Pids = try pg:get_members(erlkoenig_pg, erlkoenig_cts)
@@ -154,14 +152,14 @@ list() ->
            end,
     [erlkoenig_ct:get_info(Pid) || Pid <- Pids].
 
-%% @doc Get detailed info about a container.
+-doc "Get detailed info about a container.".
 -spec inspect(container_pid()) -> container_info() | {error, not_found}.
 inspect(Pid) ->
     try erlkoenig_ct:get_info(Pid)
     catch exit:{noproc, _} -> {error, not_found}
     end.
 
-%% @doc Find a container PID by its ID (binary string).
+-doc "Find a container PID by its ID (binary string).".
 -spec find_by_id(binary()) -> {ok, pid()} | {error, not_found}.
 find_by_id(Id) ->
     Pids = try pg:get_members(erlkoenig_pg, erlkoenig_cts)
@@ -181,9 +179,7 @@ find_pid_by_id([Pid | Rest], Id) ->
         _:_ -> find_pid_by_id(Rest, Id)
     end.
 
-%% @doc Get live resource stats for a container (cgroup v2).
-%%
-%% Returns #{memory_bytes, memory_peak, cpu_usec, pids_current}.
+-doc "Get live resource stats for a container (cgroup v2). Returns #{memory_bytes, memory_peak, cpu_usec, pids_current}.".
 -spec stats(container_pid()) -> {ok, map()} | {error, term()}.
 stats(Pid) ->
     try erlkoenig_ct:get_info(Pid) of
@@ -194,13 +190,15 @@ stats(Pid) ->
     catch exit:{noproc, _} -> {error, not_found}
     end.
 
-%% @doc Attach to a container's stdout/stderr.
-%%
-%% Starts forwarding output to the calling process.
-%% Messages: {container_stdout, Pid, Id, Chunk}
-%%           {container_stderr, Pid, Id, Chunk}
-%%
-%% Returns {ok, Ref} where Ref can be used with detach/1.
+-doc """
+Attach to a container's stdout/stderr.
+
+Starts forwarding output to the calling process.
+Messages: {container_stdout, Pid, Id, Chunk}
+          {container_stderr, Pid, Id, Chunk}
+
+Returns {ok, Ref} where Ref can be used with detach/1.
+""".
 -spec attach(container_pid()) -> ok | {error, term()}.
 attach(Pid) ->
     attach(Pid, self()).
@@ -209,44 +207,48 @@ attach(Pid) ->
 attach(ContainerPid, OutputPid) ->
     erlkoenig_ct:attach(ContainerPid, OutputPid).
 
-%% @doc Add a health check for a container.
-%%
-%% Opts:
-%%   type     => tcp             (only tcp for now)
-%%   port     => 8080            (required)
-%%   interval => 5000            (ms between checks, default 5s)
-%%   timeout  => 2000            (connect timeout, default 2s)
-%%   retries  => 3               (failures before restart, default 3)
-%%
-%% The container must have a restart policy set, otherwise the health
-%% check will stop it but it won't come back.
+-doc """
+Add a health check for a container.
+
+Opts:
+  type     => tcp             (only tcp for now)
+  port     => 8080            (required)
+  interval => 5000            (ms between checks, default 5s)
+  timeout  => 2000            (connect timeout, default 2s)
+  retries  => 3               (failures before restart, default 3)
+
+The container must have a restart policy set, otherwise the health
+check will stop it but it won't come back.
+""".
 -spec health_check(container_pid(), map()) -> ok | {error, term()}.
 health_check(Pid, Opts) ->
     erlkoenig_health:add(Pid, Opts).
 
-%% @doc Remove a health check for a container.
+-doc "Remove a health check for a container.".
 -spec remove_health_check(container_pid()) -> ok.
 remove_health_check(Pid) ->
     erlkoenig_health:remove(Pid).
 
-%% @doc Get status of all health checks.
+-doc "Get status of all health checks.".
 -spec health_status() -> [map()].
 health_status() ->
     erlkoenig_health:status().
 
-%% @doc Subscribe an event handler to container lifecycle events.
-%%
-%% Events:
-%%   {container_started,    Id, Pid}       - entered running
-%%   {container_stopped,    Id, ExitInfo}  - exited
-%%   {container_failed,     Id, Reason}    - error state
-%%   {container_restarting, Id, Attempt}   - restart scheduled
-%%   {container_oom,        Id}            - OOM-Kill detected
+-doc """
+Subscribe an event handler to container lifecycle events.
+
+Events:
+  {container_started,    Id, Pid}       - entered running
+  {container_stopped,    Id, ExitInfo}  - exited
+  {container_failed,     Id, Reason}    - error state
+  {container_restarting, Id, Attempt}   - restart scheduled
+  {container_oom,        Id}            - OOM-Kill detected
+""".
 -spec subscribe(module(), term()) -> ok | {error, term()}.
 subscribe(Handler, Args) ->
     erlkoenig_events:subscribe(Handler, Args).
 
-%% @doc Unsubscribe an event handler.
+-doc "Unsubscribe an event handler.".
 -spec unsubscribe(module(), term()) -> ok | {error, term()}.
 unsubscribe(Handler, Args) ->
     erlkoenig_events:unsubscribe(Handler, Args).

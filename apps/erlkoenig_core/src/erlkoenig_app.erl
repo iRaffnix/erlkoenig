@@ -14,24 +14,44 @@
 %% limitations under the License.
 %%
 
-%%%-------------------------------------------------------------------
-%% @doc erlkoenig application callback
-%%
-%% Boot order:
-%%   1. Start supervisor (core services incl. zones + firewall table)
-%%   2. Setup nftables (per-zone masquerade + NAT)
-%%   3. Autostart containers from config file
-%% @end
-%%%-------------------------------------------------------------------
-
 -module(erlkoenig_app).
+-moduledoc """
+Erlkoenig application callback.
+
+Boot order:
+  1. Start DETS state (must be first -- recovery needs it)
+  2. Run recovery (finds and reconnects still-running containers)
+  3. Start supervisor (core services incl. zones + firewall table)
+  4. Setup nftables (per-zone masquerade + NAT)
+  5. Autostart containers from config file
+""".
 
 -behaviour(application).
 
 -export([start/2, stop/1]).
 
 start(_StartType, _StartArgs) ->
+    %% Step 1: DETS state (must be first — recovery needs it)
+    case erlkoenig_node_state:start_link() of
+        {ok, _} -> ok;
+        {error, DetsReason} ->
+            logger:warning("DETS state not available: ~p (recovery skipped)",
+                           [DetsReason])
+    end,
+
+    %% Step 2: Recovery (before supervisor, so recovered processes exist)
+    RecoveryResults = case whereis(erlkoenig_node_state) of
+        undefined -> [];
+        _ ->
+            {ok, Results} = erlkoenig_recovery:recover(),
+            Results
+    end,
+    log_recovery_results(RecoveryResults),
+
+    %% Step 3: Normal supervisor (creates infrastructure: zones, bridges, etc.)
     {ok, Sup} = erlkoenig_sup:start_link(),
+
+    %% Step 4: Firewall + autostart
     setup_firewall(),
     autostart_containers(),
     {ok, Sup}.
@@ -39,6 +59,15 @@ start(_StartType, _StartArgs) ->
 stop(_State) ->
     _ = erlkoenig_firewall_nft:teardown_table(),
     ok.
+
+%% Log recovery results summary.
+log_recovery_results([]) -> ok;
+log_recovery_results(Results) ->
+    Recovered = length([ok || {_, recovered} <- Results]),
+    Dead = length([ok || {_, dead} <- Results]),
+    Failed = length(Results) - Recovered - Dead,
+    logger:info("Recovery results: ~p recovered, ~p dead, ~p failed",
+                [Recovered, Dead, Failed]).
 
 %% Setup nftables table with masquerade for all zones.
 setup_firewall() ->

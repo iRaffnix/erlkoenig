@@ -1,11 +1,11 @@
 {application, erlkoenig_core, [
     {description, "Container runtime for Linux with OTP supervision"},
-    {vsn, "0.2.0"},
+    {vsn, "0.3.0"},
     {registered, [erlkoenig_sup, erlkoenig_zone, erlkoenig_zone_sup,
                   erlkoenig_bridge, erlkoenig_dns,
                   erlkoenig_ip_pool, erlkoenig_cgroup, erlkoenig_events,
                   erlkoenig_health, erlkoenig_audit, erlkoenig_pki,
-                  erlkoenig_ctl]},
+                  erlkoenig_ctl, erlkoenig_node_state]},
     {mod, {erlkoenig_app, []}},
     {applications, [
         kernel,

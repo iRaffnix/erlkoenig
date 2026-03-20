@@ -19,6 +19,9 @@
 # Install:
 #   sudo sh install.sh --version vX.Y.Z
 #   sudo sh install.sh --local /tmp/artifacts
+#   sudo make install     — Install from local build
+#   sudo make uninstall   — Remove installation
+#   make fetch-artifacts  — Download CI artifacts via gh
 #
 # Release:
 #   make tag VERSION=0.2.0
@@ -27,7 +30,12 @@
 
 .PHONY: all check rt rt-san erl test test-rt dialyzer integration release \
         dsl dsl-escript test-dsl go-demos \
+        fmt fmt-check xref lint \
+        install uninstall fetch-artifacts \
         tag clean clean-rt clean-erl clean-dsl
+
+PREFIX          ?= /opt/erlkoenig
+SERVICE_USER    ?= erlkoenig
 
 BUILD_DIR       := build/release
 BUILD_SAN       := build/san
@@ -41,7 +49,7 @@ all: rt erl check release
 
 # ── Alle Tests (kein Root) ──────────────────────────────
 
-check: test dialyzer test-dsl
+check: lint test dialyzer test-dsl
 
 # ── C-Runtime (static musl) ──────────────────────────────
 
@@ -91,6 +99,19 @@ $(BUILD_TEST)/Makefile:
 		-DERLKOENIG_BUILD_TESTS=ON \
 		-DERLKOENIG_BUILD_DEMOS=OFF \
 		-DCMAKE_BUILD_TYPE=Debug
+
+# ── Quality ──────────────────────────────────────────────
+
+fmt:
+	rebar3 fmt
+
+fmt-check:
+	rebar3 fmt --check
+
+xref: erl
+	rebar3 xref
+
+lint: fmt-check xref dialyzer
 
 # ── Erlang ───────────────────────────────────────────────
 
@@ -164,6 +185,80 @@ $(BUILD_DIR)/reverse-proxy: demos/reverse-proxy/main.go
 
 $(BUILD_DIR)/api-server: demos/api-server/main.go
 	CGO_ENABLED=0 go build -ldflags="-s -w" -o $@ $<
+
+# ── Install (local build) ──────────────────────────────
+#
+# Installs from a local build. For production, use install.sh
+# which handles downloads, upgrades, and architecture detection.
+
+install: release rt
+	@echo "Installing to $(PREFIX) ..."
+	@# Service user (idempotent)
+	id -u $(SERVICE_USER) >/dev/null 2>&1 || \
+		useradd --system --no-create-home --shell /usr/sbin/nologin $(SERVICE_USER)
+	@# Directories
+	mkdir -p $(PREFIX) $(PREFIX)/rt $(PREFIX)/rt/demo /etc/erlkoenig /var/lib/erlkoenig/volumes
+	@# Extract OTP release
+	tar xzf dist/erlkoenig-*.tar.gz -C $(PREFIX)
+	@# C runtime
+	install -m 755 $(RT_BIN) $(PREFIX)/rt/erlkoenig_rt
+	chown root:root $(PREFIX)/rt/erlkoenig_rt
+	setcap cap_sys_admin,cap_net_admin,cap_sys_chroot,cap_sys_ptrace,cap_setpcap,cap_setuid,cap_setgid,cap_dac_override,cap_bpf,cap_sys_resource+ep $(PREFIX)/rt/erlkoenig_rt
+	@# DSL escript (if built)
+	@[ -f dsl/erlkoenig-dsl ] && install -m 755 dsl/erlkoenig-dsl $(PREFIX)/bin/erlkoenig-dsl || true
+	@# Ownership: root owns files, service user can read
+	chown -R root:$(SERVICE_USER) $(PREFIX)
+	chmod 750 $(PREFIX)
+	[ -f $(PREFIX)/bin/erlkoenig_run ] && chmod 755 $(PREFIX)/bin/erlkoenig_run || true
+	[ -f $(PREFIX)/bin/erlkoenig-dsl ] && chmod 755 $(PREFIX)/bin/erlkoenig-dsl || true
+	[ -f $(PREFIX)/dist/erlkoenig.service ] && chmod 644 $(PREFIX)/dist/erlkoenig.service || true
+	@# RT dir owned by root (file capabilities)
+	chown -R root:root $(PREFIX)/rt
+	@# Volume dir owned by service user
+	chown $(SERVICE_USER):$(SERVICE_USER) /var/lib/erlkoenig/volumes
+	@# Fix escript shebang to bundled ERTS
+	@ERTS_BIN=$$(ls -d $(PREFIX)/erts-*/bin 2>/dev/null | head -1); \
+	if [ -n "$$ERTS_BIN" ] && [ -f $(PREFIX)/bin/erlkoenig-dsl ]; then \
+		sed -i "1s|.*|#!$$ERTS_BIN/escript|" $(PREFIX)/bin/erlkoenig-dsl; \
+		echo "  DSL shebang: $$ERTS_BIN/escript"; \
+	fi
+	@# CLI symlink
+	@[ -f $(PREFIX)/bin/erlkoenig-dsl ] && ln -sf $(PREFIX)/bin/erlkoenig-dsl /usr/local/bin/erlkoenig-dsl || true
+	@# Systemd symlink
+	@if [ -d /etc/systemd/system ] && [ -f $(PREFIX)/dist/erlkoenig.service ]; then \
+		ln -sf $(PREFIX)/dist/erlkoenig.service /etc/systemd/system/erlkoenig.service; \
+		systemctl daemon-reload; \
+		echo "  Systemd unit symlinked"; \
+	fi
+	@echo ""
+	@echo "Done. Next steps:"
+	@echo "  1. Start:  sudo systemctl start erlkoenig"
+	@echo "  2. Status: sudo systemctl status erlkoenig"
+	@echo "  3. Logs:   journalctl -u erlkoenig -f"
+
+uninstall:
+	@echo "Uninstalling erlkoenig ..."
+	-systemctl stop erlkoenig 2>/dev/null || true
+	-systemctl disable erlkoenig 2>/dev/null || true
+	rm -f /etc/systemd/system/erlkoenig.service
+	rm -f /usr/local/bin/erlkoenig-dsl
+	-systemctl daemon-reload 2>/dev/null || true
+	rm -rf $(PREFIX)
+	@echo "Done."
+	@echo "  Note: User '$(SERVICE_USER)' not removed. Run: userdel $(SERVICE_USER)"
+	@echo "  Note: /var/lib/erlkoenig/volumes/ not removed (persistent data)."
+	@echo "  Note: /etc/erlkoenig/ not removed (configuration)."
+
+# ── CI artifact download ─────────────────────────────────
+
+fetch-artifacts:
+ifdef RUN_ID
+	gh run download $(RUN_ID) -D /tmp/erlkoenig-artifacts
+else
+	gh run download -D /tmp/erlkoenig-artifacts
+endif
+	@echo "Artifacts in /tmp/erlkoenig-artifacts/"
+	@echo "Install with: sudo sh install.sh --local /tmp/erlkoenig-artifacts"
 
 # ── Version Tag ─────────────────────────────────────────
 CURRENT_VERSION = $(shell grep -oP '(?<=\{release, \{erlkoenig, ")[^"]+' rebar.config)

@@ -1,28 +1,32 @@
 #!/bin/sh
-# Erlkoenig Installer
-# ====================
+# Erlkoenig installer / updater
+# ===============================
 #
 # Usage:
-#   sudo sh install.sh --version v0.2.0          # download from GitHub
+#   sudo sh install.sh --version v0.3.0          # download from GitHub
 #   sudo sh install.sh --local /path/to/artifacts # install from local dir
 #
-# This script installs:
-#   /opt/erlkoenig/rt/erlkoenig_rt          C runtime (static binary)
-#   /opt/erlkoenig/                         OTP release (BEAM + ERTS)
-#   /opt/erlkoenig/bin/erlkoenig-dsl        DSL compiler (optional)
-#   /opt/erlkoenig/rt/demo/                 Demo binaries (optional)
-#
-# It does NOT pipe curl into sh. Download, review, then run.
+# Installs to /opt/erlkoenig (customizable with --prefix).
+# Does NOT pipe curl into sh. Download, review, then run.
 
 set -eu
 
 REPO="iRaffnix/erlkoenig"
+PREFIX="/opt/erlkoenig"
+RT_DIR=""   # set after PREFIX is final
+SERVICE_USER="erlkoenig"
 VERSION=""
 LOCAL_DIR=""
-INSTALL_DIR="/opt/erlkoenig"
-RT_DIR="/opt/erlkoenig/rt"
+FORCE=false
 
-# ── Argument parsing ──────────────────────────────────────
+# ── Helpers ──────────────────────────────────────────────
+
+info()  { echo "  [*] $*"; }
+warn()  { echo "  [!] $*" >&2; }
+err()   { echo "  [E] $*" >&2; }
+ok()    { echo "  [+] $*"; }
+
+# ── Argument parsing ─────────────────────────────────────
 
 usage() {
     echo "Usage: sudo sh install.sh [OPTIONS]"
@@ -30,10 +34,14 @@ usage() {
     echo "Options:"
     echo "  --version VERSION   Download release from GitHub (e.g., v0.2.0)"
     echo "  --local DIR         Install from local directory (CI artifacts)"
+    echo "  --prefix DIR        Installation directory (default: /opt/erlkoenig)"
+    echo "  --force             Force reinstall even if same version"
     echo "  --help              Show this help"
     echo ""
     echo "Examples:"
-    echo "  sudo sh install.sh --version v0.2.0"
+    echo "  sudo sh install.sh --version v0.3.0"
+    echo "  sudo sh install.sh --local /tmp/artifacts"
+    echo "  gh run download <run-id> -D /tmp/artifacts"
     echo "  sudo sh install.sh --local /tmp/artifacts"
     exit 0
 }
@@ -42,34 +50,122 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --version) VERSION="$2"; shift 2 ;;
         --local)   LOCAL_DIR="$2"; shift 2 ;;
-        --help)    usage ;;
-        *)         echo "Error: unknown option: $1" >&2; exit 1 ;;
+        --prefix)  PREFIX="$2"; shift 2 ;;
+        --force)   FORCE=true; shift ;;
+        --help|-h) usage ;;
+        *)         err "Unknown option: $1"; exit 1 ;;
     esac
 done
 
-if [ -z "$VERSION" ] && [ -z "$LOCAL_DIR" ]; then
-    echo "Error: specify --version or --local" >&2
-    echo "Run: sh install.sh --help" >&2
+RT_DIR="$PREFIX/rt"
+
+# ── Checks ───────────────────────────────────────────────
+
+if [ "$(id -u)" -ne 0 ]; then
+    err "Installer must be run as root (use sudo)"
     exit 1
 fi
 
-# ── Checks ────────────────────────────────────────────────
-
-if [ "$(id -u)" -ne 0 ]; then
-    echo "Error: must run as root (sudo)" >&2
+if [ -z "$VERSION" ] && [ -z "$LOCAL_DIR" ]; then
+    err "--version or --local is required"
+    echo "  Run: sh install.sh --help" >&2
     exit 1
 fi
 
 if [ -z "$LOCAL_DIR" ] && ! command -v curl >/dev/null 2>&1; then
-    echo "Error: curl is required for remote install" >&2
+    err "curl is required for remote install (or use --local)"
     exit 1
 fi
 
-# ── Conflict detection ────────────────────────────────────
+if [ -n "$LOCAL_DIR" ] && [ ! -d "$LOCAL_DIR" ]; then
+    err "Local directory not found: $LOCAL_DIR"
+    exit 1
+fi
+
+# ── Detect architecture ─────────────────────────────────
+
+detect_target() {
+    arch=$(uname -m)
+    case "$arch" in
+        x86_64|amd64)  arch="x86_64" ;;
+        aarch64|arm64) arch="aarch64" ;;
+        *) err "Unsupported architecture: $arch"; exit 1 ;;
+    esac
+
+    # Detect musl vs glibc
+    libc="linux"
+    if command -v ldd >/dev/null 2>&1; then
+        if ldd --version 2>&1 | grep -qi musl; then
+            libc="musl"
+        fi
+    elif [ -f /etc/alpine-release ]; then
+        libc="musl"
+    fi
+
+    echo "${arch}-${libc}"
+}
+
+# ── Read installed version ───────────────────────────────
+
+installed_version() {
+    if [ -f "$PREFIX/releases/start_erl.data" ]; then
+        awk '{print "v" $2}' "$PREFIX/releases/start_erl.data" 2>/dev/null || true
+    fi
+}
+
+# ── Daemon management ────────────────────────────────────
+
+daemon_is_running() {
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl is-active --quiet erlkoenig 2>/dev/null && return 0
+    fi
+    # Check for running beam process
+    pgrep -f "beam.*erlkoenig" >/dev/null 2>&1 && return 0
+    return 1
+}
+
+stop_daemon() {
+    info "Stopping erlkoenig daemon ..."
+
+    if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet erlkoenig 2>/dev/null; then
+        systemctl stop erlkoenig 2>/dev/null || true
+    fi
+
+    # Wait for clean shutdown (up to 15s — matches systemd TimeoutStopSec)
+    i=0
+    while [ $i -lt 15 ]; do
+        if ! daemon_is_running; then
+            ok "Daemon stopped"
+            return 0
+        fi
+        sleep 1
+        i=$((i + 1))
+    done
+
+    # Hard kill as last resort
+    pkill -9 -f "beam.*erlkoenig" 2>/dev/null || true
+    sleep 1
+    ok "Daemon stopped (forced)"
+}
+
+start_daemon() {
+    info "Starting erlkoenig daemon ..."
+    if command -v systemctl >/dev/null 2>&1 && [ -L /etc/systemd/system/erlkoenig.service ]; then
+        systemctl start erlkoenig
+    fi
+    sleep 2
+    if daemon_is_running; then
+        ok "Daemon started"
+    else
+        warn "Daemon may not have started — check: journalctl -u erlkoenig -n 20"
+    fi
+}
+
+# ── Conflict detection ───────────────────────────────────
 
 if [ -f /etc/systemd/system/erlkoenig_nft.service ] || systemctl is-active --quiet erlkoenig_nft 2>/dev/null; then
     echo "" >&2
-    echo "  [E] erlkoenig_nft.service is installed as a standalone service." >&2
+    err "erlkoenig_nft.service is installed as a standalone service."
     echo "" >&2
     echo "  erlkoenig bundles erlkoenig_nft as an OTP application." >&2
     echo "  Running both will cause nftables conflicts." >&2
@@ -79,83 +175,179 @@ if [ -f /etc/systemd/system/erlkoenig_nft.service ] || systemctl is-active --qui
     echo "    sudo systemctl disable erlkoenig_nft" >&2
     echo "    sudo rm /etc/systemd/system/erlkoenig_nft.service" >&2
     echo "" >&2
-    echo "  Your firewall config is preserved at:" >&2
-    echo "    /opt/erlkoenig_nft/etc/firewall.term" >&2
     exit 1
 fi
 
-# ── Create user + directories ─────────────────────────────
+# ── Version check ────────────────────────────────────────
 
-if ! id erlkoenig >/dev/null 2>&1; then
-    useradd -r -m -d "$INSTALL_DIR" -s /bin/bash erlkoenig
-    echo "Created user: erlkoenig"
+TARGET=$(detect_target)
+CURRENT=$(installed_version)
+IS_UPDATE=false
+
+if [ -d "$PREFIX/bin" ]; then
+    IS_UPDATE=true
+    if [ -n "$CURRENT" ] && [ -n "$VERSION" ]; then
+        cur_norm=$(echo "$CURRENT" | sed 's/^v//')
+        new_norm=$(echo "$VERSION" | sed 's/^v//')
+        if [ "$cur_norm" = "$new_norm" ] && [ "$FORCE" = false ]; then
+            ok "Already at version ${VERSION} — nothing to do (use --force to reinstall)"
+            exit 0
+        fi
+    fi
 fi
 
-mkdir -p "$INSTALL_DIR" "$RT_DIR" "$RT_DIR/demo" /etc/erlkoenig
-chown erlkoenig:erlkoenig "$INSTALL_DIR" /etc/erlkoenig
+if [ "$IS_UPDATE" = true ]; then
+    echo "Updating erlkoenig: ${CURRENT:-unknown} -> ${VERSION:-local} (${TARGET})"
+else
+    echo "Installing erlkoenig ${VERSION:-local} (${TARGET})"
+fi
+echo "  prefix: ${PREFIX}"
+echo ""
 
-# ── Download or copy artifacts ────────────────────────────
+# ── Stop daemon if running ───────────────────────────────
 
-WORKDIR=$(mktemp -d)
-trap 'rm -rf "$WORKDIR"' EXIT
+DAEMON_WAS_RUNNING=false
+
+if [ "$IS_UPDATE" = true ] && daemon_is_running; then
+    DAEMON_WAS_RUNNING=true
+    stop_daemon
+fi
+
+# ── Acquire artifacts ────────────────────────────────────
+
+TMPDIR=$(mktemp -d)
+
+cleanup() {
+    rm -rf "$TMPDIR"
+}
+trap cleanup EXIT
 
 if [ -n "$LOCAL_DIR" ]; then
-    # ── Local mode: copy from directory ──
-    echo "Installing from local directory: $LOCAL_DIR"
+    info "Installing from local artifacts: $LOCAL_DIR"
 
     # Find the release tarball
-    TARBALL=$(find "$LOCAL_DIR" -name 'erlkoenig-*.tar.gz' -not -name 'static-demo*' | head -1)
+    TARBALL=$(find "$LOCAL_DIR" -name 'erlkoenig-*.tar.gz' -not -name 'static-demo*' -print -quit 2>/dev/null || true)
     if [ -z "$TARBALL" ]; then
-        echo "Error: no erlkoenig-*.tar.gz found in $LOCAL_DIR" >&2
+        err "No erlkoenig-*.tar.gz found in $LOCAL_DIR"
         exit 1
     fi
 
     # Find C runtime
     RT_BIN=$(find "$LOCAL_DIR" -name 'erlkoenig_rt' -o -name 'erlkoenig_rt-linux-amd64' | head -1)
     if [ -z "$RT_BIN" ]; then
-        echo "Error: no erlkoenig_rt found in $LOCAL_DIR" >&2
+        err "No erlkoenig_rt found in $LOCAL_DIR"
         exit 1
     fi
 
-    cp "$TARBALL" "$WORKDIR/erlkoenig-release.tar.gz"
-    cp "$RT_BIN" "$WORKDIR/erlkoenig_rt"
+    cp "$TARBALL" "$TMPDIR/erlkoenig-release.tar.gz"
+    cp "$RT_BIN" "$TMPDIR/erlkoenig_rt"
 
     # Optional: DSL escript
     DSL_BIN=$(find "$LOCAL_DIR" -name 'erlkoenig-dsl' -o -name 'erlkoenig-dsl-linux-amd64' | head -1)
     if [ -n "$DSL_BIN" ]; then
-        cp "$DSL_BIN" "$WORKDIR/erlkoenig-dsl"
+        cp "$DSL_BIN" "$TMPDIR/erlkoenig-dsl"
     fi
 
     # Optional: demo binaries
     DEMO_TAR=$(find "$LOCAL_DIR" -name 'static-demo-binaries-*.tar.gz' | head -1)
     if [ -n "$DEMO_TAR" ]; then
-        cp "$DEMO_TAR" "$WORKDIR/static-demo-binaries.tar.gz"
+        cp "$DEMO_TAR" "$TMPDIR/static-demo-binaries.tar.gz"
     fi
 
     # Detect version from tarball content
-    VERSION=$(tar xzf "$WORKDIR/erlkoenig-release.tar.gz" -O releases/start_erl.data 2>/dev/null | awk '{print "v"$2}' || true)
     if [ -z "$VERSION" ]; then
-        VERSION="unknown"
+        VERSION=$(tar xzf "$TMPDIR/erlkoenig-release.tar.gz" -O releases/start_erl.data 2>/dev/null | awk '{print "v"$2}' || true)
+        if [ -z "$VERSION" ]; then
+            VERSION="unknown"
+        fi
     fi
+
+    ok "Found: $(basename "$TARBALL")"
 else
-    # ── Remote mode: download from GitHub ──
-    echo "Downloading erlkoenig $VERSION from GitHub..."
-    BASE_URL="https://github.com/$REPO/releases/download/$VERSION"
+    ARCHIVE="erlkoenig-${VERSION#v}-${TARGET}.tar.gz"
+    URL="https://github.com/${REPO}/releases/download/${VERSION}/${ARCHIVE}"
 
-    curl -fsSL -o "$WORKDIR/erlkoenig_rt" "$BASE_URL/erlkoenig_rt-linux-amd64"
-    curl -fsSL -o "$WORKDIR/erlkoenig-release.tar.gz" \
-        "$BASE_URL/erlkoenig-${VERSION#v}.tar.gz"
+    info "Downloading ${ARCHIVE} ..."
+    if ! curl -fsSL "$URL" -o "$TMPDIR/erlkoenig-release.tar.gz"; then
+        err "Download failed. Check that ${VERSION} has a ${TARGET} build."
+        err "Available at: https://github.com/${REPO}/releases/tag/${VERSION}"
+        if [ "$DAEMON_WAS_RUNNING" = true ]; then
+            warn "Restarting daemon with previous version ..."
+            start_daemon
+        fi
+        exit 1
+    fi
 
-    # Optional downloads (don't fail if missing)
-    curl -fsSL -o "$WORKDIR/erlkoenig-dsl" "$BASE_URL/erlkoenig-dsl-linux-amd64" 2>/dev/null || true
-    curl -fsSL -o "$WORKDIR/static-demo-binaries.tar.gz" \
-        "$BASE_URL/static-demo-binaries-linux-amd64.tar.gz" 2>/dev/null || true
+    # C runtime (architecture-independent — static musl binary)
+    if ! curl -fsSL "https://github.com/${REPO}/releases/download/${VERSION}/erlkoenig_rt-linux-amd64" \
+            -o "$TMPDIR/erlkoenig_rt"; then
+        err "Failed to download erlkoenig_rt"
+        if [ "$DAEMON_WAS_RUNNING" = true ]; then
+            warn "Restarting daemon with previous version ..."
+            start_daemon
+        fi
+        exit 1
+    fi
+
+    # Optional: DSL escript
+    curl -fsSL "https://github.com/${REPO}/releases/download/${VERSION}/erlkoenig-dsl-${TARGET}" \
+        -o "$TMPDIR/erlkoenig-dsl" 2>/dev/null || true
+
+    # Optional: demo binaries
+    curl -fsSL "https://github.com/${REPO}/releases/download/${VERSION}/static-demo-binaries-linux-amd64.tar.gz" \
+        -o "$TMPDIR/static-demo-binaries.tar.gz" 2>/dev/null || true
 fi
 
-# ── Install C runtime ─────────────────────────────────────
+# Verify release archive
+if ! tar tzf "$TMPDIR/erlkoenig-release.tar.gz" >/dev/null 2>&1; then
+    err "Release archive is corrupt"
+    if [ "$DAEMON_WAS_RUNNING" = true ]; then
+        warn "Restarting daemon with previous version ..."
+        start_daemon
+    fi
+    exit 1
+fi
 
-echo "Installing C runtime..."
-install -m 755 "$WORKDIR/erlkoenig_rt" "$RT_DIR/erlkoenig_rt"
+ok "Artifacts verified"
+
+# ── Service user ─────────────────────────────────────────
+
+if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
+    useradd --system --no-create-home --shell /usr/sbin/nologin "$SERVICE_USER"
+    ok "Service user '$SERVICE_USER' created"
+fi
+
+# ── Clean extraction (updates) ───────────────────────────
+# Old files (stale boot scripts, BEAM modules from different OTP version)
+# can cause crashes. Wipe and re-extract cleanly.
+
+if [ "$IS_UPDATE" = true ]; then
+    info "Removing old release files ..."
+    rm -rf "${PREFIX:?}/bin" "${PREFIX:?}/erts-"* "${PREFIX:?}/lib" "${PREFIX:?}/releases" "${PREFIX:?}/dist"
+fi
+
+# ── Create directories ───────────────────────────────────
+
+mkdir -p "$PREFIX" "$RT_DIR" "$RT_DIR/demo" /etc/erlkoenig /var/lib/erlkoenig/volumes
+
+# ── Extract OTP release ──────────────────────────────────
+
+info "Extracting release to ${PREFIX} ..."
+if ! tar xzf "$TMPDIR/erlkoenig-release.tar.gz" -C "$PREFIX"; then
+    err "Extraction failed"
+    if [ "$DAEMON_WAS_RUNNING" = true ]; then
+        warn "Restarting daemon with previous version ..."
+        start_daemon
+    fi
+    exit 1
+fi
+
+ok "OTP release extracted"
+
+# ── Install C runtime ────────────────────────────────────
+
+info "Installing C runtime ..."
+install -m 755 "$TMPDIR/erlkoenig_rt" "$RT_DIR/erlkoenig_rt"
 chown root:root "$RT_DIR/erlkoenig_rt"
 setcap \
     cap_sys_admin,cap_net_admin,cap_sys_chroot,cap_sys_ptrace,\
@@ -163,111 +355,93 @@ cap_setpcap,cap_setuid,cap_setgid,cap_dac_override,\
 cap_bpf,cap_sys_resource+ep \
     "$RT_DIR/erlkoenig_rt"
 
-echo "  $RT_DIR/erlkoenig_rt ($(wc -c < "$RT_DIR/erlkoenig_rt") bytes)"
+ok "C runtime: $RT_DIR/erlkoenig_rt ($(wc -c < "$RT_DIR/erlkoenig_rt") bytes)"
 
-# ── Install OTP release ───────────────────────────────────
+# ── Install DSL escript (optional) ───────────────────────
 
-echo "Installing OTP release..."
-tar xzf "$WORKDIR/erlkoenig-release.tar.gz" -C "$INSTALL_DIR"
-chown -R erlkoenig:erlkoenig "$INSTALL_DIR"
-echo "  $INSTALL_DIR/"
+if [ -f "$TMPDIR/erlkoenig-dsl" ] && [ -s "$TMPDIR/erlkoenig-dsl" ]; then
+    install -m 755 "$TMPDIR/erlkoenig-dsl" "$PREFIX/bin/erlkoenig-dsl"
+    ok "DSL compiler installed"
+fi
 
-# ── Install DSL escript (optional) ─────────────────────────
+# ── Install demo binaries (optional) ─────────────────────
 
-if [ -f "$WORKDIR/erlkoenig-dsl" ]; then
-    echo "Installing DSL compiler..."
-    install -m 755 -o erlkoenig -g erlkoenig \
-        "$WORKDIR/erlkoenig-dsl" "$INSTALL_DIR/bin/erlkoenig-dsl"
-
-    # Fix shebang to use bundled ERTS
-    ERTS_BIN=$(ls -d "$INSTALL_DIR"/erts-*/bin 2>/dev/null | head -1)
-    if [ -n "$ERTS_BIN" ]; then
-        sed -i "1s|.*|#!${ERTS_BIN}/escript|" "$INSTALL_DIR/bin/erlkoenig-dsl"
+if [ -f "$TMPDIR/static-demo-binaries.tar.gz" ] && [ -s "$TMPDIR/static-demo-binaries.tar.gz" ]; then
+    tar xzf "$TMPDIR/static-demo-binaries.tar.gz" -C "$TMPDIR" 2>/dev/null || true
+    if [ -d "$TMPDIR/static-demo-binaries" ]; then
+        cp "$TMPDIR"/static-demo-binaries/test-erlkoenig-* "$RT_DIR/demo/" 2>/dev/null || true
+        cp "$TMPDIR"/static-demo-binaries/echo-server "$RT_DIR/" 2>/dev/null || true
+        cp "$TMPDIR"/static-demo-binaries/reverse-proxy "$RT_DIR/" 2>/dev/null || true
+        cp "$TMPDIR"/static-demo-binaries/api-server "$RT_DIR/" 2>/dev/null || true
+        ok "Demo binaries installed"
     fi
-    echo "  $INSTALL_DIR/bin/erlkoenig-dsl"
 fi
 
-# ── Install demo binaries (optional) ──────────────────────
+# ── File permissions ─────────────────────────────────────
 
-if [ -f "$WORKDIR/static-demo-binaries.tar.gz" ]; then
-    echo "Installing demo binaries..."
-    tar xzf "$WORKDIR/static-demo-binaries.tar.gz" -C "$WORKDIR"
-    if [ -d "$WORKDIR/static-demo-binaries" ]; then
-        cp "$WORKDIR"/static-demo-binaries/test-erlkoenig-* "$RT_DIR/demo/" 2>/dev/null || true
-        cp "$WORKDIR"/static-demo-binaries/echo-server "$RT_DIR/" 2>/dev/null || true
-        cp "$WORKDIR"/static-demo-binaries/reverse-proxy "$RT_DIR/" 2>/dev/null || true
-        cp "$WORKDIR"/static-demo-binaries/api-server "$RT_DIR/" 2>/dev/null || true
-        chown -R root:root "$RT_DIR/demo"
-        chmod 700 "$RT_DIR/demo"/*
-        chmod 755 "$RT_DIR/echo-server" "$RT_DIR/reverse-proxy" "$RT_DIR/api-server" 2>/dev/null || true
-    fi
-    echo "  $RT_DIR/demo/"
+chown -R root:"$SERVICE_USER" "$PREFIX"
+chmod 750 "$PREFIX"
+[ -f "$PREFIX/bin/erlkoenig_run" ] && chmod 755 "$PREFIX/bin/erlkoenig_run"
+[ -f "$PREFIX/bin/erlkoenig-dsl" ] && chmod 755 "$PREFIX/bin/erlkoenig-dsl"
+[ -f "$PREFIX/dist/erlkoenig.service" ] && chmod 644 "$PREFIX/dist/erlkoenig.service"
+
+# RT dir owned by root (C runtime runs with file capabilities)
+chown -R root:root "$RT_DIR"
+chmod 755 "$RT_DIR" "$RT_DIR/erlkoenig_rt"
+[ -d "$RT_DIR/demo" ] && chmod 700 "$RT_DIR/demo"/* 2>/dev/null || true
+
+# Volume base dir owned by service user
+chown "$SERVICE_USER":"$SERVICE_USER" /var/lib/erlkoenig/volumes
+
+ok "Permissions set"
+
+# ── Fix escript shebang to use bundled ERTS ──────────────
+
+ERTS_BIN=$(ls -d "$PREFIX"/erts-*/bin 2>/dev/null | head -1)
+if [ -n "$ERTS_BIN" ] && [ -f "$PREFIX/bin/erlkoenig-dsl" ]; then
+    sed -i "1s|.*|#!${ERTS_BIN}/escript|" "$PREFIX/bin/erlkoenig-dsl"
+    ok "DSL shebang: ${ERTS_BIN}/escript"
 fi
 
-# ── Make erlkoenig_run executable ─────────────────────────
+# ── Symlink CLI into PATH ────────────────────────────────
 
-if [ -f "$INSTALL_DIR/bin/erlkoenig_run" ]; then
-    chmod +x "$INSTALL_DIR/bin/erlkoenig_run"
+if [ -f "$PREFIX/bin/erlkoenig-dsl" ]; then
+    ln -sf "$PREFIX/bin/erlkoenig-dsl" /usr/local/bin/erlkoenig-dsl
+    ok "CLI symlink: /usr/local/bin/erlkoenig-dsl"
 fi
 
-# ── Systemd service ───────────────────────────────────────
+# ── Systemd unit (symlink from dist/) ────────────────────
 
-if [ -d /etc/systemd/system ]; then
-    cat > /etc/systemd/system/erlkoenig.service <<UNIT
-[Unit]
-Description=Erlkoenig Container Runtime
-After=network.target
-Wants=network.target
-
-[Service]
-Type=simple
-User=erlkoenig
-Group=erlkoenig
-WorkingDirectory=${INSTALL_DIR}
-ExecStart=${INSTALL_DIR}/bin/erlkoenig_run
-KillSignal=SIGTERM
-TimeoutStopSec=15
-Environment=HOME=${INSTALL_DIR}
-RuntimeDirectory=erlkoenig
-RuntimeDirectoryMode=0755
-
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
-Delegate=yes
-DelegateSubgroup=init
-LimitNOFILE=65536
-LimitMEMLOCK=infinity
-
-Restart=on-failure
-RestartSec=5
-
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=erlkoenig
-
-NoNewPrivileges=yes
-ProtectHome=yes
-PrivateTmp=yes
-ProtectClock=yes
-RestrictSUIDSGID=yes
-ProtectKernelTunables=yes
-
-[Install]
-WantedBy=multi-user.target
-UNIT
+if [ -d /etc/systemd/system ] && [ -f "$PREFIX/dist/erlkoenig.service" ]; then
+    ln -sf "$PREFIX/dist/erlkoenig.service" /etc/systemd/system/erlkoenig.service
     systemctl daemon-reload
-    echo "Systemd unit: erlkoenig.service"
+    ok "Systemd unit: erlkoenig.service (symlinked)"
 fi
 
-# ── Done ──────────────────────────────────────────────────
+# ── Restart daemon if it was running ─────────────────────
+
+if [ "$DAEMON_WAS_RUNNING" = true ]; then
+    start_daemon
+fi
+
+# ── Done ─────────────────────────────────────────────────
 
 echo ""
-echo "Erlkoenig $VERSION installed successfully."
+if [ "$IS_UPDATE" = true ]; then
+    echo "Update complete! ${CURRENT:-unknown} -> ${VERSION:-local}"
+else
+    echo "Installation complete!"
+fi
 echo ""
-echo "  Runtime: $RT_DIR/erlkoenig_rt"
-echo "  Release: $INSTALL_DIR/"
-echo "  Config:  /etc/erlkoenig/"
+echo "  Start:     sudo systemctl start erlkoenig"
+echo "  Status:    sudo systemctl status erlkoenig"
+echo "  Stop:      sudo systemctl stop erlkoenig"
+echo "  Enable:    sudo systemctl enable erlkoenig"
+echo "  Logs:      journalctl -u erlkoenig -f"
 echo ""
-echo "Start:    sudo systemctl start erlkoenig"
-echo "Status:   sudo systemctl status erlkoenig"
-echo "Stop:     sudo systemctl stop erlkoenig"
-echo "Logs:     journalctl -u erlkoenig -f"
+echo "  Runtime:   $RT_DIR/erlkoenig_rt"
+echo "  Release:   $PREFIX/"
+echo "  Config:    /etc/erlkoenig/"
+echo "  Volumes:   /var/lib/erlkoenig/volumes/"
+echo "  Socket:    /run/erlkoenig/ctl.sock"
+echo ""

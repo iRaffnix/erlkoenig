@@ -1,0 +1,54 @@
+[Unit]
+Description=Erlkoenig Container Runtime
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+
+## Dedicated service user
+User=erlkoenig
+Group=erlkoenig
+
+## Start the runtime
+ExecStart=/opt/erlkoenig/bin/erlkoenig_run
+
+## Graceful shutdown
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+## Restart policy
+Restart=on-failure
+RestartSec=5
+
+## HOME needed for BEAM release
+Environment=HOME=/opt/erlkoenig
+
+## Directories (systemd creates with correct owner)
+RuntimeDirectory=erlkoenig
+RuntimeDirectoryMode=0755
+StateDirectory=erlkoenig
+StateDirectoryMode=0750
+
+## Container runtime needs network caps
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+
+## cgroup delegation for container limits
+Delegate=yes
+DelegateSubgroup=init
+
+## File descriptors (container workloads)
+LimitNOFILE=65536
+LimitMEMLOCK=infinity
+
+## Security hardening
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateTmp=yes
+ProtectClock=yes
+RestrictSUIDSGID=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+
+[Install]
+WantedBy=multi-user.target

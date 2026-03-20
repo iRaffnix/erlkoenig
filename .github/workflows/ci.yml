@@ -10,7 +10,7 @@ jobs:
   # ── C Runtime (static musl binary) ────────────────────────
   c-runtime:
     name: C Runtime
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
@@ -34,14 +34,14 @@ jobs:
   # ── Erlang (compile + eunit + dialyzer) ──────────────────
   erlang:
     name: Erlang Tests + Dialyzer
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup Beam
         uses: erlef/setup-beam@v1
         with:
-          otp-version: '27'
+          otp-version: '28'
           rebar3-version: '3.24'
 
       - name: Cache rebar3
@@ -50,12 +50,18 @@ jobs:
           path: |
             _build
             ~/.cache/rebar3
-          key: rebar3-otp27-${{ runner.os }}-${{ hashFiles('rebar.lock', 'rebar.config') }}
+          key: rebar3-otp28-${{ runner.os }}-${{ hashFiles('rebar.lock', 'rebar.config') }}
           restore-keys: |
-            rebar3-otp27-${{ runner.os }}-
+            rebar3-otp28-${{ runner.os }}-
 
       - name: Compile
         run: rebar3 compile
+
+      - name: Check formatting
+        run: rebar3 fmt --check
+
+      - name: Cross-reference analysis
+        run: rebar3 xref
 
       - name: EUnit
         run: rebar3 eunit
@@ -66,7 +72,7 @@ jobs:
   # ── Kernel Tests (privileged, root) ──────────────────────
   kernel:
     name: Kernel Tests (root)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
@@ -90,7 +96,7 @@ jobs:
   # ── Elixir DSL ────────────────────────────────────────────
   dsl:
     name: Elixir DSL Tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
@@ -103,7 +109,7 @@ jobs:
       - name: Setup Beam
         uses: erlef/setup-beam@v1
         with:
-          otp-version: '27'
+          otp-version: '28'
           elixir-version: '1.18'
           rebar3-version: '3.24'
 
@@ -122,50 +128,49 @@ jobs:
   # Download: gh run download <run-id> -D /tmp/artifacts
   # Test:     sudo sh install.sh --local /tmp/artifacts
   release:
-    name: Release artifacts
-    runs-on: ubuntu-latest
+    name: Release ${{ matrix.target.name }}
+    runs-on: ${{ matrix.target.runner }}
     needs: [erlang, c-runtime]
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - name: x86_64-linux
+            runner: ubuntu-22.04
+            image: hexpm/elixir:1.18.4-erlang-28.4.1-debian-bookworm-20260316-slim
+            deps: apt-get update && apt-get install -y git make gcc g++ curl
+          - name: x86_64-musl
+            runner: ubuntu-22.04
+            image: hexpm/elixir:1.18.4-erlang-28.4.1-alpine-3.21.6
+            deps: apk add --no-cache git make gcc g++ musl-dev curl
+
+    container:
+      image: ${{ matrix.target.image }}
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install system dependencies
+      - name: Install build deps
+        run: ${{ matrix.target.deps }}
+
+      - name: Install rebar3
         run: |
-          sudo apt-get update
-          sudo apt-get install -y musl-tools golang-go
+          curl -fsSL https://s3.amazonaws.com/rebar3/rebar3 -o /usr/local/bin/rebar3
+          chmod +x /usr/local/bin/rebar3
 
-      - uses: erlef/setup-beam@v1
-        with:
-          otp-version: '27'
-          elixir-version: '1.18'
-          rebar3-version: '3.24'
-
-      - name: Build C runtime
-        run: make rt
-
-      - name: Build Go demos
-        run: make go-demos
-
-      - name: Build Erlang + OTP release
+      - name: Compile + release
         run: |
           rebar3 compile
           make release
 
-      - name: Package artifacts
+      - name: Collect artifact
         run: |
           mkdir -p out
-          cp build/release/erlkoenig_rt out/erlkoenig_rt-linux-amd64
-          cp dist/erlkoenig-*.tar.gz out/
-          cp dist/erlkoenig-dsl out/erlkoenig-dsl-linux-amd64
-          mkdir -p static-demo-binaries
-          cp build/release/demo/test-erlkoenig-* static-demo-binaries/
-          cp build/release/echo-server static-demo-binaries/
-          cp build/release/reverse-proxy static-demo-binaries/
-          cp build/release/api-server static-demo-binaries/
-          tar czf out/static-demo-binaries-linux-amd64.tar.gz -C . static-demo-binaries/
+          cp dist/erlkoenig-*.tar.gz out/erlkoenig-${{ matrix.target.name }}.tar.gz
           ls -lh out/
 
-      - name: Upload release artifacts
+      - name: Upload release artifact
         uses: actions/upload-artifact@v4
         with:
-          name: release-linux-amd64
-          path: out/*
+          name: release-${{ matrix.target.name }}
+          path: out/*.tar.gz

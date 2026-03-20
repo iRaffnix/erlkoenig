@@ -17,8 +17,9 @@ build/
 dsl/_build/
 dsl/erlkoenig-dsl
 
-# Release tarballs
-dist/
+# Release tarballs (but keep dist/erlkoenig.service)
+dist/*.tar.gz
+dist/erlkoenig-dsl
 
 # Generated docs
 doc/

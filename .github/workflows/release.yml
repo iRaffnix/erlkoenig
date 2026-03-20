@@ -9,8 +9,13 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  # ── Static binaries (C runtime + Go demos) ────────────────
+  #
+  # These are statically linked (musl/Go) and don't need
+  # container isolation — they're portable by nature.
+  static:
+    name: Static binaries
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
@@ -19,51 +24,21 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y musl-tools golang-go
 
-      - uses: erlef/setup-beam@v1
-        with:
-          otp-version: '27'
-          elixir-version: '1.18'
-          rebar3-version: '3.24'
-
-      # ── Build everything ──────────────────────────────────
       - name: Build C runtime (static musl)
         run: make rt
 
       - name: Build Go demos (static)
         run: make go-demos
 
-      - name: Build Erlang + OTP release
-        run: |
-          rebar3 compile
-          make release
-
-      # ── Run tests before release ──────────────────────────
-      - name: EUnit
-        run: rebar3 eunit
-
-      - name: Dialyzer
-        run: make dialyzer
-
-      - name: DSL tests
-        run: cd dsl && mix test
-
-      # ── Verify artifacts ──────────────────────────────────
       - name: Verify static binaries
         run: |
           echo "=== erlkoenig_rt ==="
           file build/release/erlkoenig_rt | grep -q "statically linked"
           ls -lh build/release/erlkoenig_rt
           echo ""
-          echo "=== C demo binaries ==="
-          ls -lh build/release/demo/
-          echo ""
           echo "=== Go demo binaries ==="
           ls -lh build/release/echo-server build/release/reverse-proxy build/release/api-server
-          echo ""
-          echo "=== dist/ ==="
-          ls -lh dist/
 
-      # ── Package static-demo-binaries ───────────────────────
       - name: Package static-demo-binaries
         run: |
           mkdir -p static-demo-binaries
@@ -71,40 +46,114 @@ jobs:
           cp build/release/echo-server static-demo-binaries/
           cp build/release/reverse-proxy static-demo-binaries/
           cp build/release/api-server static-demo-binaries/
-          tar czf dist/static-demo-binaries-linux-amd64.tar.gz -C . static-demo-binaries/
-          echo "=== static-demo-binaries ==="
-          ls -lh static-demo-binaries/
-          echo ""
-          echo "Archive: $(ls -lh dist/static-demo-binaries-linux-amd64.tar.gz | awk '{print $5}')"
+          tar czf static-demo-binaries-linux-amd64.tar.gz -C . static-demo-binaries/
 
-      # ── Upload artifacts ──────────────────────────────────
-      - name: Upload artifacts
+      - name: Upload C runtime
         uses: actions/upload-artifact@v4
         with:
-          name: release-linux-amd64
-          path: |
-            build/release/erlkoenig_rt
-            dist/erlkoenig-*.tar.gz
-            dist/erlkoenig-dsl
-            dist/static-demo-binaries-linux-amd64.tar.gz
+          name: erlkoenig-rt-linux-amd64
+          path: build/release/erlkoenig_rt
 
-  # ── GitHub Release ────────────────────────────────────────
+      - name: Upload demo binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-demo-binaries-linux-amd64
+          path: static-demo-binaries-linux-amd64.tar.gz
+
+  # ── Erlang release (container matrix) ──────────────────────
+  #
+  # Built inside pinned container images to control glibc and
+  # OpenSSL versions. ERTS is included in the release tarball.
+  erlang-release:
+    name: Erlang release (${{ matrix.target.name }})
+    runs-on: ${{ matrix.target.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - name: x86_64-linux
+            runner: ubuntu-22.04
+            image: hexpm/elixir:1.18.4-erlang-28.4.1-debian-bookworm-20260316-slim
+            deps: apt-get update && apt-get install -y git make gcc g++ curl
+          - name: x86_64-musl
+            runner: ubuntu-22.04
+            image: hexpm/elixir:1.18.4-erlang-28.4.1-alpine-3.21.6
+            deps: apk add --no-cache git make gcc g++ musl-dev curl
+          - name: aarch64-linux
+            runner: ubuntu-22.04-arm
+            image: hexpm/elixir:1.18.4-erlang-28.4.1-debian-bookworm-20260316-slim
+            deps: apt-get update && apt-get install -y git make gcc g++ curl
+
+    container:
+      image: ${{ matrix.target.image }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: ${{ matrix.target.deps }}
+
+      - name: Install rebar3
+        run: |
+          curl -fsSL https://s3.amazonaws.com/rebar3/rebar3 -o /usr/local/bin/rebar3
+          chmod +x /usr/local/bin/rebar3
+
+      - name: Verify toolchain
+        run: |
+          erl -noshell -eval 'io:format("OTP ~s~n", [erlang:system_info(otp_release)]), halt().'
+          rebar3 version
+
+      - name: Compile
+        run: rebar3 compile
+
+      - name: EUnit
+        run: rebar3 eunit
+
+      - name: Dialyzer
+        run: rebar3 dialyzer
+
+      - name: Build release
+        run: make release
+
+      - name: Build DSL escript
+        run: cd dsl && mix local.hex --force && mix local.rebar --force && mix escript.build
+        env:
+          MIX_ENV: prod
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p out
+          cp dist/erlkoenig-*.tar.gz out/erlkoenig-${{ github.ref_name }}-${{ matrix.target.name }}.tar.gz
+          cp dsl/erlkoenig-dsl out/erlkoenig-dsl-${{ matrix.target.name }}
+          ls -lh out/
+
+      - name: Upload release
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target.name }}
+          path: out/*
+
+  # ── GitHub Release ─────────────────────────────────────────
   publish:
-    needs: build
-    runs-on: ubuntu-latest
+    needs: [static, erlang-release]
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: release-linux-amd64
           path: artifacts
+          merge-multiple: true
+
+      - uses: actions/checkout@v4
 
       - name: Prepare release files
         run: |
           mkdir -p release
-          cp artifacts/build/release/erlkoenig_rt release/erlkoenig_rt-linux-amd64
-          cp artifacts/dist/erlkoenig-*.tar.gz release/
-          cp artifacts/dist/erlkoenig-dsl release/erlkoenig-dsl-linux-amd64
-          cp artifacts/dist/static-demo-binaries-linux-amd64.tar.gz release/
+          cp artifacts/erlkoenig_rt release/erlkoenig_rt-linux-amd64
+          cp artifacts/static-demo-binaries-linux-amd64.tar.gz release/
+          cp artifacts/erlkoenig-*.tar.gz release/
+          cp artifacts/erlkoenig-dsl-* release/
+          cp install.sh release/install.sh
+          echo "=== Release files ==="
           ls -lh release/
 
       - name: Create GitHub Release

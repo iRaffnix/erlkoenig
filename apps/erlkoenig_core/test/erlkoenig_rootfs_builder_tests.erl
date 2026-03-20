@@ -25,13 +25,18 @@
 ensure_fuse_available() ->
     case code:which(erlkoenig_fuse_store) of
         non_existing ->
-            FuseEbin = "/home/erlkoenig/code/erlkoenig_fuse/_build/default/lib/erlkoenig_fuse/ebin",
-            FuseInclude = "/home/erlkoenig/code/erlkoenig_fuse/include",
-            true = code:add_patha(FuseEbin),
-            %% Also need the .hrl — but since we don't include it in
-            %% test code (only the modules we call do), ebin is enough.
-            _ = FuseInclude,
-            ok;
+            %% Try common dev paths for erlkoenig_fuse
+            Candidates = [
+                "/home/erlkoenig/code/erlkoenig_fuse/_build/default/lib/erlkoenig_fuse/ebin",
+                "/home/dev/code/erlkoenig_fuse/_build/default/lib/erlkoenig_fuse/ebin"
+            ],
+            case lists:filter(fun filelib:is_dir/1, Candidates) of
+                [FuseEbin | _] ->
+                    true = code:add_patha(FuseEbin),
+                    ok;
+                [] ->
+                    {skip, fuse_not_available}
+            end;
         _ ->
             ok
     end.
@@ -72,21 +77,27 @@ cleanup({StorePid, TmpDir, _FilesDir, _BinaryPath, _ConfigPath}) ->
 %%====================================================================
 
 rootfs_builder_test_() ->
-    {foreach,
-     fun setup/0,
-     fun cleanup/1,
-     [
-      fun build_simple/1,
-      fun build_with_rootfs_spec/1,
-      fun build_with_host_file/1,
-      fun build_no_binary/1,
-      fun build_returns_tmpfs/1,
-      fun build_error_missing_binary/1,
-      fun build_empty_config/1,
-      fun build_seccomp_default/1,
-      fun build_seccomp_explicit/1,
-      fun build_with_inline_file/1
-     ]}.
+    case ensure_fuse_available() of
+        {skip, _} ->
+            %% erlkoenig_fuse not available (CI without sibling project) — skip all tests
+            [];
+        ok ->
+            {foreach,
+             fun setup/0,
+             fun cleanup/1,
+             [
+              fun build_simple/1,
+              fun build_with_rootfs_spec/1,
+              fun build_with_host_file/1,
+              fun build_no_binary/1,
+              fun build_returns_tmpfs/1,
+              fun build_error_missing_binary/1,
+              fun build_empty_config/1,
+              fun build_seccomp_default/1,
+              fun build_seccomp_explicit/1,
+              fun build_with_inline_file/1
+             ]}
+    end.
 
 %%====================================================================
 %% Test: simple build — binary path only, no rootfs block

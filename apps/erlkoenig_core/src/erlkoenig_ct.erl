@@ -54,6 +54,9 @@ States:
 
 %% gen_statem callbacks
 -export([callback_mode/0, init/1, terminate/3]).
+%% Runtime-optional sibling modules (erlkoenig_fuse).
+-dialyzer({no_missing_calls, [save_manifest/2, start_fuse_mount/3, cleanup_fuse/1]}).
+
 -export([creating/3, namespace_ready/3, starting/3,
          running/3, stopping/3, stopped/3, restarting/3,
          recovering/3, disconnected/3, failed/3]).

@@ -108,7 +108,7 @@ BinaryPath: path to the binary
 SigPath:    path to the .sig file
 Returns metadata on success (sha256, git_sha, signer, chain).
 """.
--spec verify(file:filename(), file:filename()) ->
+-spec verify(file:filename_all(), file:filename_all()) ->
     {ok, sig_meta()} | {error, term()}.
 verify(BinaryPath, SigPath) ->
     try

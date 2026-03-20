@@ -18,6 +18,9 @@ All commands are logged to erlkoenig_audit.
 -export([start_link/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
+%% Runtime-optional sibling modules (erlkoenig_sig, erlkoenig_ingest).
+-dialyzer({no_missing_calls, [dispatch/3]}).
+
 -define(DEFAULT_SOCK, "/run/erlkoenig/ctl.sock").
 -define(MAX_CONNS, 5).
 
@@ -89,7 +92,7 @@ handle_info(accept, #state{listen_sock = LSock, conns = N} = State) ->
     case gen_tcp:accept(LSock, 100) of
         {ok, Sock} ->
             Pid = spawn_link(fun() -> handle_connection(Sock) end),
-            gen_tcp:controlling_process(Sock, Pid),
+            _ = gen_tcp:controlling_process(Sock, Pid),
             %% Continue accepting
             self() ! accept,
             {noreply, State#state{conns = N + 1}};
@@ -126,7 +129,7 @@ handle_connection(Sock) ->
     conn_loop(Sock, PeerInfo).
 
 conn_loop(Sock, PeerInfo) ->
-    case gen_tcp:recv(Sock, 0, 30_000) of
+    _ = case gen_tcp:recv(Sock, 0, 30_000) of
         {ok, Data} ->
             case erlkoenig_ctl_proto:decode_request(Data) of
                 {ok, {ReqId, Cmd, Payload}} ->
@@ -303,22 +306,18 @@ dispatch(push, Payload, PeerInfo) ->
             {ok, BinaryHash}
     end,
 
-    case Result of
-        {ok, Hash} ->
-            ok = erlkoenig_artifact_store:register(Name, #{
-                manifest_hash => Hash,
-                binary_hash => BinaryHash,
-                binary_size => byte_size(BinaryData),
-                signature => Signature,
-                pushed_at => erlang:system_time(second),
-                tags => Tags,
-                files => [{P, byte_size(D)} || {P, D} <- Files]
-            }),
-            RespTerm = #{manifest_hash => Hash, name => Name},
-            {ok, term_to_binary(RespTerm)};
-        {error, Reason} ->
-            {error, iolist_to_binary(io_lib:format("~p", [Reason]))}
-    end;
+    {ok, Hash} = Result,
+    ok = erlkoenig_artifact_store:register(Name, #{
+        manifest_hash => Hash,
+        binary_hash => BinaryHash,
+        binary_size => byte_size(BinaryData),
+        signature => Signature,
+        pushed_at => erlang:system_time(second),
+        tags => Tags,
+        files => [{P, byte_size(D)} || {P, D} <- Files]
+    }),
+    RespTerm = #{manifest_hash => Hash, name => Name},
+    {ok, term_to_binary(RespTerm)};
 
 dispatch(artifacts, Payload, _PeerInfo) ->
     Opts = case Payload of

@@ -1,6 +1,7 @@
 -module(erlkoenig_pki_tests).
 
 -include_lib("eunit/include/eunit.hrl").
+-include_lib("stdlib/include/assert.hrl").
 
 fixture(Name) ->
     {ok, Cwd} = file:get_cwd(),

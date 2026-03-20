@@ -4,37 +4,35 @@
 %% Licensed under the Apache License, Version 2.0
 %%
 
-%%%-------------------------------------------------------------------
-%% @doc Binary signature creation and verification.
-%%
-%% Signs static binaries with Ed25519 and verifies them against an
-%% X.509 certificate chain. The .sig file is a PEM-encoded envelope
-%% containing the signature payload, Ed25519 signature, and the
-%% certificate chain.
-%%
-%% Signature payload (fixed binary layout, v1):
-%%   Version:8 = 1
-%%   Algorithm:8 = 1 (Ed25519)
-%%   SHA256:256 (32 bytes)
-%%   GitSHA:160 (20 bytes, zero-padded if absent)
-%%   Timestamp:64 (Unix seconds, big-endian)
-%%   SignerCN_Len:16 (big-endian)
-%%   SignerCN:variable (UTF-8)
-%%
-%% The .sig file format:
-%%   -----BEGIN ERLKOENIG SIGNATURE-----
-%%   <base64: PayloadLen:32 | Payload | Signature>
-%%   -----END ERLKOENIG SIGNATURE-----
-%%   -----BEGIN CERTIFICATE-----
-%%   <signing certificate>
-%%   -----END CERTIFICATE-----
-%%   -----BEGIN CERTIFICATE-----
-%%   <intermediate CA>
-%%   -----END CERTIFICATE-----
-%% @end
-%%%-------------------------------------------------------------------
-
 -module(erlkoenig_sig).
+-moduledoc """
+Binary signature creation and verification.
+
+Signs static binaries with Ed25519 and verifies them against an
+X.509 certificate chain. The .sig file is a PEM-encoded envelope
+containing the signature payload, Ed25519 signature, and the
+certificate chain.
+
+Signature payload (fixed binary layout, v1):
+  Version:8 = 1
+  Algorithm:8 = 1 (Ed25519)
+  SHA256:256 (32 bytes)
+  GitSHA:160 (20 bytes, zero-padded if absent)
+  Timestamp:64 (Unix seconds, big-endian)
+  SignerCN_Len:16 (big-endian)
+  SignerCN:variable (UTF-8)
+
+The .sig file format:
+  -----BEGIN ERLKOENIG SIGNATURE-----
+  <base64: PayloadLen:32 | Payload | Signature>
+  -----END ERLKOENIG SIGNATURE-----
+  -----BEGIN CERTIFICATE-----
+  <signing certificate>
+  -----END CERTIFICATE-----
+  -----BEGIN CERTIFICATE-----
+  <intermediate CA>
+  -----END CERTIFICATE-----
+""".
 
 %% API
 -export([sign/4, verify/2]).
@@ -63,12 +61,14 @@
 %%% API
 %%%===================================================================
 
-%% @doc Sign a binary file. Returns the .sig file content.
-%%
-%% BinaryPath: path to the static binary
-%% CertPath:   path to PEM file with signing certificate
-%% KeyPath:    path to PEM file with Ed25519 private key
-%% Opts:       #{git_sha => <<"abcdef01...">>}
+-doc """
+Sign a binary file. Returns the .sig file content.
+
+BinaryPath: path to the static binary
+CertPath:   path to PEM file with signing certificate
+KeyPath:    path to PEM file with Ed25519 private key
+Opts:       #{git_sha => <<"abcdef01...">>}
+""".
 -spec sign(file:filename(), file:filename(), file:filename(), sign_opts()) ->
     {ok, iodata()} | {error, term()}.
 sign(BinaryPath, CertPath, KeyPath, Opts) ->
@@ -101,11 +101,13 @@ sign(BinaryPath, CertPath, KeyPath, Opts) ->
             {error, {sign_failed, Reason}}
     end.
 
-%% @doc Verify a binary against its .sig file.
-%%
-%% BinaryPath: path to the binary
-%% SigPath:    path to the .sig file
-%% Returns metadata on success (sha256, git_sha, signer, chain).
+-doc """
+Verify a binary against its .sig file.
+
+BinaryPath: path to the binary
+SigPath:    path to the .sig file
+Returns metadata on success (sha256, git_sha, signer, chain).
+""".
 -spec verify(file:filename(), file:filename()) ->
     {ok, sig_meta()} | {error, term()}.
 verify(BinaryPath, SigPath) ->
@@ -198,27 +200,28 @@ read_file(Path) ->
 
 -spec read_private_key(file:filename()) -> {ok, binary()} | {error, term()}.
 read_private_key(Path) ->
-    case file:read_file(Path) of
-        {ok, PemBin} ->
-            case public_key:pem_decode(PemBin) of
-                [{_, DerBin, not_encrypted}] ->
-                    %% Ed25519 keys in PKCS#8: the raw 32-byte key is wrapped
-                    %% in an OCTET STRING inside PrivateKeyInfo.
-                    %% OTP's pem_entry_decode handles this for us.
-                    case public_key:pem_entry_decode({'PrivateKeyInfo', DerBin, not_encrypted}) of
-                        #'ECPrivateKey'{privateKey = RawKey} ->
-                            {ok, RawKey};
-                        {_, #'ECPrivateKey'{privateKey = RawKey}} ->
-                            {ok, RawKey};
-                        Other ->
-                            %% Try direct extraction from DER
-                            extract_ed25519_key(DerBin, Other)
-                    end;
-                _ ->
-                    {error, {invalid_key_file, Path}}
-            end;
-        {error, Reason} ->
-            {error, {read_failed, Path, Reason}}
+    maybe
+        {ok, PemBin} ?=
+            case file:read_file(Path) of
+                {ok, _} = Ok -> Ok;
+                {error, Reason} -> {error, {read_failed, Path, Reason}}
+            end,
+        [{_, DerBin, not_encrypted}] ?= public_key:pem_decode(PemBin),
+        %% Ed25519 keys in PKCS#8: the raw 32-byte key is wrapped
+        %% in an OCTET STRING inside PrivateKeyInfo.
+        %% OTP's pem_entry_decode handles this for us.
+        case public_key:pem_entry_decode({'PrivateKeyInfo', DerBin, not_encrypted}) of
+            #'ECPrivateKey'{privateKey = RawKey} ->
+                {ok, RawKey};
+            {_, #'ECPrivateKey'{privateKey = RawKey}} ->
+                {ok, RawKey};
+            Other ->
+                %% Try direct extraction from DER
+                extract_ed25519_key(DerBin, Other)
+        end
+    else
+        {error, _} = Err -> Err;
+        _ -> {error, {invalid_key_file, Path}}
     end.
 
 -spec extract_ed25519_key(binary(), term()) -> {ok, binary()} | {error, term()}.
@@ -242,16 +245,20 @@ extract_ed25519_key(DerBin, _Decoded) ->
 
 -spec read_cert_chain(file:filename()) -> {ok, [public_key:der_encoded()]} | {error, term()}.
 read_cert_chain(Path) ->
-    case file:read_file(Path) of
-        {ok, PemBin} ->
-            Entries = public_key:pem_decode(PemBin),
-            Certs = [Der || {'Certificate', Der, _} <- Entries],
-            case Certs of
-                [] -> {error, {no_certificates, Path}};
-                _  -> {ok, Certs}
-            end;
-        {error, Reason} ->
-            {error, {read_failed, Path, Reason}}
+    maybe
+        {ok, PemBin} ?=
+            case file:read_file(Path) of
+                {ok, _} = Ok -> Ok;
+                {error, Reason} -> {error, {read_failed, Path, Reason}}
+            end,
+        Entries = public_key:pem_decode(PemBin),
+        Certs = [Der || {'Certificate', Der, _} <- Entries],
+        case Certs of
+            [] -> {error, {no_certificates, Path}};
+            _  -> {ok, Certs}
+        end
+    else
+        {error, _} = Err -> Err
     end.
 
 %%%===================================================================
@@ -271,21 +278,18 @@ encode_sig_block(Payload, Signature) ->
 parse_sig_file(PemBin) ->
     %% Split into PEM blocks manually — the first block is our custom type,
     %% the rest are standard X.509 certificates.
-    case split_sig_and_certs(PemBin) of
-        {ok, SigB64, CertPem} ->
-            case base64:decode(SigB64) of
-                <<PayloadLen:32/big, Rest/binary>> ->
-                    <<Payload:PayloadLen/binary, Signature/binary>> = Rest,
-                    Certs = [Der || {'Certificate', Der, _} <- public_key:pem_decode(CertPem)],
-                    case Certs of
-                        [] -> {error, no_certificates_in_sig};
-                        _  -> {ok, Payload, Signature, Certs}
-                    end;
-                _ ->
-                    {error, invalid_sig_encoding}
-            end;
-        {error, _} = Err ->
-            Err
+    maybe
+        {ok, SigB64, CertPem} ?= split_sig_and_certs(PemBin),
+        <<PayloadLen:32/big, Rest/binary>> ?= base64:decode(SigB64),
+        <<Payload:PayloadLen/binary, Signature/binary>> = Rest,
+        Certs = [Der || {'Certificate', Der, _} <- public_key:pem_decode(CertPem)],
+        case Certs of
+            [] -> {error, no_certificates_in_sig};
+            _  -> {ok, Payload, Signature, Certs}
+        end
+    else
+        {error, _} = Err -> Err;
+        _ -> {error, invalid_sig_encoding}
     end.
 
 -spec split_sig_and_certs(binary()) -> {ok, binary(), binary()} | {error, term()}.

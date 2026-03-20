@@ -115,6 +115,7 @@ Usage from the Erlang shell:
                             zone := binary() | undefined,
                             args := [binary()],
                             ports := [{inet:port_number(), inet:port_number()}],
+                            volumes := [map()],
                             net_info => net_info(),
                             exit_info => exit_info(),
                             error => term(),

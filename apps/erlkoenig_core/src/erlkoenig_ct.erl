@@ -56,6 +56,10 @@ States:
 -export([callback_mode/0, init/1, terminate/3]).
 %% Runtime-optional sibling modules (erlkoenig_fuse).
 -dialyzer({no_missing_calls, [save_manifest/2, start_fuse_mount/3, cleanup_fuse/1]}).
+%% erlkoenig_sig:verify uses throw() internally — dialyzer can't infer success path.
+-dialyzer({no_match, [maybe_verify_signature/1]}).
+%% build_info return type is extended dynamically by maybe_add_optional_fields.
+-dialyzer({no_contracts, [build_info/2, maybe_add_optional_fields/3]}).
 
 -export([creating/3, namespace_ready/3, starting/3,
          running/3, stopping/3, stopped/3, restarting/3,

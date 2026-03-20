@@ -110,10 +110,10 @@ handle_cast({log, Event}, #state{fd = Fd, seq = Seq} = State) ->
             {noreply, State#state{seq = NextSeq}};
         {error, _Reason} ->
             %% Log rotation or disk error — re-open
-            file:close(Fd),
+            _ = file:close(Fd),
             case open_log(State#state.path) of
                 {ok, NewFd} ->
-                    file:write(NewFd, [Line, $\n]),
+                    _ = file:write(NewFd, [Line, $\n]),
                     {noreply, State#state{fd = NewFd, seq = NextSeq}};
                 {error, _} ->
                     {noreply, State#state{fd = undefined, seq = NextSeq}}
@@ -129,7 +129,7 @@ handle_info(_Info, State) ->
 terminate(_Reason, #state{fd = undefined}) ->
     ok;
 terminate(_Reason, #state{fd = Fd}) ->
-    file:close(Fd),
+    _ = file:close(Fd),
     ok.
 
 %%%===================================================================

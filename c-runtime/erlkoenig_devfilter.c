@@ -35,6 +35,7 @@
  */
 
 #include "erlkoenig_devfilter.h"
+#include "erlkoenig_bpf.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -43,71 +44,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
-#include <sys/resource.h>
-#include <sys/syscall.h>
-#include <linux/bpf.h>
-
-/* ------------------------------------------------------------------ */
-/* BPF instruction macros (same as crun, kernel's bpf_insn_internal)  */
-/* ------------------------------------------------------------------ */
-
-/* ALU32 with immediate: dst OP= imm */
-#define BPF_ALU32_IMM(OP, DST, IMM)					\
-	((struct bpf_insn){						\
-		.code  = BPF_ALU | BPF_OP(OP) | BPF_K,			\
-		.dst_reg = (DST),					\
-		.src_reg = 0,						\
-		.off   = 0,						\
-		.imm   = (IMM),					\
-	})
-
-/* Load from memory: dst = *(u32 *)(src + off) */
-#define BPF_LDX_MEM(SZ, DST, SRC, OFF)					\
-	((struct bpf_insn){						\
-		.code  = BPF_LDX | BPF_SIZE(SZ) | BPF_MEM,		\
-		.dst_reg = (DST),					\
-		.src_reg = (SRC),					\
-		.off   = (OFF),						\
-		.imm   = 0,						\
-	})
-
-/* Move immediate into register: dst = imm */
-#define BPF_MOV64_IMM(DST, IMM)					\
-	((struct bpf_insn){						\
-		.code  = BPF_ALU64 | BPF_OP(BPF_MOV) | BPF_K,		\
-		.dst_reg = (DST),					\
-		.src_reg = 0,						\
-		.off   = 0,						\
-		.imm   = (IMM),						\
-	})
-
-/* Conditional jump: if (dst OP imm) goto PC+off */
-#define BPF_JMP_IMM(OP, DST, IMM, OFF)					\
-	((struct bpf_insn){						\
-		.code  = BPF_JMP | BPF_OP(OP) | BPF_K,			\
-		.dst_reg = (DST),					\
-		.src_reg = 0,						\
-		.off   = (__s16)(OFF),					\
-		.imm   = (IMM),						\
-	})
-
-/* Program exit: return R0 */
-#define BPF_EXIT_INSN()							\
-	((struct bpf_insn){						\
-		.code  = BPF_JMP | BPF_OP(BPF_EXIT),			\
-		.dst_reg = 0,						\
-		.src_reg = 0,						\
-		.off   = 0,						\
-		.imm   = 0,						\
-	})
-
-/* BPF register numbers */
-#define BPF_REG_0	0	/* return value */
-#define BPF_REG_1	1	/* arg1 (ctx pointer) */
-#define BPF_REG_2	2	/* device type */
-#define BPF_REG_3	3	/* access type */
-#define BPF_REG_4	4	/* major */
-#define BPF_REG_5	5	/* minor */
 
 /* ------------------------------------------------------------------ */
 /* BPF program generation                                             */
@@ -249,58 +185,16 @@ static int generate_device_filter(struct bpf_insn *prog, size_t max_insns,
 }
 
 /* ------------------------------------------------------------------ */
-/* BPF syscall wrappers                                               */
+/* BPF syscall wrappers (now in erlkoenig_bpf.h)                      */
+/* Cgroup-device-specific attach wrapper                               */
 /* ------------------------------------------------------------------ */
 
-static inline int sys_bpf(enum bpf_cmd cmd, union bpf_attr *attr,
-			   unsigned int size)
+static int bpf_prog_load_cgroup_device(struct bpf_insn *insns, int insn_cnt)
 {
-	return (int)syscall(__NR_bpf, cmd, attr, size);
-}
-
-/*
- * Ensure RLIMIT_MEMLOCK is high enough for BPF.
- * Without this, BPF_PROG_LOAD fails with EPERM/ENOSPC
- * on systems with low default memlock limits.
- * runc does the same before loading BPF programs.
- */
-static void raise_memlock_rlimit(void)
-{
-	struct rlimit rl = { RLIM_INFINITY, RLIM_INFINITY };
-	(void)setrlimit(RLIMIT_MEMLOCK, &rl);
-}
-
-static int bpf_prog_load(struct bpf_insn *insns, int insn_cnt)
-{
-	union bpf_attr attr;
 	char log_buf[4096];
-	int fd;
-
-	raise_memlock_rlimit();
-
-	memset(&attr, 0, sizeof(attr));
-	attr.prog_type    = BPF_PROG_TYPE_CGROUP_DEVICE;
-	attr.insns        = (uint64_t)(unsigned long)insns;
-	attr.insn_cnt     = (uint32_t)insn_cnt;
-	attr.license      = (uint64_t)(unsigned long)"GPL";
-	attr.log_level    = 0;
-	attr.log_buf      = (uint64_t)(unsigned long)log_buf;
-	attr.log_size     = sizeof(log_buf);
-
-	fd = sys_bpf(BPF_PROG_LOAD, &attr, sizeof(attr));
-	if (fd < 0) {
-		/* Retry with log to get verifier output */
-		attr.log_level = 1;
-		fd = sys_bpf(BPF_PROG_LOAD, &attr, sizeof(attr));
-		if (fd < 0) {
-			fprintf(stderr,
-				"devfilter: BPF_PROG_LOAD failed: %s\n"
-				"  verifier: %s\n",
-				strerror(errno), log_buf);
-			return -errno;
-		}
-	}
-	return fd;
+	return ek_bpf_prog_load(BPF_PROG_TYPE_CGROUP_DEVICE,
+				insns, insn_cnt, "ek_devfilter",
+				log_buf, sizeof(log_buf));
 }
 
 static int bpf_prog_attach(int prog_fd, int cgroup_fd)
@@ -313,7 +207,7 @@ static int bpf_prog_attach(int prog_fd, int cgroup_fd)
 	attr.attach_bpf_fd  = (uint32_t)prog_fd;
 	attr.attach_flags   = BPF_F_ALLOW_MULTI;
 
-	if (sys_bpf(BPF_PROG_ATTACH, &attr, sizeof(attr)) < 0) {
+	if (ek_bpf_sys(BPF_PROG_ATTACH, &attr, sizeof(attr)) < 0) {
 		fprintf(stderr, "devfilter: BPF_PROG_ATTACH failed: %s\n",
 			strerror(errno));
 		return -errno;
@@ -341,7 +235,7 @@ int ek_devfilter_attach(const char *cgroup_path,
 	}
 
 	/* Load program into kernel */
-	prog_fd = bpf_prog_load(prog, insn_cnt);
+	prog_fd = bpf_prog_load_cgroup_device(prog, insn_cnt);
 	if (prog_fd < 0)
 		return prog_fd;
 

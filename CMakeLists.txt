@@ -10,6 +10,8 @@ add_executable(erlkoenig_rt
     c-runtime/erlkoenig_ns.c
     c-runtime/erlkoenig_netcfg.c
     c-runtime/erlkoenig_devfilter.c
+    c-runtime/erlkoenig_metrics.c
+    c-runtime/erlkoenig_nodecert.c
 )
 
 target_include_directories(erlkoenig_rt PRIVATE c-runtime)

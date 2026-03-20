@@ -25,6 +25,7 @@ doc/
 
 # Internal docs (not for GitHub)
 docs-intern/
+idoc/
 
 # Claude Code
 .claude/

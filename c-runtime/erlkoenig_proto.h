@@ -30,7 +30,15 @@
 
 /* -- Protocol version --------------------------------------------- */
 
-#define ERLKOENIG_PROTOCOL_VERSION	1
+/*
+ * Protocol version history:
+ *   v1: Basic command/reply protocol
+ *   v2: Node certificate hash in handshake (mutual verification)
+ */
+#define ERLKOENIG_PROTOCOL_VERSION	2
+
+/* Node cert hash size (SHA-256) */
+#define ERLKOENIG_NODE_CERT_HASH_LEN	32
 
 /* -- Reply tags (C -> Erlang, 0x01-0x0F) -------------------------- */
 
@@ -42,6 +50,7 @@
 #define ERLKOENIG_TAG_REPLY_STATUS	0x06
 #define ERLKOENIG_TAG_REPLY_STDOUT	0x07
 #define ERLKOENIG_TAG_REPLY_STDERR	0x08
+#define ERLKOENIG_TAG_REPLY_METRICS_EVENT 0x09
 
 /* -- Container command tags (Erlang -> C, 0x10-0x1F) -------------- */
 
@@ -55,6 +64,8 @@
 #define ERLKOENIG_TAG_CMD_STDIN		0x17
 #define ERLKOENIG_TAG_CMD_RESIZE	0x18
 #define ERLKOENIG_TAG_CMD_DEVICE_FILTER	0x19
+#define ERLKOENIG_TAG_CMD_METRICS_START	0x1A
+#define ERLKOENIG_TAG_CMD_METRICS_STOP	0x1B
 
 /* -- Spawn flags -------------------------------------------------- */
 
@@ -73,6 +84,7 @@ static inline const char *erlkoenig_tag_name(uint8_t tag)
 	case 0x06: return "REPLY_STATUS";
 	case 0x07: return "REPLY_STDOUT";
 	case 0x08: return "REPLY_STDERR";
+	case 0x09: return "REPLY_METRICS_EVENT";
 	case 0x10: return "CMD_SPAWN";
 	case 0x11: return "CMD_GO";
 	case 0x12: return "CMD_KILL";
@@ -83,6 +95,8 @@ static inline const char *erlkoenig_tag_name(uint8_t tag)
 	case 0x17: return "CMD_STDIN";
 	case 0x18: return "CMD_RESIZE";
 	case 0x19: return "CMD_DEVICE_FILTER";
+	case 0x1A: return "CMD_METRICS_START";
+	case 0x1B: return "CMD_METRICS_STOP";
 	default:   return "UNKNOWN";
 	}
 }

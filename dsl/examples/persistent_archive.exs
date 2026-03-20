@@ -13,10 +13,6 @@
 defmodule PersistentArchive do
   use Erlkoenig.Container
 
-  defaults do
-    firewall :standard
-  end
-
   container :archive do
     binary "/opt/bin/archive_server"
     ip {10, 0, 0, 30}
@@ -30,7 +26,7 @@ defmodule PersistentArchive do
     volume "/etc/config", persist: "shared-config", read_only: true
 
     limits memory: "1G", cpu: 2, pids: 200
-    seccomp :default
+    seccomp :standard
 
     firewall do
       accept :established
@@ -54,7 +50,7 @@ defmodule PersistentArchive do
     volume "/data/index", persist: "index-data"
 
     limits memory: "512M", cpu: 1, pids: 50
-    seccomp :default
+    seccomp :standard
 
     firewall do
       accept :established

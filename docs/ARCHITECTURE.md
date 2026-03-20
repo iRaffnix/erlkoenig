@@ -169,13 +169,67 @@ with a 1-byte command tag followed by packed fields.
   RootfsSizeMB:32/big,                   %% tmpfs size (0 = default 64M)
   CapsKeep:64/big,                       %% capability bitmask
   DnsIp:32/big,                          %% DNS server (network order)
-  Flags:32/big>>                         %% bit 0 = PTY mode
+  Flags:32/big,                          %% bit 0 = PTY mode
+  NumVolumes:8,                          %% 0..16 bind-mount volumes
+  (SrcLen:16/big, Src/binary,            %% host directory (absolute)
+   DstLen:16/big, Dst/binary,            %% container directory (absolute)
+   Opts:32/big)*>>                       %% EK_VOLUME_F_* flags
 ```
 
 The protocol is intentionally simple. No versioning beyond the initial
 handshake byte. No streaming. Each command gets exactly one reply.
 The C runtime is stateless between commands — all state lives in
 the gen_statem on the Erlang side.
+
+## Persistent Volumes
+
+Containers have ephemeral rootfs (tmpfs) by default. For data that must
+survive container restarts — databases, logs, uploads — Erlkoenig provides
+**directory bind-mount volumes**.
+
+### Design
+
+- **Scope v1:** Directory bind-mounts only. No file mounts, no OverlayFS.
+- **Persist names, not host paths:** The DSL declares `persist: "name"`, the
+  core resolves the host path: `/var/lib/erlkoenig/volumes/<container>/<persist>/`
+- **Semantic options:** The wire protocol carries `EK_VOLUME_F_*` flags, not
+  raw `mount(2)` flags. The C runtime translates to the correct syscall sequence.
+- **Read-only via two-step mount:** Initial `mount(MS_BIND)` followed by
+  `mount(MS_BIND | MS_REMOUNT | MS_RDONLY)`. Direct `MS_RDONLY` on initial
+  bind-mount is unreliable.
+
+### Lifecycle
+
+1. **Resolution:** On container create, `erlkoenig_volume:resolve/2` validates
+   persist names (`[a-z0-9][a-z0-9_-]*`) and resolves host paths.
+2. **Directory creation:** `erlkoenig_volume:ensure_volume_dir/1` creates the
+   host directory if it doesn't exist. Existing directories are left untouched.
+3. **Mount:** In `prepare_rootfs_in_child()`, after device mounts but before
+   `pivot_root()`. The child creates the target directory under rootfs and
+   bind-mounts the host directory. At this point the tmpfs rootfs is writable,
+   host paths are visible, and mount propagation is private.
+4. **Persist:** Volumes survive container stop/restart. The host directory
+   is never automatically deleted.
+5. **Audit:** `volume_mounted` and `volume_released` events are logged.
+
+### DSL
+
+```elixir
+container :archive do
+  binary "/opt/bin/archive"
+  volume "/data/db", persist: "archive-db"
+  volume "/var/log", persist: "archive-logs"
+  volume "/etc/config", persist: "shared-config", read_only: true
+end
+```
+
+### Security
+
+- Container cannot call `mount(2)` — all capabilities dropped, seccomp blocks it
+- Destination paths are validated component-wise (no `.`, `..`, empty segments)
+- Host paths are never from untrusted input — derived from validated persist names
+- The bind-mount happens before `pivot_root()`, so symlink escapes in the
+  container filesystem are not possible (it's our tmpfs)
 
 ## Zone Architecture
 

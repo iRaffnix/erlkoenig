@@ -14,19 +14,18 @@
 %% limitations under the License.
 %%
 
-%%%-------------------------------------------------------------------
-%%% @doc Load and apply Erlkoenig DSL configuration files.
-%%%
-%%% Reads .term files produced by the Elixir DSL (`mix erlkoenig.compile`)
-%%% and spawns/configures containers accordingly.
-%%%
-%%% Usage:
-%%%   {ok, Pids} = erlkoenig_config:load("/etc/erlkoenig/cluster.term").
-%%%   erlkoenig_config:validate("/etc/erlkoenig/cluster.term").
-%%%   {ok, Pids} = erlkoenig_config:reload("/etc/erlkoenig/cluster.term").
-%%% @end
-%%%-------------------------------------------------------------------
 -module(erlkoenig_config).
+-moduledoc """
+Load and apply Erlkoenig DSL configuration files.
+
+Reads .term files produced by the Elixir DSL (`mix erlkoenig.compile`)
+and spawns/configures containers accordingly.
+
+Usage:
+  {ok, Pids} = erlkoenig_config:load("/etc/erlkoenig/cluster.term").
+  erlkoenig_config:validate("/etc/erlkoenig/cluster.term").
+  {ok, Pids} = erlkoenig_config:reload("/etc/erlkoenig/cluster.term").
+""".
 
 -export([load/1, validate/1, reload/1, parse/1]).
 
@@ -37,7 +36,7 @@
 %% Public API
 %%====================================================================
 
-%% @doc Parse a term file without applying it.
+-doc "Parse a term file without applying it.".
 -spec parse(file:filename()) -> {ok, map()} | {error, term()}.
 parse(TermFile) ->
     case file:consult(TermFile) of
@@ -51,7 +50,7 @@ parse(TermFile) ->
             {error, {read_failed, TermFile, Reason}}
     end.
 
-%% @doc Validate a config file (parse + check required fields).
+-doc "Validate a config file (parse + check required fields).".
 -spec validate(file:filename()) -> ok | {error, term()}.
 validate(TermFile) ->
     case parse(TermFile) of
@@ -61,41 +60,33 @@ validate(TermFile) ->
             Err
     end.
 
-%% @doc Load a config file and spawn all containers.
+-doc "Load a config file and spawn all containers.".
 -spec load(file:filename()) -> {ok, [{binary(), pid()}]} | {error, term()}.
 load(TermFile) ->
-    case parse(TermFile) of
-        {ok, Config} ->
-            case validate_config(Config) of
-                ok ->
-                    _ = ensure_config_tab(),
-                    Result = apply_config(Config),
-                    store_config(TermFile, Config),
-                    Result;
-                {error, _} = Err ->
-                    Err
-            end;
-        {error, _} = Err ->
-            Err
+    maybe
+        {ok, Config} ?= parse(TermFile),
+        ok ?= validate_config(Config),
+        _ = ensure_config_tab(),
+        Result = apply_config(Config),
+        store_config(TermFile, Config),
+        Result
+    else
+        {error, _} = Err -> Err
     end.
 
-%% @doc Reload a config file. Stops removed containers, starts new ones.
+-doc "Reload a config file. Stops removed containers, starts new ones.".
 -spec reload(file:filename()) -> {ok, [{binary(), pid()}]} | {error, term()}.
 reload(TermFile) ->
-    case parse(TermFile) of
-        {ok, NewConfig} ->
-            case validate_config(NewConfig) of
-                ok ->
-                    _ = ensure_config_tab(),
-                    OldConfig = get_stored_config(TermFile),
-                    apply_delta(OldConfig, NewConfig),
-                    store_config(TermFile, NewConfig),
-                    {ok, []};
-                {error, _} = Err ->
-                    Err
-            end;
-        {error, _} = Err ->
-            Err
+    maybe
+        {ok, NewConfig} ?= parse(TermFile),
+        ok ?= validate_config(NewConfig),
+        _ = ensure_config_tab(),
+        OldConfig = get_stored_config(TermFile),
+        apply_delta(OldConfig, NewConfig),
+        store_config(TermFile, NewConfig),
+        {ok, []}
+    else
+        {error, _} = Err -> Err
     end.
 
 %%====================================================================
@@ -217,11 +208,13 @@ add_threshold(_Pid, Unknown, _ActionFun) ->
     logger:warning("erlkoenig_config: unknown threshold format: ~p", [Unknown]),
     ok.
 
-%% @doc Compile a list of DSL action atoms into a single action function.
-%%
-%% Supported actions:
-%%   log                  - logger:warning with counter details
-%%   {webhook, Url}       - HTTP POST to Url with JSON payload
+-doc """
+Compile a list of DSL action atoms into a single action function.
+
+Supported actions:
+  log                  - logger:warning with counter details
+  {webhook, Url}       - HTTP POST to Url with JSON payload
+""".
 -spec compile_actions([atom() | tuple()], binary()) -> fun().
 compile_actions(Actions, WatchName) ->
     fun(Counter, Metric, Value, Threshold) ->
@@ -257,7 +250,7 @@ run_action(Unknown, WatchName, _Counter, _Metric, _Value, _Threshold) ->
 -spec build_spawn_opts(map()) -> map().
 build_spawn_opts(Ct) ->
     Keys = [ip, ports, args, env, firewall, limits, seccomp,
-            restart, name, files, zone],
+            restart, name, files, zone, volumes],
     lists:foldl(fun(K, Acc) -> copy_if(K, Ct, Acc) end, #{}, Keys).
 
 -spec copy_if(atom(), map(), map()) -> map().

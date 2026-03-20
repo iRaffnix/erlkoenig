@@ -15,15 +15,29 @@
  */
 
 /*
- * erlkoenig_rt.c - Erlkoenig container runtime (C port program).
+ * erlkoenig_rt.c - Erlkoenig container runtime.
  *
  * This is the privileged C component that creates and manages
  * containerised processes in isolated Linux namespaces. It
  * communicates with the Erlang control plane via the Erlkoenig
- * wire protocol over stdin/stdout ({packet, 4} framing).
+ * wire protocol ({packet, 4} framing).
+ *
+ * Two I/O modes are supported:
+ *
+ *   Port mode (legacy, default):
+ *     Erlang starts this as an Erlang Port with {packet, 4}.
+ *     stdin = commands from Erlang, stdout = replies to Erlang.
+ *     Connection loss (pipe break) terminates the runtime.
+ *
+ *   Socket mode (--socket PATH):
+ *     The runtime creates a Unix Domain Socket and listens for
+ *     connections. The protocol is identical ({packet, 4}).
+ *     Connection loss does NOT terminate the runtime — the child
+ *     process survives and the runtime waits for a reconnect.
+ *     This enables crash recovery: the BEAM can crash and restart,
+ *     then reconnect to the still-running container.
  *
  * Architecture: One erlkoenig_rt process per container.
- * Erlang starts this as an Erlang Port with {packet, 4}.
  *
  * Responsibilities:
  *   - Receive commands (SPAWN, GO, KILL, QUERY_STATUS)
@@ -31,19 +45,22 @@
  *   - Wait for child exit, report back to Erlang
  *   - Clean up resources on exit
  *
- * stdout = protocol replies to Erlang
  * stderr = debug logging (not part of protocol)
- * stdin  = protocol commands from Erlang
  */
 
 #include <errno.h>
 #include <fcntl.h>
+#include <getopt.h>
 #include <poll.h>
 #include <signal.h>
 #include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 #include <net/if.h>
 #include <sched.h>
@@ -56,8 +73,14 @@
 #include "erlkoenig_ns.h"
 #include "erlkoenig_netcfg.h"
 #include "erlkoenig_devfilter.h"
+#include "erlkoenig_metrics.h"
+#include "erlkoenig_nodecert.h"
 
 #define ERLKOENIG_MAX_MSG		(64 * 1024)
+
+/* Event loop return codes */
+#define LOOP_SHUTDOWN		0	/* Graceful shutdown requested */
+#define LOOP_DISCONNECT		1	/* Connection lost (socket mode) */
 
 /* Container state */
 enum erlkoenig_state {
@@ -72,29 +95,76 @@ static struct {
 	struct erlkoenig_container ct;
 	int exit_code;
 	int term_signal;
-	uint64_t started_at;	/* TODO: monotonic clock */
-	int stdout_open;	/* 1 if stdout pipe still readable */
-	int stderr_open;	/* 1 if stderr pipe still readable */
-	int pty_open;		/* 1 if pty_master still readable */
+	uint64_t started_at;		/* Monotonic clock (ms) */
+	int stdout_open;		/* 1 if stdout pipe still readable */
+	int stderr_open;		/* 1 if stderr pipe still readable */
+	int pty_open;			/* 1 if pty_master still readable */
+	struct ek_metrics_ctx metrics;	/* eBPF tracepoint metrics */
+	int exit_pending;		/* 1 if child exited while disconnected */
 } g_state;
+
+/*
+ * g_write_fd - The fd used for sending protocol replies.
+ * In port mode: STDOUT_FILENO (set once at startup).
+ * In socket mode: the accepted connection fd (changes on reconnect).
+ */
+static int g_write_fd = STDOUT_FILENO;
+
+/*
+ * g_read_fd - The fd used for reading protocol commands.
+ * In port mode: STDIN_FILENO (set once at startup).
+ * In socket mode: the accepted connection fd (same as g_write_fd).
+ */
+static int g_read_fd = STDIN_FILENO;
+
+/*
+ * g_connected - Whether we have an active Erlang connection.
+ * In port mode: always 1 (connection loss = exit).
+ * In socket mode: 0 when disconnected, 1 when connected.
+ */
+static int g_connected = 1;
+
+/*
+ * g_socket_mode - Whether we're running in socket mode.
+ * 0 = port mode (legacy), 1 = socket mode.
+ */
+static int g_socket_mode;
 
 /* Volatile flag set by SIGCHLD handler */
 static volatile sig_atomic_t g_sigchld_received;
 
+/* Volatile flag set by SIGTERM/SIGINT handler for graceful shutdown */
+static volatile sig_atomic_t g_shutdown_requested;
+
+/* -- Monotonic clock helper --------------------------------------- */
+
+static uint64_t monotonic_ms(void)
+{
+	struct timespec ts;
+
+	if (clock_gettime(CLOCK_MONOTONIC, &ts))
+		return 0;
+	return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+}
+
 /* -- Reply helpers ------------------------------------------------ */
 
 /*
- * send_reply - Write a reply frame to stdout.
+ * send_reply - Write a reply frame to the Erlang connection.
  * @tag:	Message tag (ERLKOENIG_TAG_REPLY_*)
  * @payload:	Payload data (may be NULL if len == 0)
  * @len:	Payload length
  *
  * Builds <<Tag:8, Payload/binary>> and sends as {packet,4} frame.
+ * Returns -1 if not connected or write fails.
  */
 static int send_reply(uint8_t tag, const uint8_t *payload, size_t len)
 {
 	uint8_t frame[ERLKOENIG_MAX_MSG];
 	size_t total = 1 + len;
+
+	if (!g_connected)
+		return -1;
 
 	if (total > sizeof(frame)) {
 		LOG_ERR("reply too large: %zu bytes", total);
@@ -105,7 +175,7 @@ static int send_reply(uint8_t tag, const uint8_t *payload, size_t len)
 	if (len > 0 && payload)
 		memcpy(frame + 1, payload, len);
 
-	return erlkoenig_write_frame(STDOUT_FILENO, frame, total);
+	return erlkoenig_write_frame(g_write_fd, frame, total);
 }
 
 static int send_reply_ok(const uint8_t *data, uint16_t data_len)
@@ -341,6 +411,51 @@ static void handle_cmd_spawn(const uint8_t *payload, size_t len)
 	if (buf_read_u32(&b, &opts.flags))
 		opts.flags = 0;
 
+	/* Read volumes: <<NumVolumes:8, [<<SrcLen:16, Src, DstLen:16, Dst, Opts:32>>]*>>
+	 * Optional: missing volume data (older Erlang core) → num_volumes = 0. */
+	opts.num_volumes = 0;
+	{
+		uint8_t num_volumes;
+		if (!buf_read_u8(&b, &num_volumes)) {
+			if (num_volumes > ERLKOENIG_MAX_VOLUMES) {
+				send_reply_error(-EINVAL, "too many volumes");
+				return;
+			}
+			for (uint8_t i = 0; i < num_volumes; i++) {
+				const uint8_t *src_data, *dst_data;
+				uint16_t src_len, dst_len;
+				uint32_t vol_opts;
+
+				if (buf_read_str16(&b, &src_data, &src_len)) {
+					send_reply_error(-EINVAL, "failed to read volume source");
+					return;
+				}
+				if (buf_read_str16(&b, &dst_data, &dst_len)) {
+					send_reply_error(-EINVAL, "failed to read volume dest");
+					return;
+				}
+				if (buf_read_u32(&b, &vol_opts)) {
+					send_reply_error(-EINVAL, "failed to read volume opts");
+					return;
+				}
+				if (src_len >= ERLKOENIG_MAX_PATH - 1) {
+					send_reply_error(-ENAMETOOLONG, "volume source too long");
+					return;
+				}
+				if (dst_len >= ERLKOENIG_MAX_PATH - 1) {
+					send_reply_error(-ENAMETOOLONG, "volume dest too long");
+					return;
+				}
+				memcpy(opts.volumes[i].source, src_data, src_len);
+				opts.volumes[i].source[src_len] = '\0';
+				memcpy(opts.volumes[i].dest, dst_data, dst_len);
+				opts.volumes[i].dest[dst_len] = '\0';
+				opts.volumes[i].opts = vol_opts;
+			}
+			opts.num_volumes = num_volumes;
+		}
+	}
+
 	LOG_INFO("SPAWN path=%s argc=%d envc=%d uid=%u gid=%u flags=0x%x",
 		 opts.binary_path, opts.argc, opts.envc,
 		 opts.uid, opts.gid, opts.flags);
@@ -401,7 +516,7 @@ static void handle_cmd_go(void)
 
 		if (n == (ssize_t)sizeof(exec_errno) && exec_errno != 0) {
 			LOG_ERR("execve failed: %s", strerror(exec_errno));
-			/* Don't close yet — reap_child will handle cleanup */
+			/* Don't close yet -- reap_child will handle cleanup */
 		}
 
 		/* Restore blocking mode (reap_child may read it later) */
@@ -410,6 +525,7 @@ static void handle_cmd_go(void)
 	}
 
 	g_state.state = STATE_RUNNING;
+	g_state.started_at = monotonic_ms();
 	send_reply_ok(NULL, 0);
 }
 
@@ -607,7 +723,7 @@ static void handle_cmd_write_file(const uint8_t *payload, size_t len)
 			return;
 		}
 
-		/* Now "/" is the child's rootfs — remount read-write */
+		/* Now "/" is the child's rootfs -- remount read-write */
 		if (mount(NULL, "/", NULL, MS_REMOUNT | MS_BIND, NULL)) {
 			int e = errno;
 			setns(orig_mnt_fd, CLONE_NEWNS);
@@ -705,7 +821,7 @@ static void handle_cmd_stdin(const uint8_t *payload, size_t len)
 	int fd;
 
 	if (g_state.state != STATE_RUNNING) {
-		/* Silently drop — fire-and-forget semantics */
+		/* Silently drop -- fire-and-forget semantics */
 		return;
 	}
 
@@ -867,6 +983,115 @@ static void handle_cmd_device_filter(const uint8_t *payload, size_t len)
 	}
 }
 
+/*
+ * handle_cmd_metrics_start - Start eBPF tracepoint metrics.
+ *
+ * Wire: <<CgroupPath:str16>>
+ *
+ * Loads BPF programs for fork/exec/exit/oom tracepoints,
+ * filtered by the container's cgroup ID. Events stream back
+ * as REPLY_METRICS_EVENT frames.
+ */
+static void handle_cmd_metrics_start(const uint8_t *payload, size_t len)
+{
+	struct erlkoenig_buf b;
+	const uint8_t *path_data;
+	uint16_t path_len;
+	int ret;
+
+	if (g_state.state != STATE_CREATED &&
+	    g_state.state != STATE_RUNNING) {
+		send_reply_error(-EINVAL,
+				 "metrics requires CREATED or RUNNING state");
+		return;
+	}
+
+	if (g_state.metrics.ringbuf_fd >= 0) {
+		send_reply_error(-EALREADY, "metrics already active");
+		return;
+	}
+
+	erlkoenig_buf_init(&b, (uint8_t *)payload, len);
+
+	if (buf_read_str16(&b, &path_data, &path_len)) {
+		send_reply_error(-EINVAL, "failed to read cgroup path");
+		return;
+	}
+
+	char cgroup_path[512];
+	if (path_len >= sizeof(cgroup_path)) {
+		send_reply_error(-ENAMETOOLONG, "cgroup path too long");
+		return;
+	}
+	memcpy(cgroup_path, path_data, path_len);
+	cgroup_path[path_len] = '\0';
+
+	LOG_INFO("METRICS_START cgroup=%s", cgroup_path);
+
+	ret = ek_metrics_start(cgroup_path, &g_state.metrics);
+	if (ret < 0) {
+		send_reply_error((int32_t)ret, "metrics start failed");
+	} else {
+		send_reply_ok(NULL, 0);
+	}
+}
+
+static void handle_cmd_metrics_stop(void)
+{
+	LOG_INFO("METRICS_STOP");
+	ek_metrics_stop(&g_state.metrics);
+	send_reply_ok(NULL, 0);
+}
+
+/*
+ * metrics_event_callback - Serialize a metrics event as a protocol frame.
+ *
+ * Called from ek_metrics_consume() for each ring buffer event.
+ * Sends REPLY_METRICS_EVENT: <<Type:8, Pid:32, Tgid:32, Ts:64, Data/binary>>
+ */
+static void metrics_event_callback(const struct ek_metrics_event *ev,
+				    void *userdata)
+{
+	(void)userdata;
+	uint8_t payload[64];
+	struct erlkoenig_buf b;
+
+	erlkoenig_buf_init(&b, payload, sizeof(payload));
+	buf_write_u8(&b, ev->type);
+	buf_write_u32(&b, ev->pid);
+	buf_write_u32(&b, ev->tgid);
+	buf_write_u64(&b, ev->timestamp_ns);
+
+	switch (ev->type) {
+	case EK_METRICS_FORK:
+		buf_write_u32(&b, ev->fork_ev.child_pid);
+		break;
+	case EK_METRICS_EXEC:
+		buf_write_bytes(&b, (const uint8_t *)ev->exec_ev.comm, 16);
+		break;
+	case EK_METRICS_EXIT:
+		buf_write_i32(&b, ev->exit_ev.exit_code);
+		break;
+	case EK_METRICS_OOM:
+		buf_write_u32(&b, ev->oom_ev.victim_pid);
+		break;
+	default:
+		return;
+	}
+
+	send_reply(ERLKOENIG_TAG_REPLY_METRICS_EVENT, payload, b.pos);
+}
+
+/*
+ * handle_cmd_query_status - Report container status.
+ *
+ * Enhanced for crash recovery: includes exit code and signal
+ * so a reconnecting Erlang node can learn what happened while
+ * it was disconnected.
+ *
+ * Reply: <<State:8, Pid:32, ExitCode:32/signed, TermSignal:8, Uptime:64>>
+ *   State 0 = idle, 1 = alive (created or running), 2 = stopped
+ */
 static void handle_cmd_query_status(void)
 {
 	uint8_t state = 0;
@@ -881,7 +1106,11 @@ static void handle_cmd_query_status(void)
 	case STATE_RUNNING:
 		state = 1;
 		pid = (uint32_t)g_state.ct.child_pid;
-		/* TODO: compute uptime from started_at */
+		if (g_state.started_at > 0) {
+			uint64_t now = monotonic_ms();
+			if (now > g_state.started_at)
+				uptime_ms = now - g_state.started_at;
+		}
 		break;
 	case STATE_STOPPED:
 		state = 2;
@@ -889,6 +1118,19 @@ static void handle_cmd_query_status(void)
 	}
 
 	send_reply_status(state, pid, uptime_ms);
+
+	/*
+	 * If the child exited while we were disconnected (socket mode),
+	 * send the REPLY_EXITED notification so the Erlang side gets
+	 * the same event it would have received if connected at the
+	 * time of exit. This is sent AFTER the status reply so the
+	 * reconnecting Erlang node sees the correct state transition.
+	 */
+	if (g_state.exit_pending) {
+		g_state.exit_pending = 0;
+		send_reply_exited((int32_t)g_state.exit_code,
+				  (uint8_t)g_state.term_signal);
+	}
 }
 
 /* -- Child reaping ------------------------------------------------ */
@@ -896,8 +1138,11 @@ static void handle_cmd_query_status(void)
 /*
  * reap_child - Check if the child has exited (non-blocking).
  *
- * Called from the main loop when SIGCHLD was received or
+ * Called from the event loop when SIGCHLD was received or
  * periodically as a safety net.
+ *
+ * In socket mode, if the Erlang connection is down, the exit
+ * status is buffered and sent when the connection is restored.
  */
 static void reap_child(void)
 {
@@ -915,7 +1160,7 @@ static void reap_child(void)
 	if (ret <= 0)
 		return;
 
-	/* Child has exited — check execve error pipe for diagnostics */
+	/* Child has exited -- check execve error pipe for diagnostics */
 	int32_t exit_code = 0;
 	uint8_t term_signal = 0;
 
@@ -962,7 +1207,17 @@ static void reap_child(void)
 	g_state.exit_code = exit_code;
 	g_state.term_signal = term_signal;
 
-	send_reply_exited(exit_code, term_signal);
+	if (g_connected) {
+		send_reply_exited(exit_code, term_signal);
+	} else {
+		/*
+		 * Socket mode, disconnected: buffer the exit status.
+		 * It will be sent when Erlang reconnects and queries status.
+		 */
+		g_state.exit_pending = 1;
+		LOG_INFO("child exited while disconnected, buffering status");
+	}
+
 	erlkoenig_cleanup(&g_state.ct);
 }
 
@@ -1000,10 +1255,17 @@ static void sigchld_handler(int sig)
 	g_sigchld_received = 1;
 }
 
+static void shutdown_handler(int sig)
+{
+	(void)sig;
+	g_shutdown_requested = 1;
+}
+
 static int setup_signals(void)
 {
 	struct sigaction sa;
 
+	/* SIGCHLD: non-blocking reap notification */
 	memset(&sa, 0, sizeof(sa));
 	sa.sa_handler = sigchld_handler;
 	sa.sa_flags = SA_NOCLDSTOP;
@@ -1014,10 +1276,107 @@ static int setup_signals(void)
 		return -errno;
 	}
 
+	/* SIGTERM/SIGINT: graceful shutdown (socket mode needs this) */
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = shutdown_handler;
+	sa.sa_flags = 0;
+	sigemptyset(&sa.sa_mask);
+
+	if (sigaction(SIGTERM, &sa, NULL)) {
+		LOG_SYSCALL("sigaction(SIGTERM)");
+		return -errno;
+	}
+	if (sigaction(SIGINT, &sa, NULL)) {
+		LOG_SYSCALL("sigaction(SIGINT)");
+		return -errno;
+	}
+
 	return 0;
 }
 
-/* -- Main loop ---------------------------------------------------- */
+/* -- Protocol handshake ------------------------------------------- */
+
+/*
+ * do_handshake - Perform the protocol version handshake.
+ * @read_fd:		fd to read the peer's handshake from
+ * @write_fd:		fd to write our handshake reply to
+ * @my_node_hash:	Our node certificate SHA-256 hash
+ * @have_node_cert:	Whether we loaded a node certificate
+ *
+ * Returns 0 on success, -1 on failure.
+ */
+static int do_handshake(int read_fd, int write_fd,
+			const uint8_t *my_node_hash, int have_node_cert)
+{
+	uint8_t hs_buf[1 + ERLKOENIG_NODE_CERT_HASH_LEN];
+	ssize_t hs_len;
+
+	hs_len = erlkoenig_read_frame(read_fd, hs_buf, sizeof(hs_buf));
+	if (hs_len < 1) {
+		LOG_ERR("handshake: expected >= 1 byte, got %zd", hs_len);
+		return -1;
+	}
+
+	uint8_t peer_version = hs_buf[0];
+
+	if (peer_version == 1 && have_node_cert) {
+		if (!getenv("ERLKOENIG_ALLOW_V1")) {
+			LOG_ERR("handshake: peer sent v1 but node cert "
+				"requires v2 (set ERLKOENIG_ALLOW_V1 "
+				"to override during migration)");
+			uint8_t reply = ERLKOENIG_PROTOCOL_VERSION;
+			erlkoenig_write_frame(write_fd, &reply, 1);
+			return -1;
+		}
+		LOG_WARN("handshake: accepting v1 peer (migration mode)");
+	} else if (peer_version == 2) {
+		if (hs_len != 1 + ERLKOENIG_NODE_CERT_HASH_LEN) {
+			LOG_ERR("handshake: v2 expected %d bytes, got %zd",
+				1 + ERLKOENIG_NODE_CERT_HASH_LEN, hs_len);
+			return -1;
+		}
+
+		uint8_t *peer_hash = hs_buf + 1;
+		int peer_has_cert = !ek_nodecert_hash_is_zero(peer_hash);
+
+		if (have_node_cert && peer_has_cert) {
+			if (ek_nodecert_hash_compare(my_node_hash,
+						     peer_hash)) {
+				LOG_ERR("handshake: node cert hash "
+					"MISMATCH (Erlang and C have "
+					"different node.pem)");
+				return -1;
+			}
+			LOG_INFO("handshake: node cert verified "
+				 "(hash=%02x%02x%02x%02x...)",
+				 my_node_hash[0], my_node_hash[1],
+				 my_node_hash[2], my_node_hash[3]);
+		} else if (have_node_cert != peer_has_cert) {
+			LOG_WARN("handshake: cert mismatch "
+				 "(C=%s, Erlang=%s)",
+				 have_node_cert ? "yes" : "no",
+				 peer_has_cert ? "yes" : "no");
+		}
+	} else if (peer_version != 1 && peer_version != 2) {
+		LOG_ERR("handshake: unsupported version %d", peer_version);
+		uint8_t reply = ERLKOENIG_PROTOCOL_VERSION;
+		erlkoenig_write_frame(write_fd, &reply, 1);
+		return -1;
+	}
+
+	/* Send our reply (always v2 with hash) */
+	uint8_t reply[1 + ERLKOENIG_NODE_CERT_HASH_LEN];
+	reply[0] = ERLKOENIG_PROTOCOL_VERSION;
+	memcpy(reply + 1, my_node_hash, ERLKOENIG_NODE_CERT_HASH_LEN);
+	if (erlkoenig_write_frame(write_fd, reply, sizeof(reply)) < 0) {
+		LOG_ERR("handshake: failed to send reply");
+		return -1;
+	}
+	LOG_INFO("handshake ok (protocol v%d)", peer_version);
+	return 0;
+}
+
+/* -- Dispatch ----------------------------------------------------- */
 
 /*
  * dispatch_command - Route a received command to its handler.
@@ -1066,6 +1425,12 @@ static void dispatch_command(const uint8_t *buf, size_t len)
 	case ERLKOENIG_TAG_CMD_DEVICE_FILTER:
 		handle_cmd_device_filter(payload, payload_len);
 		break;
+	case ERLKOENIG_TAG_CMD_METRICS_START:
+		handle_cmd_metrics_start(payload, payload_len);
+		break;
+	case ERLKOENIG_TAG_CMD_METRICS_STOP:
+		handle_cmd_metrics_stop();
+		break;
 	default:
 		LOG_WARN("unknown command tag 0x%02X", tag);
 		send_reply_error(-ENOSYS, "unknown command");
@@ -1073,79 +1438,35 @@ static void dispatch_command(const uint8_t *buf, size_t len)
 	}
 }
 
-int main(void)
+/* -- Event loop --------------------------------------------------- */
+
+/*
+ * event_loop - Main command/output polling loop.
+ *
+ * Polls the command fd for incoming commands and child output fds
+ * for stdout/stderr data. Reaps children on SIGCHLD.
+ *
+ * Returns:
+ *   LOOP_SHUTDOWN    - Graceful shutdown (port mode: stdin closed;
+ *                      socket mode: SIGTERM or child dead + no container)
+ *   LOOP_DISCONNECT  - Connection lost (socket mode only)
+ */
+static int event_loop(void)
 {
 	uint8_t msg_buf[ERLKOENIG_MAX_MSG];
 	ssize_t msg_len;
 
-	erlkoenig_log_init();
-	LOG_INFO("starting (pid=%d uid=%d)", (int)getpid(), (int)getuid());
-
-	/* Ignore SIGPIPE: if Erlang closes the port while we write,
-	 * we want write() to return EPIPE, not kill the process. */
-	signal(SIGPIPE, SIG_IGN);
-
-	if (setup_signals())
-		return 1;
-
-	memset(&g_state, 0, sizeof(g_state));
-	g_state.state = STATE_IDLE;
-	g_state.ct.child_pid = -1;
-	g_state.ct.go_pipe = -1;
-	g_state.ct.stdout_fd = -1;
-	g_state.ct.stderr_fd = -1;
-	g_state.ct.exec_err_fd = -1;
-	g_state.ct.stdin_fd = -1;
-	g_state.ct.pty_master = -1;
-
-	/*
-	 * Protocol handshake: Erlang sends <<Version:8>>,
-	 * we reply with our version.
-	 */
-	{
-		uint8_t handshake_buf[1];
-		ssize_t hs_len;
-
-		hs_len = erlkoenig_read_frame(STDIN_FILENO,
-					    handshake_buf,
-					    sizeof(handshake_buf));
-		if (hs_len != 1) {
-			LOG_ERR("handshake: expected 1 byte, got %zd", hs_len);
-			return 1;
-		}
-
-		if (handshake_buf[0] != ERLKOENIG_PROTOCOL_VERSION) {
-			LOG_ERR("handshake: version mismatch (want %d, got %d)",
-				ERLKOENIG_PROTOCOL_VERSION, handshake_buf[0]);
-			/* Reply with our version so Erlang can report mismatch */
-			uint8_t reply = ERLKOENIG_PROTOCOL_VERSION;
-			erlkoenig_write_frame(STDOUT_FILENO, &reply, 1);
-			return 1;
-		}
-
-		/* Version matches — echo back */
-		uint8_t reply = ERLKOENIG_PROTOCOL_VERSION;
-		if (erlkoenig_write_frame(STDOUT_FILENO, &reply, 1) < 0) {
-			LOG_ERR("handshake: failed to send reply");
-			return 1;
-		}
-		LOG_INFO("handshake ok (protocol version %d)",
-			 ERLKOENIG_PROTOCOL_VERSION);
-	}
-
-	/*
-	 * Main loop: poll stdin for commands, child stdout/stderr
-	 * for output, and reap child on SIGCHLD.
-	 *
-	 * pfds[0] = stdin (Erlang commands, always active)
-	 * pfds[1] = child stdout (only when pipe is open)
-	 * pfds[2] = child stderr (only when pipe is open)
-	 * -- or in PTY mode: pfds[1] = pty_master --
-	 */
 	for (;;) {
-		struct pollfd pfds[4];
+		struct pollfd pfds[5];
 		nfds_t nfds = 1;
+		nfds_t metrics_pfd_idx = 0; /* 0 = not in pfds */
 		int pret;
+
+		/* Check for graceful shutdown request (SIGTERM/SIGINT) */
+		if (g_shutdown_requested) {
+			LOG_INFO("shutdown signal received");
+			return LOOP_SHUTDOWN;
+		}
 
 		/* Check for child exit */
 		if (g_sigchld_received) {
@@ -1153,33 +1474,48 @@ int main(void)
 			reap_child();
 		}
 
-		/* Always poll stdin */
-		pfds[0].fd = STDIN_FILENO;
+		/* Always poll the command fd */
+		pfds[0].fd = g_read_fd;
 		pfds[0].events = POLLIN;
 		pfds[0].revents = 0;
 
-		/* Poll child stdout if open */
-		if (g_state.stdout_open && g_state.ct.stdout_fd >= 0) {
+		/* Poll child stdout if open and connected */
+		if (g_connected && g_state.stdout_open &&
+		    g_state.ct.stdout_fd >= 0) {
 			pfds[nfds].fd = g_state.ct.stdout_fd;
 			pfds[nfds].events = POLLIN;
 			pfds[nfds].revents = 0;
 			nfds++;
 		}
 
-		/* Poll child stderr if open */
-		if (g_state.stderr_open && g_state.ct.stderr_fd >= 0) {
+		/* Poll child stderr if open and connected */
+		if (g_connected && g_state.stderr_open &&
+		    g_state.ct.stderr_fd >= 0) {
 			pfds[nfds].fd = g_state.ct.stderr_fd;
 			pfds[nfds].events = POLLIN;
 			pfds[nfds].revents = 0;
 			nfds++;
 		}
 
-		/* Poll PTY master if open (PTY mode) */
-		if (g_state.pty_open && g_state.ct.pty_master >= 0) {
+		/* Poll PTY master if open and connected (PTY mode) */
+		if (g_connected && g_state.pty_open &&
+		    g_state.ct.pty_master >= 0) {
 			pfds[nfds].fd = g_state.ct.pty_master;
 			pfds[nfds].events = POLLIN;
 			pfds[nfds].revents = 0;
 			nfds++;
+		}
+
+		/* Poll eBPF ring buffer for metrics events */
+		if (g_connected) {
+			int mfd = ek_metrics_poll_fd(&g_state.metrics);
+			if (mfd >= 0) {
+				metrics_pfd_idx = nfds;
+				pfds[nfds].fd = mfd;
+				pfds[nfds].events = POLLIN;
+				pfds[nfds].revents = 0;
+				nfds++;
+			}
 		}
 
 		/*
@@ -1199,35 +1535,47 @@ int main(void)
 			if (errno == EINTR)
 				continue;
 			LOG_SYSCALL("ppoll");
-			break;
+			return LOOP_SHUTDOWN;
 		}
 		if (pret == 0)
 			continue; /* Timeout, recheck SIGCHLD */
 
-		/* Check stdin */
+		/* Check command fd */
 		if (pfds[0].revents & POLLNVAL) {
-			LOG_ERR("stdin invalid fd");
-			break;
+			LOG_ERR("command fd invalid");
+			return g_socket_mode ? LOOP_DISCONNECT : LOOP_SHUTDOWN;
 		}
 
 		if (pfds[0].revents & POLLIN) {
-			msg_len = erlkoenig_read_frame(STDIN_FILENO,
+			msg_len = erlkoenig_read_frame(g_read_fd,
 						     msg_buf,
 						     sizeof(msg_buf));
 			if (msg_len < 0) {
+				if (g_socket_mode) {
+					LOG_INFO("connection lost (read error)");
+					return LOOP_DISCONNECT;
+				}
 				LOG_INFO("stdin closed, shutting down");
-				break;
+				return LOOP_SHUTDOWN;
 			}
 			dispatch_command(msg_buf, (size_t)msg_len);
 		}
 
 		if (pfds[0].revents & (POLLERR | POLLHUP)) {
+			if (g_socket_mode) {
+				LOG_INFO("connection lost (POLLHUP/POLLERR)");
+				return LOOP_DISCONNECT;
+			}
 			LOG_INFO("stdin closed, shutting down");
-			break;
+			return LOOP_SHUTDOWN;
 		}
 
 		/* Forward child stdout/stderr/pty output */
 		for (nfds_t i = 1; i < nfds; i++) {
+			/* Skip metrics fd -- handled separately below */
+			if (metrics_pfd_idx > 0 && i == metrics_pfd_idx)
+				continue;
+
 			if (!(pfds[i].revents & (POLLIN | POLLHUP)))
 				continue;
 
@@ -1254,9 +1602,205 @@ int main(void)
 				*open_flag = 0;
 			}
 		}
+
+		/* Consume eBPF ring buffer events */
+		if (metrics_pfd_idx > 0 &&
+		    (pfds[metrics_pfd_idx].revents & POLLIN)) {
+			ek_metrics_consume(&g_state.metrics,
+					   metrics_event_callback, NULL);
+		}
+	}
+}
+
+/* -- Socket mode -------------------------------------------------- */
+
+/*
+ * create_listen_socket - Create and bind a Unix Domain Socket.
+ * @path:	Filesystem path for the socket
+ *
+ * Removes any stale socket at the path, creates a new one,
+ * and starts listening with a backlog of 1 (only one Erlang
+ * connection at a time per container).
+ *
+ * Returns the listen fd on success, -1 on error.
+ */
+static int create_listen_socket(const char *path)
+{
+	int fd = -1;
+	struct sockaddr_un addr;
+
+	if (strlen(path) >= sizeof(addr.sun_path)) {
+		LOG_ERR("socket path too long: %s", path);
+		return -1;
 	}
 
-	/* Cleanup: kill child if still alive */
+	/* Remove stale socket from a previous run */
+	unlink(path);
+
+	fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+	if (fd < 0) {
+		LOG_SYSCALL("socket(AF_UNIX)");
+		return -1;
+	}
+
+	memset(&addr, 0, sizeof(addr));
+	addr.sun_family = AF_UNIX;
+	strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+
+	if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+		LOG_SYSCALL("bind");
+		goto err;
+	}
+
+	if (chmod(path, 0660) < 0) {
+		LOG_SYSCALL("chmod");
+		goto err;
+	}
+
+	/* Backlog 1: only one Erlang connection per container */
+	if (listen(fd, 1) < 0) {
+		LOG_SYSCALL("listen");
+		goto err;
+	}
+
+	return fd;
+
+err:
+	close(fd);
+	return -1;
+}
+
+/*
+ * run_socket_mode - Socket mode main loop.
+ * @sock_path:		Path for the Unix Domain Socket
+ * @my_node_hash:	Node certificate hash for handshake
+ * @have_node_cert:	Whether we have a node cert
+ *
+ * Creates a listen socket and enters the accept-event-reconnect loop.
+ * The child process survives connection loss. The runtime exits only
+ * on SIGTERM/SIGINT or when the child has exited and no reconnect
+ * is expected.
+ */
+static int run_socket_mode(const char *sock_path,
+			   const uint8_t *my_node_hash, int have_node_cert)
+{
+	int listen_fd;
+	int rc = 0;
+
+	listen_fd = create_listen_socket(sock_path);
+	if (listen_fd < 0)
+		return 1;
+
+	LOG_INFO("socket mode: listening on %s", sock_path);
+
+	/* Outer loop: accept connections, survive disconnects */
+	for (;;) {
+		int conn_fd;
+
+		/* Check for shutdown before blocking on accept */
+		if (g_shutdown_requested) {
+			LOG_INFO("shutdown signal received");
+			break;
+		}
+
+		/*
+		 * Check if child is dead and there's nothing to
+		 * reconnect for. In socket mode with no container
+		 * (STATE_IDLE) or a stopped container, we still wait
+		 * for at least one connection so Erlang can query status.
+		 * After delivering the exit status on reconnect, we
+		 * continue listening until shutdown.
+		 */
+		if (g_sigchld_received) {
+			g_sigchld_received = 0;
+			reap_child();
+		}
+
+		LOG_INFO("waiting for connection on %s", sock_path);
+
+		/*
+		 * Use ppoll on the listen fd to allow SIGCHLD/SIGTERM
+		 * to interrupt the wait. accept() alone would block
+		 * until a connection arrives, ignoring signals.
+		 */
+		{
+			struct pollfd pfd;
+			sigset_t empty_mask;
+			struct timespec timeout = { .tv_sec = 1,
+						    .tv_nsec = 0 };
+
+			pfd.fd = listen_fd;
+			pfd.events = POLLIN;
+			pfd.revents = 0;
+
+			sigemptyset(&empty_mask);
+			int pr = ppoll(&pfd, 1, &timeout, &empty_mask);
+
+			if (pr < 0) {
+				if (errno == EINTR)
+					continue;
+				LOG_SYSCALL("ppoll(listen)");
+				rc = 1;
+				break;
+			}
+			if (pr == 0)
+				continue; /* Timeout, re-check signals */
+
+			if (!(pfd.revents & POLLIN))
+				continue;
+		}
+
+		conn_fd = accept4(listen_fd, NULL, NULL, SOCK_CLOEXEC);
+		if (conn_fd < 0) {
+			if (errno == EINTR)
+				continue;
+			LOG_SYSCALL("accept4");
+			rc = 1;
+			break;
+		}
+
+		LOG_INFO("connection accepted (fd=%d)", conn_fd);
+
+		/* Set the connection as our I/O channel */
+		g_read_fd = conn_fd;
+		g_write_fd = conn_fd;
+		g_connected = 1;
+
+		/* Perform protocol handshake */
+		if (do_handshake(conn_fd, conn_fd,
+				 my_node_hash, have_node_cert) < 0) {
+			LOG_WARN("handshake failed, closing connection");
+			close(conn_fd);
+			g_connected = 0;
+			g_read_fd = -1;
+			g_write_fd = -1;
+			continue;
+		}
+
+		/* Run the event loop until disconnect or shutdown */
+		int loop_rc = event_loop();
+
+		/* Connection is done -- clean up */
+		close(conn_fd);
+		g_connected = 0;
+		g_read_fd = -1;
+		g_write_fd = -1;
+
+		if (loop_rc == LOOP_SHUTDOWN) {
+			LOG_INFO("graceful shutdown requested");
+			break;
+		}
+
+		/* LOOP_DISCONNECT: connection lost, go back to accept */
+		LOG_INFO("connection lost, waiting for reconnect...");
+	}
+
+	close(listen_fd);
+	unlink(sock_path);
+
+	/* Final cleanup: kill child if still alive on shutdown */
+	ek_metrics_stop(&g_state.metrics);
+
 	if (g_state.state == STATE_CREATED ||
 	    g_state.state == STATE_RUNNING) {
 		LOG_INFO("killing child pid=%d on shutdown",
@@ -1268,6 +1812,137 @@ int main(void)
 		erlkoenig_cleanup(&g_state.ct);
 	}
 
-	LOG_INFO("exiting");
+	LOG_INFO("exiting (socket mode)");
+	return rc;
+}
+
+/*
+ * run_port_mode - Legacy port mode (STDIN/STDOUT pipes).
+ * @my_node_hash:	Node certificate hash for handshake
+ * @have_node_cert:	Whether we have a node cert
+ *
+ * This is the original behavior: reads commands from stdin,
+ * writes replies to stdout. Connection loss terminates the runtime.
+ */
+static int run_port_mode(const uint8_t *my_node_hash, int have_node_cert)
+{
+	g_read_fd = STDIN_FILENO;
+	g_write_fd = STDOUT_FILENO;
+	g_connected = 1;
+	g_socket_mode = 0;
+
+	/* Protocol handshake */
+	if (do_handshake(STDIN_FILENO, STDOUT_FILENO,
+			 my_node_hash, have_node_cert) < 0)
+		return 1;
+
+	/* Run event loop until stdin closes */
+	event_loop();
+
+	/* Cleanup: stop metrics and kill child if still alive */
+	ek_metrics_stop(&g_state.metrics);
+
+	if (g_state.state == STATE_CREATED ||
+	    g_state.state == STATE_RUNNING) {
+		LOG_INFO("killing child pid=%d on shutdown",
+			 (int)g_state.ct.child_pid);
+		kill(g_state.ct.child_pid, SIGKILL);
+		while (waitpid(g_state.ct.child_pid, NULL, 0) < 0 &&
+		       errno == EINTR)
+			;
+		erlkoenig_cleanup(&g_state.ct);
+	}
+
+	LOG_INFO("exiting (port mode)");
 	return 0;
+}
+
+/* -- Argument parsing --------------------------------------------- */
+
+static void print_usage(const char *argv0)
+{
+	fprintf(stderr,
+		"Usage: %s [OPTIONS]\n"
+		"\n"
+		"Options:\n"
+		"  --socket PATH  Run in socket mode (Unix Domain Socket)\n"
+		"  --id ID        Container ID for log messages\n"
+		"  --help         Show this help\n"
+		"\n"
+		"Without --socket, runs in legacy port mode (STDIN/STDOUT).\n",
+		argv0);
+}
+
+int main(int argc, char *argv[])
+{
+	const char *sock_path = NULL;
+	const char *container_id = NULL;
+
+	static const struct option long_opts[] = {
+		{ "socket", required_argument, NULL, 's' },
+		{ "id",     required_argument, NULL, 'i' },
+		{ "help",   no_argument,       NULL, 'h' },
+		{ NULL,     0,                 NULL, 0   },
+	};
+
+	int opt;
+
+	while ((opt = getopt_long(argc, argv, "s:i:h", long_opts, NULL)) != -1) {
+		switch (opt) {
+		case 's':
+			sock_path = optarg;
+			break;
+		case 'i':
+			container_id = optarg;
+			break;
+		case 'h':
+			print_usage(argv[0]);
+			return 0;
+		default:
+			print_usage(argv[0]);
+			return 1;
+		}
+	}
+
+	erlkoenig_log_init();
+
+	if (container_id)
+		LOG_INFO("starting (pid=%d uid=%d id=%s)",
+			 (int)getpid(), (int)getuid(), container_id);
+	else
+		LOG_INFO("starting (pid=%d uid=%d)",
+			 (int)getpid(), (int)getuid());
+
+	/* Ignore SIGPIPE: on broken connection we want write() to
+	 * return EPIPE, not kill the process. Essential in both modes. */
+	signal(SIGPIPE, SIG_IGN);
+
+	if (setup_signals())
+		return 1;
+
+	memset(&g_state, 0, sizeof(g_state));
+	g_state.state = STATE_IDLE;
+	g_state.ct.child_pid = -1;
+	g_state.ct.go_pipe = -1;
+	g_state.ct.stdout_fd = -1;
+	g_state.ct.stderr_fd = -1;
+	g_state.ct.exec_err_fd = -1;
+	g_state.ct.stdin_fd = -1;
+	g_state.ct.pty_master = -1;
+	ek_metrics_ctx_init(&g_state.metrics);
+
+	/*
+	 * Load node certificate hash (before handshake).
+	 * If no cert exists, hash is all zeros -- v1 fallback behavior.
+	 */
+	uint8_t my_node_hash[ERLKOENIG_NODE_CERT_HASH_LEN];
+	int have_node_cert = (ek_nodecert_load_hash(my_node_hash) == 0);
+
+	if (sock_path) {
+		g_socket_mode = 1;
+		return run_socket_mode(sock_path, my_node_hash,
+				       have_node_cert);
+	}
+
+	return run_port_mode(my_node_hash, have_node_cert);
 }

@@ -209,6 +209,163 @@ int ek_bind_mount_dev(const char *rootfs, const char *name,
 }
 
 /*
+ * ek_mkdir_p - Create directory and all parent components under rootfs.
+ * @base:	Base path (rootfs prefix)
+ * @relpath:	Path relative to base (must start with '/')
+ * @mode:	Directory mode for newly created directories
+ *
+ * Returns 0 on success, negative errno on failure.
+ */
+static int ek_mkdir_p(const char *base, const char *relpath, mode_t mode)
+{
+	char path[ERLKOENIG_MAX_PATH];
+	int ret;
+	size_t base_len = strlen(base);
+
+	ret = snprintf(path, sizeof(path), "%s%s", base, relpath);
+	if (ret < 0 || (size_t)ret >= sizeof(path))
+		return -ENAMETOOLONG;
+
+	/* Walk each component after base, creating directories */
+	for (size_t i = base_len + 1; path[i] != '\0'; i++) {
+		if (path[i] == '/') {
+			path[i] = '\0';
+			if (mkdir(path, mode) && errno != EEXIST) {
+				LOG_SYSCALL("mkdir(mkdir_p)");
+				return -errno;
+			}
+			path[i] = '/';
+		}
+	}
+	/* Create the final component */
+	if (mkdir(path, mode) && errno != EEXIST) {
+		LOG_SYSCALL("mkdir(mkdir_p final)");
+		return -errno;
+	}
+	return 0;
+}
+
+/*
+ * ek_validate_dest_path - Validate a container destination path.
+ *
+ * Checks: must be absolute, no empty segments, no "." or ".." components.
+ * Returns 0 on valid, -EINVAL on invalid.
+ */
+static int ek_validate_dest_path(const char *dest)
+{
+	const char *p;
+	const char *seg_start;
+
+	if (!dest || dest[0] != '/')
+		return -EINVAL;
+
+	p = dest;
+	while (*p == '/')
+		p++;
+
+	while (*p) {
+		seg_start = p;
+		while (*p && *p != '/')
+			p++;
+		size_t seg_len = (size_t)(p - seg_start);
+
+		if (seg_len == 0) {
+			/* skip consecutive slashes */
+			p++;
+			continue;
+		}
+		if (seg_len == 1 && seg_start[0] == '.')
+			return -EINVAL;
+		if (seg_len == 2 && seg_start[0] == '.' && seg_start[1] == '.')
+			return -EINVAL;
+
+		while (*p == '/')
+			p++;
+	}
+
+	return 0;
+}
+
+/*
+ * ek_bind_mount_volume - Bind-mount a host directory into the container rootfs.
+ * @rootfs:	Path to the rootfs root (before pivot_root)
+ * @source:	Absolute host directory path
+ * @dest:	Absolute container directory path
+ * @opts:	EK_VOLUME_F_* flags
+ *
+ * The source must be an existing directory. The destination is created
+ * (mkdir -p) under rootfs. The mount is done before pivot_root, so host
+ * paths are still visible.
+ *
+ * For read-only mounts: initial MS_BIND followed by MS_BIND|MS_REMOUNT|MS_RDONLY.
+ * Direct MS_RDONLY on initial bind-mount is not reliable.
+ *
+ * Returns 0 on success, negative errno on failure.
+ */
+int ek_bind_mount_volume(const char *rootfs, const char *source,
+			 const char *dest, uint32_t opts)
+{
+	char target[ERLKOENIG_MAX_PATH];
+	struct stat st;
+	int ret;
+
+	/* 1. Validate source: absolute, exists, is a directory */
+	if (!source || source[0] != '/') {
+		LOG_ERR("volume source must be absolute: %s",
+			source ? source : "(null)");
+		return -EINVAL;
+	}
+	if (stat(source, &st)) {
+		LOG_SYSCALL("stat(volume source)");
+		return -errno;
+	}
+	if (!S_ISDIR(st.st_mode)) {
+		LOG_ERR("volume source is not a directory: %s", source);
+		return -ENOTDIR;
+	}
+
+	/* 2. Validate dest: absolute, no traversal */
+	ret = ek_validate_dest_path(dest);
+	if (ret) {
+		LOG_ERR("volume dest path invalid: %s", dest);
+		return ret;
+	}
+
+	/* 3. Create target directory under rootfs */
+	ret = ek_mkdir_p(rootfs, dest, 0755);
+	if (ret) {
+		LOG_ERR("failed to create volume target: %s%s", rootfs, dest);
+		return ret;
+	}
+
+	/* 4. Build full target path */
+	ret = snprintf(target, sizeof(target), "%s%s", rootfs, dest);
+	if (ret < 0 || (size_t)ret >= sizeof(target))
+		return -ENAMETOOLONG;
+
+	/* 5. Bind-mount */
+	if (mount(source, target, NULL, MS_BIND, NULL)) {
+		LOG_SYSCALL("mount(bind-volume)");
+		return -errno;
+	}
+
+	/* 6. Read-only remount if requested */
+	if (opts & EK_VOLUME_F_READONLY) {
+		if (mount(NULL, target, NULL,
+			  MS_BIND | MS_REMOUNT | MS_RDONLY, NULL)) {
+			LOG_SYSCALL("mount(remount-ro volume)");
+			/* Try to clean up the bind mount */
+			umount2(target, MNT_DETACH);
+			return -errno;
+		}
+	}
+
+	LOG_INFO("volume mounted: %s -> %s%s%s", source, rootfs, dest,
+		 (opts & EK_VOLUME_F_READONLY) ? " (ro)" : " (rw)");
+	return 0;
+}
+
+/*
  * prepare_rootfs_in_child - Set up the rootfs inside the child.
  *
  * Called by the child after clone(). The child inherits file
@@ -286,6 +443,14 @@ static int prepare_rootfs_in_child(const char *rootfs,
 	if (ret) goto out_umount;
 	ret = ek_bind_mount_dev(rootfs, "urandom", "/dev/urandom", 0444);
 	if (ret) goto out_umount;
+
+	/* Bind-mount persistent volumes (before pivot_root, host paths visible) */
+	for (uint8_t i = 0; i < opts->num_volumes; i++) {
+		ret = ek_bind_mount_volume(rootfs, opts->volumes[i].source,
+					   opts->volumes[i].dest,
+					   opts->volumes[i].opts);
+		if (ret) goto out_umount;
+	}
 
 	/* Create /etc/resolv.conf */
 	snprintf(path, sizeof(path), "%s/etc/resolv.conf", rootfs);

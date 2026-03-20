@@ -9,6 +9,7 @@
 -module(erlkoenig_proto_tests).
 
 -include_lib("eunit/include/eunit.hrl").
+-include_lib("stdlib/include/assert.hrl").
 
 %% =================================================================
 %% Reply decode tests
@@ -160,3 +161,53 @@ tag_name_known_test_() ->
 
 tag_name_unknown_test() ->
     ?assertEqual(unknown, erlkoenig_proto:tag_name(16#FF)).
+
+%% =================================================================
+%% Volume encoding tests
+%% =================================================================
+
+encode_volumes_empty_test() ->
+    ?assertEqual(<<0>>, erlkoenig_proto:encode_volumes([])).
+
+encode_volumes_single_test() ->
+    Src = <<"/var/lib/erlkoenig/volumes/app/db">>,
+    Dst = <<"/data/db">>,
+    Volumes = [#{host => Src, container => Dst, opts => 0}],
+    Expected = <<1:8,
+                 (byte_size(Src)):16/big, Src/binary,
+                 (byte_size(Dst)):16/big, Dst/binary,
+                 0:32/big>>,
+    ?assertEqual(Expected, erlkoenig_proto:encode_volumes(Volumes)).
+
+encode_volumes_readonly_test() ->
+    Src = <<"/var/lib/erlkoenig/volumes/app/config">>,
+    Dst = <<"/etc/config">>,
+    Volumes = [#{host => Src, container => Dst, opts => 16#01}],
+    Bin = erlkoenig_proto:encode_volumes(Volumes),
+    %% Check the opts field is 0x01 (last 4 bytes)
+    OptsOffset = byte_size(Bin) - 4,
+    <<_:OptsOffset/binary, Opts:32/big>> = Bin,
+    ?assertEqual(16#01, Opts).
+
+encode_volumes_max_test() ->
+    Vols = [#{host => <<"/src">>, container => <<"/dst">>, opts => 0}
+            || _ <- lists:seq(1, 16)],
+    Bin = erlkoenig_proto:encode_volumes(Vols),
+    <<NumVol:8, _/binary>> = Bin,
+    ?assertEqual(16, NumVol).
+
+volume_opts_readonly_test() ->
+    ?assertEqual(16#01, erlkoenig_proto:volume_opts(#{read_only => true})).
+
+volume_opts_default_test() ->
+    ?assertEqual(0, erlkoenig_proto:volume_opts(#{read_only => false})).
+
+volume_opts_empty_test() ->
+    ?assertEqual(0, erlkoenig_proto:volume_opts(#{})).
+
+encode_cmd_spawn_with_volumes_test() ->
+    Volumes = [#{host => <<"/h">>, container => <<"/c">>, opts => 0}],
+    Cmd = erlkoenig_proto:encode_cmd_spawn(
+            <<"/app">>, [], [], 0, 0, 0, 0, 0, 0, 0, Volumes),
+    ?assertEqual(16#10, binary:first(Cmd)),
+    ?assert(byte_size(Cmd) > 20).

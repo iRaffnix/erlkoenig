@@ -39,6 +39,18 @@
 #define ERLKOENIG_MAX_ENV		128
 #define ERLKOENIG_NETNS_PATH_LEN	64
 
+#define ERLKOENIG_MAX_VOLUMES	16
+
+/* Semantic volume options (NOT mount(2) flags!) */
+#define EK_VOLUME_F_READONLY	(1u << 0)
+/* Reserve: EK_VOLUME_F_NOSUID (1u << 1), EK_VOLUME_F_NOEXEC (1u << 2) */
+
+struct erlkoenig_volume {
+	char source[ERLKOENIG_MAX_PATH];   /* Host directory (absolute) */
+	char dest[ERLKOENIG_MAX_PATH];     /* Container directory (absolute) */
+	uint32_t opts;                      /* EK_VOLUME_F_* flags */
+};
+
 /*
  * struct erlkoenig_spawn_opts - Parameters for container creation.
  * @binary_path:	Absolute path to statically linked binary
@@ -73,6 +85,8 @@ struct erlkoenig_spawn_opts {
 	uint64_t caps_keep;
 	uint32_t dns_ip;
 	uint32_t flags;
+	struct erlkoenig_volume volumes[ERLKOENIG_MAX_VOLUMES];
+	uint8_t num_volumes;
 };
 
 /*

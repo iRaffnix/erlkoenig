@@ -969,6 +969,265 @@ START_TEST(test_namespace_isolation)
 END_TEST
 
 /* ================================================================
+ * TEST 13: Bind-Mount Volumes (basic rw)
+ * ================================================================
+ *
+ * LINUX-KONZEPT:
+ *   Bind-Mounts bilden ein Host-Verzeichnis in den Container ab.
+ *   Im Gegensatz zu tmpfs ueberlebt der Inhalt Container-Restarts.
+ *   Verwendet fuer persistente Daten (Datenbanken, Logs, Uploads).
+ *
+ * WAS WIR TESTEN:
+ *   ek_bind_mount_volume() mountet ein Host-Verzeichnis ins Rootfs.
+ *   Datei im Source anlegen, im Target lesen → gleicher Inhalt.
+ *
+ * WARUM WICHTIG:
+ *   Ohne Volumes gibt es keinen persistenten Speicher fuer Container.
+ */
+
+static int do_test_bind_mount_volume_basic(void)
+{
+	char rootfs[256];
+	char source[256];
+	char path[512];
+	int fd;
+	ssize_t n;
+	char buf[64];
+
+	if (ek_mkdtemp_rootfs(rootfs, sizeof(rootfs)))
+		return 1;
+	if (mount("tmpfs", rootfs, "tmpfs", MS_NOSUID, "size=8m,mode=0755")) {
+		rmdir(rootfs);
+		return 1;
+	}
+
+	/* Create a source directory with a test file */
+	snprintf(source, sizeof(source), "%s_vol", rootfs);
+	if (mkdir(source, 0755))
+		return 1;
+	snprintf(path, sizeof(path), "%s/testfile", source);
+	fd = open(path, O_CREAT | O_WRONLY, 0644);
+	if (fd < 0)
+		return 1;
+	write(fd, "hello-volume", 12);
+	close(fd);
+
+	/* Bind-mount into rootfs */
+	int ret = ek_bind_mount_volume(rootfs, source, "/data", 0);
+	if (ret)
+		return 1;
+
+	/* Read the file through the mount point */
+	snprintf(path, sizeof(path), "%s/data/testfile", rootfs);
+	fd = open(path, O_RDONLY);
+	if (fd < 0)
+		return 1;
+	n = read(fd, buf, sizeof(buf));
+	close(fd);
+
+	if (n != 12 || memcmp(buf, "hello-volume", 12) != 0)
+		return 1;
+
+	/* Write a new file through the mount point */
+	snprintf(path, sizeof(path), "%s/data/newfile", rootfs);
+	fd = open(path, O_CREAT | O_WRONLY, 0644);
+	if (fd < 0)
+		return 1;
+	write(fd, "written-from-container", 22);
+	close(fd);
+
+	/* Verify the new file is visible on the source */
+	snprintf(path, sizeof(path), "%s/newfile", source);
+	fd = open(path, O_RDONLY);
+	if (fd < 0)
+		return 1;
+	n = read(fd, buf, sizeof(buf));
+	close(fd);
+
+	if (n != 22 || memcmp(buf, "written-from-container", 22) != 0)
+		return 1;
+
+	umount2(rootfs, MNT_DETACH);
+	rmdir(rootfs);
+	unlink(path);
+	snprintf(path, sizeof(path), "%s/testfile", source);
+	unlink(path);
+	rmdir(source);
+	return 0;
+}
+
+START_TEST(test_bind_mount_volume_basic)
+{
+	if (geteuid() != 0) {
+		fprintf(stderr, "  SKIP (needs root)\n");
+		return;
+	}
+	ck_assert_int_eq(run_in_mount_ns(do_test_bind_mount_volume_basic), 0);
+}
+END_TEST
+
+/* ================================================================
+ * TEST 14: Bind-Mount Volume Read-Only
+ * ================================================================
+ *
+ * WAS WIR TESTEN:
+ *   ek_bind_mount_volume() mit EK_VOLUME_F_READONLY.
+ *   Lesen funktioniert, Schreiben → EROFS.
+ *
+ *   Implementierung: MS_BIND gefolgt von MS_BIND|MS_REMOUNT|MS_RDONLY
+ *   (direktes MS_RDONLY beim initialen Bind-Mount ist nicht zuverlaessig).
+ */
+
+static int do_test_bind_mount_volume_readonly(void)
+{
+	char rootfs[256];
+	char source[256];
+	char path[512];
+	int fd;
+	ssize_t n;
+	char buf[64];
+
+	if (ek_mkdtemp_rootfs(rootfs, sizeof(rootfs)))
+		return 1;
+	if (mount("tmpfs", rootfs, "tmpfs", MS_NOSUID, "size=8m,mode=0755")) {
+		rmdir(rootfs);
+		return 1;
+	}
+
+	snprintf(source, sizeof(source), "%s_vol_ro", rootfs);
+	if (mkdir(source, 0755))
+		return 1;
+	snprintf(path, sizeof(path), "%s/data.txt", source);
+	fd = open(path, O_CREAT | O_WRONLY, 0644);
+	if (fd < 0)
+		return 1;
+	write(fd, "readonly-data", 13);
+	close(fd);
+
+	/* Mount as read-only */
+	int ret = ek_bind_mount_volume(rootfs, source, "/config",
+				       EK_VOLUME_F_READONLY);
+	if (ret)
+		return 1;
+
+	/* Read must work */
+	snprintf(path, sizeof(path), "%s/config/data.txt", rootfs);
+	fd = open(path, O_RDONLY);
+	if (fd < 0)
+		return 1;
+	n = read(fd, buf, sizeof(buf));
+	close(fd);
+	if (n != 13 || memcmp(buf, "readonly-data", 13) != 0)
+		return 1;
+
+	/* Write must fail with EROFS */
+	snprintf(path, sizeof(path), "%s/config/newfile", rootfs);
+	fd = open(path, O_CREAT | O_WRONLY, 0644);
+	if (fd >= 0) {
+		close(fd);
+		return 1; /* Should have failed */
+	}
+	if (errno != EROFS)
+		return 1;
+
+	umount2(rootfs, MNT_DETACH);
+	rmdir(rootfs);
+	snprintf(path, sizeof(path), "%s/data.txt", source);
+	unlink(path);
+	rmdir(source);
+	return 0;
+}
+
+START_TEST(test_bind_mount_volume_readonly)
+{
+	if (geteuid() != 0) {
+		fprintf(stderr, "  SKIP (needs root)\n");
+		return;
+	}
+	ck_assert_int_eq(run_in_mount_ns(do_test_bind_mount_volume_readonly), 0);
+}
+END_TEST
+
+/* ================================================================
+ * TEST 15: Volume dest — relative path rejected
+ * ================================================================
+ *
+ * WAS WIR TESTEN:
+ *   ek_bind_mount_volume() mit relativem Dest-Pfad → -EINVAL.
+ *   Dest muss immer absolut sein.
+ */
+
+START_TEST(test_bind_mount_volume_bad_dest_relative)
+{
+	int ret = ek_bind_mount_volume("/tmp", "/tmp", "data/relative", 0);
+	ck_assert_int_eq(ret, -EINVAL);
+}
+END_TEST
+
+/* ================================================================
+ * TEST 16: Volume dest — path traversal rejected
+ * ================================================================
+ *
+ * WAS WIR TESTEN:
+ *   ek_bind_mount_volume() mit "../" im Dest-Pfad → -EINVAL.
+ *   Verhindert Container-Escape ueber crafted Zielpfade.
+ */
+
+START_TEST(test_bind_mount_volume_bad_dest_traversal)
+{
+	int ret;
+
+	ret = ek_bind_mount_volume("/tmp", "/tmp", "/data/../../../etc", 0);
+	ck_assert_int_eq(ret, -EINVAL);
+
+	ret = ek_bind_mount_volume("/tmp", "/tmp", "/data/./hidden", 0);
+	ck_assert_int_eq(ret, -EINVAL);
+}
+END_TEST
+
+/* ================================================================
+ * TEST 17: Volume source — not a directory
+ * ================================================================
+ *
+ * WAS WIR TESTEN:
+ *   ek_bind_mount_volume() mit einer Datei als Source → -ENOTDIR.
+ *   Scope v1: nur Directory Bind Mounts.
+ */
+
+START_TEST(test_bind_mount_volume_source_not_dir)
+{
+	/* Create a regular file as source */
+	char tmpfile[] = "/tmp/ek_vol_test_XXXXXX";
+	int fd = mkstemp(tmpfile);
+
+	ck_assert(fd >= 0);
+	close(fd);
+
+	int ret = ek_bind_mount_volume("/tmp", tmpfile, "/data", 0);
+	ck_assert_int_eq(ret, -ENOTDIR);
+
+	unlink(tmpfile);
+}
+END_TEST
+
+/* ================================================================
+ * TEST 18: Volume source — does not exist
+ * ================================================================
+ *
+ * WAS WIR TESTEN:
+ *   ek_bind_mount_volume() mit nicht existierendem Source → -ENOENT.
+ */
+
+START_TEST(test_bind_mount_volume_source_missing)
+{
+	int ret = ek_bind_mount_volume("/tmp",
+				       "/tmp/ek_nonexistent_vol_dir_12345",
+				       "/data", 0);
+	ck_assert_int_eq(ret, -ENOENT);
+}
+END_TEST
+
+/* ================================================================
  * Test Suite Setup
  * ================================================================ */
 
@@ -1011,6 +1270,18 @@ static Suite *container_setup_suite(void)
 	tcase_add_test(tc_proc, test_no_new_privs);
 	tcase_add_test(tc_proc, test_namespace_isolation);
 	suite_add_tcase(s, tc_proc);
+
+	/* Phase 5: Bind-Mount Volumes */
+	TCase *tc_vol = tcase_create("Phase 5: Volumes");
+
+	tcase_set_timeout(tc_vol, 10);
+	tcase_add_test(tc_vol, test_bind_mount_volume_basic);
+	tcase_add_test(tc_vol, test_bind_mount_volume_readonly);
+	tcase_add_test(tc_vol, test_bind_mount_volume_bad_dest_relative);
+	tcase_add_test(tc_vol, test_bind_mount_volume_bad_dest_traversal);
+	tcase_add_test(tc_vol, test_bind_mount_volume_source_not_dir);
+	tcase_add_test(tc_vol, test_bind_mount_volume_source_missing);
+	suite_add_tcase(s, tc_vol);
 
 	return s;
 }

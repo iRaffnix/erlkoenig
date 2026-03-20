@@ -39,12 +39,16 @@ defmodule Erlkoenig.Container.Builder do
       fw_sets: [],
       guard: nil,
       watch: nil,
+      observe: nil,
+      policy: nil,
       restart: nil,
+      volumes: [],
       files: %{},
       dns_name: nil,
       health_check: nil,
       zone: nil,
-      signature: nil
+      signature: nil,
+      rootfs: nil
     }
   end
 
@@ -111,12 +115,24 @@ defmodule Erlkoenig.Container.Builder do
     %{state | watch: watch}
   end
 
+  def set_observe(state, metrics) when is_list(metrics) do
+    %{state | observe: metrics}
+  end
+
+  def set_policy(state, policy) when is_map(policy) do
+    %{state | policy: policy}
+  end
+
   def set_caps(state, caps) when is_list(caps) do
     %{state | caps: caps}
   end
 
   def set_limits(state, limits) when is_map(limits) do
     %{state | limits: Map.merge(state.limits, limits)}
+  end
+
+  def add_volume(state, vol) when is_map(vol) do
+    %{state | volumes: state.volumes ++ [vol]}
   end
 
   def set_restart(state, policy) do
@@ -148,6 +164,10 @@ defmodule Erlkoenig.Container.Builder do
     %{state | health_check: opts}
   end
 
+  def set_rootfs(state, rootfs) when is_map(rootfs) do
+    %{state | rootfs: rootfs}
+  end
+
   def to_spawn_opts(state) do
     opts = %{}
     opts = if state.ip, do: Map.put(opts, :ip, state.ip), else: opts
@@ -173,13 +193,17 @@ defmodule Erlkoenig.Container.Builder do
     end
     opts = if state.guard, do: Map.put(opts, :guard, state.guard), else: opts
     opts = if state.watch, do: Map.put(opts, :watch, state.watch), else: opts
+    opts = if state.observe, do: Map.put(opts, :observe, state.observe), else: opts
+    opts = if state.policy, do: Map.put(opts, :policy, state.policy), else: opts
     opts = if state.limits != %{}, do: Map.put(opts, :limits, state.limits), else: opts
     opts = if state.seccomp, do: Map.put(opts, :seccomp, state.seccomp), else: opts
     opts = if state.caps != [], do: Map.put(opts, :caps, state.caps), else: opts
+    opts = if state.volumes != [], do: Map.put(opts, :volumes, state.volumes), else: opts
     opts = if state.restart, do: Map.put(opts, :restart, state.restart), else: opts
     opts = if state.files != %{}, do: Map.put(opts, :files, state.files), else: opts
     opts = if state.health_check, do: Map.put(opts, :health_check, state.health_check), else: opts
     opts = if state.zone, do: Map.put(opts, :zone, state.zone), else: opts
+    opts = if state.rootfs, do: Map.put(opts, :rootfs, state.rootfs), else: opts
 
     opts = case state.signature do
       nil       -> opts

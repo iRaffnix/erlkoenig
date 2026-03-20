@@ -55,8 +55,12 @@ defmodule Erlkoenig.Container do
       Module.register_attribute(__MODULE__, :ct_current, accumulate: false)
       Module.register_attribute(__MODULE__, :ct_defaults, accumulate: false)
       Module.register_attribute(__MODULE__, :ct_guard_acc, accumulate: false)
+      Module.register_attribute(__MODULE__, :ct_policy_acc, accumulate: false)
+      Module.register_attribute(__MODULE__, :ct_rootfs_acc, accumulate: false)
       @ct_defaults %{}
       @ct_guard_acc %{}
+      @ct_policy_acc %{}
+      @ct_rootfs_acc nil
 
       @before_compile Erlkoenig.Container
     end
@@ -132,6 +136,30 @@ defmodule Erlkoenig.Container do
 
   defmacro env(env_map) do
     quote do: @ct_current Builder.set_env(@ct_current, unquote(env_map))
+  end
+
+  # --- Volumes (persistent bind-mount directories) ---
+
+  @doc """
+  Declare a persistent volume for the container.
+
+  ## Example
+
+      volume "/data/db", persist: "archive-db"
+      volume "/var/log", persist: "archive-logs"
+      volume "/etc/config", persist: "shared-config", read_only: true
+
+  The `persist` key is required and must match `[a-z0-9][a-z0-9_-]*`.
+  The host path is resolved centrally by the core:
+  `/var/lib/erlkoenig/volumes/<container>/<persist>/`
+  """
+  defmacro volume(container_path, opts) do
+    quote do
+      persist_name = Keyword.fetch!(unquote(opts), :persist)
+      read_only = Keyword.get(unquote(opts), :read_only, false)
+      entry = %{container: unquote(container_path), persist: persist_name, read_only: read_only}
+      @ct_current Builder.add_volume(@ct_current, entry)
+    end
   end
 
   # --- Firewall (inline nftables rules) ---
@@ -259,8 +287,55 @@ defmodule Erlkoenig.Container do
     quote do: @ct_current Builder.set_files(@ct_current, unquote(file_map))
   end
 
-  defmacro file(path, content) do
+  defmacro file(path, content) when is_binary(content) do
     quote do: @ct_current Builder.add_file(@ct_current, unquote(path), unquote(content))
+  end
+
+  defmacro file(path, opts) when is_list(opts) do
+    quote do
+      entry = case unquote(opts) do
+        [from: :host] ->
+          %{path: unquote(path), source: {:host, unquote(path)}}
+        [from: host_path] when is_binary(host_path) ->
+          %{path: unquote(path), source: {:host, host_path}}
+        [content: content] when is_binary(content) ->
+          %{path: unquote(path), source: {:inline, content}}
+      end
+      @ct_rootfs_acc Map.update!(@ct_rootfs_acc, :files, &(&1 ++ [entry]))
+    end
+  end
+
+  # --- Rootfs (FUSE rootfs definition) ---
+
+  defmacro rootfs(do: block) do
+    quote do
+      @ct_rootfs_acc %{files: [], tmpfs: []}
+      unquote(block)
+      @ct_current Builder.set_rootfs(@ct_current, @ct_rootfs_acc)
+      @ct_rootfs_acc nil
+    end
+  end
+
+  defmacro base(name) when is_atom(name) do
+    quote do
+      @ct_rootfs_acc Map.put(@ct_rootfs_acc, :base, unquote(name))
+    end
+  end
+
+  defmacro directory(container_path, opts) do
+    quote do
+      from = Keyword.fetch!(unquote(opts), :from)
+      entry = %{path: unquote(container_path), source: {:directory, from}}
+      @ct_rootfs_acc Map.update!(@ct_rootfs_acc, :files, &(&1 ++ [entry]))
+    end
+  end
+
+  defmacro tmpfs(path, opts \\ []) do
+    quote do
+      size = Keyword.get(unquote(opts), :size, "64M")
+      entry = %{path: unquote(path), size: size}
+      @ct_rootfs_acc Map.update!(@ct_rootfs_acc, :tmpfs, &(&1 ++ [entry]))
+    end
   end
 
   # --- DNS Name ---
@@ -305,5 +380,109 @@ defmodule Erlkoenig.Container do
       seccomp_term = Erlkoenig.Seccomp.get(unquote(profile))
       @ct_current %{@ct_current | seccomp: seccomp_term}
     end
+  end
+
+  # --- Observe (eBPF tracepoint metrics) ---
+
+  @doc """
+  Enable eBPF tracepoint metrics for this container.
+
+  Available metrics: `:forks`, `:execs`, `:exits`, `:oom`, `:all`
+
+  ## Example
+
+      observe :all
+      observe :forks, :execs, :oom
+  """
+  defmacro observe(metric) do
+    quote do
+      metrics = Erlkoenig.Container.expand_observe([unquote(metric)])
+      @ct_current Builder.set_observe(@ct_current, metrics)
+    end
+  end
+
+  defmacro observe(m1, m2) do
+    quote do
+      metrics = Erlkoenig.Container.expand_observe([unquote(m1), unquote(m2)])
+      @ct_current Builder.set_observe(@ct_current, metrics)
+    end
+  end
+
+  defmacro observe(m1, m2, m3) do
+    quote do
+      metrics = Erlkoenig.Container.expand_observe([unquote(m1), unquote(m2), unquote(m3)])
+      @ct_current Builder.set_observe(@ct_current, metrics)
+    end
+  end
+
+  defmacro observe(m1, m2, m3, m4) do
+    quote do
+      metrics = Erlkoenig.Container.expand_observe([unquote(m1), unquote(m2), unquote(m3), unquote(m4)])
+      @ct_current Builder.set_observe(@ct_current, metrics)
+    end
+  end
+
+  def expand_observe(metrics) do
+    if :all in metrics do
+      [:forks, :execs, :exits, :oom]
+    else
+      valid = [:forks, :execs, :exits, :oom]
+      Enum.each(metrics, fn m ->
+        unless m in valid, do: raise(ArgumentError, "unknown observe metric: #{inspect(m)}")
+      end)
+      metrics
+    end
+  end
+
+  # --- Policy (reactive rules on eBPF events) ---
+
+  @doc """
+  Define reactive policies based on eBPF events.
+
+  ## Example
+
+      policy do
+        max_forks 50, per: :minute
+        max_forks 10, per: :second
+        on_oom :restart
+        on_fork_flood :kill
+        allowed_comms ["app", "worker"]
+        on_unexpected_exec :kill
+      end
+  """
+  defmacro policy(do: block) do
+    quote do
+      @ct_policy_acc %{}
+      unquote(block)
+      @ct_current Builder.set_policy(@ct_current, @ct_policy_acc)
+    end
+  end
+
+  defmacro max_forks(count, opts) do
+    quote do
+      per = Keyword.fetch!(unquote(opts), :per)
+      key = case per do
+        :second -> :max_forks_per_sec
+        :minute -> :max_forks_per_min
+        other -> raise ArgumentError, "max_forks per: must be :second or :minute, got #{inspect(other)}"
+      end
+      @ct_policy_acc Map.put(@ct_policy_acc, key, unquote(count))
+    end
+  end
+
+  defmacro on_oom(action) when action in [:restart, :kill, :alert] do
+    quote do: @ct_policy_acc Map.put(@ct_policy_acc, :on_oom, unquote(action))
+  end
+
+  defmacro on_fork_flood(action) when action in [:kill, :alert] do
+    quote do: @ct_policy_acc Map.put(@ct_policy_acc, :on_fork_flood, unquote(action))
+  end
+
+  defmacro allowed_comms(comm_list) do
+    quote do: @ct_policy_acc Map.put(@ct_policy_acc, :allowed_comms, unquote(comm_list))
+  end
+
+  defmacro on_unexpected_exec(action) when action in [:kill, :alert] do
+    quote do: @ct_policy_acc Map.put(@ct_policy_acc, :on_unexpected_exec, unquote(action))
   end
 end

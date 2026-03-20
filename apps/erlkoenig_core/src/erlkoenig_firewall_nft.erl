@@ -14,21 +14,20 @@
 %% limitations under the License.
 %%
 
-%%%-------------------------------------------------------------------
-%%% @doc nf_tables operations for per-container firewall chains.
-%%%
-%%% Creates and manages a dedicated nf_tables table (erlkoenig_ct)
-%%% with:
-%%%   - Forward chain (filter, policy drop) for container isolation
-%%%   - Postrouting chain (nat, masquerade) for internet access
-%%%   - Prerouting chain (nat) for port-forwarding / DNAT
-%%%   - Per-container regular chains with isolation rules
-%%%
-%%% All operations go through nfnl_server (erlkoenig_nft_srv) as atomic
-%%% batches.
-%%% @end
-%%%-------------------------------------------------------------------
 -module(erlkoenig_firewall_nft).
+-moduledoc """
+nf_tables operations for per-container firewall chains.
+
+Creates and manages a dedicated nf_tables table (erlkoenig_ct)
+with:
+  - Forward chain (filter, policy drop) for container isolation
+  - Postrouting chain (nat, masquerade) for internet access
+  - Prerouting chain (nat) for port-forwarding / DNAT
+  - Per-container regular chains with isolation rules
+
+All operations go through nfnl_server (erlkoenig_nft_srv) as atomic
+batches.
+""".
 
 -export([setup_table/0, setup_table/1, teardown_table/0,
          add_container/3, add_container/4, add_container/5,
@@ -50,14 +49,16 @@
 %% Public API
 %%====================================================================
 
-%% @doc Create the erlkoenig_ct table with forward, postrouting, and
-%% prerouting chains.
-%%
-%% - forward: policy drop, per-container jump rules
-%% - postrouting: masquerade for internet access
-%% - prerouting: DNAT for port-forwarding
-%%
-%% Also enables ip_forward so the kernel routes between interfaces.
+-doc """
+Create the erlkoenig_ct table with forward, postrouting, and
+prerouting chains.
+
+- forward: policy drop, per-container jump rules
+- postrouting: masquerade for internet access
+- prerouting: DNAT for port-forwarding
+
+Also enables ip_forward so the kernel routes between interfaces.
+""".
 -spec setup_table() -> ok | {error, term()}.
 setup_table() ->
     _ = ensure_ets(),
@@ -125,14 +126,16 @@ setup_table() ->
         }, S) end
     ]).
 
-%% @doc Create table with zone-aware masquerade rules.
-%%
-%% Zones is a list of zone config maps:
-%%   [#{bridge => <<"br0">>, subnet => {10,0,0,0}, netmask => 24,
-%%      policy => allow_outbound}, ...]
-%%
-%% Each zone with policy allow_outbound gets its own masquerade rule.
-%% Zones with policy isolate or strict get no masquerade.
+-doc """
+Create table with zone-aware masquerade rules.
+
+Zones is a list of zone config maps:
+  [#{bridge => <<"br0">>, subnet => {10,0,0,0}, netmask => 24,
+     policy => allow_outbound}, ...]
+
+Each zone with policy allow_outbound gets its own masquerade rule.
+Zones with policy isolate or strict get no masquerade.
+""".
 -spec setup_table([map()]) -> ok | {error, term()}.
 setup_table(Zones) when is_list(Zones) ->
     _ = ensure_ets(),
@@ -188,7 +191,7 @@ setup_table(Zones) when is_list(Zones) ->
         }, S) end
     ]).
 
-%% @doc Generate masquerade rules for a zone.
+-doc "Generate masquerade rules for a zone.".
 -spec zone_masq_rules(map()) -> [fun()].
 zone_masq_rules(#{policy := allow_outbound, subnet := {A,B,C,_},
                   netmask := Mask, bridge := Bridge}) ->
@@ -207,36 +210,40 @@ zone_masq_rules(#{policy := allow_outbound, subnet := {A,B,C,_},
 zone_masq_rules(_) ->
     [].
 
-%% @doc Delete the entire erlkoenig_ct table.
+-doc "Delete the entire erlkoenig_ct table.".
 -spec teardown_table() -> ok | {error, term()}.
 teardown_table() ->
     nfnl_server:apply_msgs(?SERVER, [
         fun(S) -> nft_delete:table(?FAMILY, ?TABLE, S) end
     ]).
 
-%% @doc Add firewall rules for a container (no port-forwarding).
+-doc "Add firewall rules for a container (no port-forwarding).".
 -spec add_container(binary(), inet:ip_address(), binary()) -> ok | {error, term()}.
 add_container(ContainerId, Ip, HostVeth) ->
     add_container(ContainerId, Ip, HostVeth, []).
 
-%% @doc Add firewall rules for a container with port-forwarding.
-%%
-%% Ports is a list of {HostPort, ContainerPort} tuples.
-%% Creates a regular chain "ct_<id>" with default rules,
-%% a jump rule in the forward chain, and DNAT rules in prerouting.
+-doc """
+Add firewall rules for a container with port-forwarding.
+
+Ports is a list of {HostPort, ContainerPort} tuples.
+Creates a regular chain "ct_<id>" with default rules,
+a jump rule in the forward chain, and DNAT rules in prerouting.
+""".
 -spec add_container(binary(), inet:ip_address(), binary(),
                     [{non_neg_integer(), non_neg_integer()}]) ->
     ok | {error, term()}.
 add_container(ContainerId, Ip, HostVeth, Ports) ->
     add_container(ContainerId, Ip, HostVeth, Ports, #{}).
 
-%% @doc Add firewall rules for a container with custom firewall term.
-%%
-%% FirewallTerm is a map from the Erlkoenig DSL (or empty for defaults):
-%%   #{chains => [#{rules => [...], ...}], sets => [...], counters => [...]}
-%%
-%% When FirewallTerm is empty or has no chains, default rules are used
-%% (ct_established + icmp + dns + accept).
+-doc """
+Add firewall rules for a container with custom firewall term.
+
+FirewallTerm is a map from the Erlkoenig DSL (or empty for defaults):
+  #{chains => [#{rules => [...], ...}], sets => [...], counters => [...]}
+
+When FirewallTerm is empty or has no chains, default rules are used
+(ct_established + icmp + dns + accept).
+""".
 -spec add_container(binary(), inet:ip_address(), binary(),
                     [{non_neg_integer(), non_neg_integer()}],
                     map()) ->
@@ -282,11 +289,13 @@ add_container(ContainerId, Ip, HostVeth, Ports, FirewallTerm) ->
     ets:insert(erlkoenig_firewall_ports, {ContainerId, HostVeth, Ip, Ports}),
     nfnl_server:apply_msgs(?SERVER, Msgs ++ DnatMsgs).
 
-%% @doc Remove all firewall rules for a container.
-%%
-%% Flushes all shared chains (forward, prerouting, output), deletes
-%% the container chain, then rebuilds shared-chain rules for all
-%% remaining containers.
+-doc """
+Remove all firewall rules for a container.
+
+Flushes all shared chains (forward, prerouting, output), deletes
+the container chain, then rebuilds shared-chain rules for all
+remaining containers.
+""".
 -spec remove_container(binary()) -> ok | {error, term()}.
 remove_container(ContainerId) ->
     _ = ensure_ets(),
@@ -312,7 +321,7 @@ remove_container(ContainerId) ->
     RebuildMsgs = lists:append([rebuild_shared_rules(R) || R <- Remaining]),
     nfnl_server:apply_msgs(?SERVER, FlushMsgs ++ BaseMsgs ++ RebuildMsgs).
 
-%% @doc Rebuild forward jump + DNAT rules for one container.
+-doc "Rebuild forward jump + DNAT rules for one container.".
 -spec rebuild_shared_rules(tuple()) -> [fun()].
 rebuild_shared_rules({_Id, Veth, _Ip, []}) ->
     Chain2 = chain_name(_Id),
@@ -337,10 +346,12 @@ rebuild_shared_rules({_Id, Veth, Ip, Ports}) ->
 %% Internal
 %%====================================================================
 
-%% @doc Masquerade only traffic from the container subnet.
-%% Reads subnet/netmask from app config. The subnet match ensures
-%% only container traffic gets NAT'd — loopback, host traffic, and
-%% inter-zone traffic are never affected (see docs/ZONES.md).
+-doc """
+Masquerade only traffic from the container subnet.
+Reads subnet/netmask from app config. The subnet match ensures
+only container traffic gets NAT'd -- loopback, host traffic, and
+inter-zone traffic are never affected (see docs/ZONES.md).
+""".
 -spec subnet_masq_rule() -> list().
 subnet_masq_rule() ->
     {A, B, C, _} = application:get_env(erlkoenig_core, subnet, {10, 0, 0, 0}),
@@ -368,8 +379,10 @@ netmask_bin(Bits) ->
     Mask = (16#FFFFFFFF bsl (32 - Bits)) band 16#FFFFFFFF,
     <<Mask:32/big>>.
 
-%% @doc Masquerade traffic from 127.0.0.0/8 going to a bridge interface.
-%% This allows localhost DNAT (host -> container via 127.0.0.1:port) to work.
+-doc """
+Masquerade traffic from 127.0.0.0/8 going to a bridge interface.
+This allows localhost DNAT (host -> container via 127.0.0.1:port) to work.
+""".
 -spec loopback_masq_rule(binary()) -> list().
 loopback_masq_rule(BridgeName) ->
     BridgePadded = pad_ifname(BridgeName),
@@ -382,7 +395,7 @@ loopback_masq_rule(BridgeName) ->
      nft_expr_ir:cmp(eq, 1, BridgePadded),
      nft_expr_ir:masq()].
 
-%% @doc Enable route_localnet for an interface so localhost DNAT works.
+-doc "Enable route_localnet for an interface so localhost DNAT works.".
 -spec enable_route_localnet(binary()) -> ok.
 enable_route_localnet(IfName) ->
     Path = lists:flatten(io_lib:format(?ROUTE_LOCALNET_FMT,
@@ -403,8 +416,7 @@ ip_to_binary({A, B, C, D, E, F, G, H}) ->
 
 %% --- Term-based rule compilation ---
 
-%% @doc Extract nft_rules from a DSL firewall term.
-%% Returns a list of compiled rule expression lists.
+-doc "Extract nft_rules from a DSL firewall term. Returns a list of compiled rule expression lists.".
 -spec rules_from_term(map()) -> [list()].
 rules_from_term(#{chains := [#{rules := Rules} | _]}) ->
     [compile_rule(R) || R <- Rules];
@@ -415,14 +427,14 @@ rules_from_term(_) ->
      nft_rules:udp_accept(53),
      [nft_expr_ir:accept()]].
 
-%% @doc Create nft set messages from a DSL firewall term.
+-doc "Create nft set messages from a DSL firewall term.".
 -spec sets_from_term(map()) -> [fun()].
 sets_from_term(#{sets := Sets}) when is_list(Sets), Sets =/= [] ->
     [set_msg(S) || S <- Sets];
 sets_from_term(_) ->
     [].
 
-%% @doc Create nft counter messages from a DSL firewall term.
+-doc "Create nft counter messages from a DSL firewall term.".
 -spec counters_from_term(map()) -> [fun()].
 counters_from_term(#{counters := Counters}) when is_list(Counters), Counters =/= [] ->
     [fun(S) ->
@@ -431,7 +443,7 @@ counters_from_term(#{counters := Counters}) when is_list(Counters), Counters =/=
 counters_from_term(_) ->
     [].
 
-%% @doc Convert a single DSL rule atom/tuple to nft_rules expression list.
+-doc "Convert a single DSL rule atom/tuple to nft_rules expression list.".
 -spec compile_rule(atom() | tuple()) -> list().
 compile_rule(ct_established_accept) ->
     nft_rules:ct_established_accept();
@@ -482,7 +494,7 @@ compile_rule(Unknown) ->
     logger:warning("erlkoenig_firewall_nft: unknown rule ~p, skipping", [Unknown]),
     [].
 
-%% @doc Create a set add message.
+-doc "Create a set add message.".
 -spec set_msg(tuple()) -> fun().
 set_msg({Name, Type}) ->
     fun(S) -> nft_set:add(?FAMILY, #{
@@ -502,7 +514,7 @@ set_msg({Name, Type, #{timeout := Timeout} = Opts}) ->
 set_type_atom(ipv4_addr) -> ipv4_addr;
 set_type_atom(ipv6_addr) -> ipv6_addr.
 
-%% @doc Ensure the ETS table for tracking container port mappings exists.
+-doc "Ensure the ETS table for tracking container port mappings exists.".
 ensure_ets() ->
     case ets:whereis(erlkoenig_firewall_ports) of
         undefined ->

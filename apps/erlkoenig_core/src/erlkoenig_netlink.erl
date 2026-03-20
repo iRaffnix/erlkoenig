@@ -14,35 +14,33 @@
 %% limitations under the License.
 %%
 
-%%%-------------------------------------------------------------------
-%% @doc erlkoenig_netlink - Low-level Netlink protocol for Erlang.
-%%
-%% This module speaks the Linux Netlink protocol directly, using
-%% Erlang's socket module with AF_NETLINK (integer 16).
-%%
-%% Why not shell out to ip(8)?
-%%   - No fork/exec overhead
-%%   - Proper error handling (not string parsing)
-%%   - Composable from Erlang
-%%
-%% Why not a NIF?
-%%   - socket:open(16, raw, 0) works since OTP 22
-%%   - Erlang binary pattern matching is ideal for netlink parsing
-%%   - No C dependency for networking code
-%%
-%% Netlink basics:
-%%   Every message has a 16-byte header (nlmsghdr), followed by
-%%   a type-specific struct (ifinfomsg, ifaddrmsg, rtmsg), followed
-%%   by TLV attributes (NLA = netlink attribute).
-%%
-%%   All integers are NATIVE endian (little-endian on x86/ARM).
-%%   This is a kernel ABI that has not changed since Linux 2.6.
-%%
-%% Reference: man 7 netlink, man 7 rtnetlink
-%% @end
-%%%-------------------------------------------------------------------
-
 -module(erlkoenig_netlink).
+-moduledoc """
+Low-level Netlink protocol for Erlang.
+
+This module speaks the Linux Netlink protocol directly, using
+Erlang's socket module with AF_NETLINK (integer 16).
+
+Why not shell out to ip(8)?
+  - No fork/exec overhead
+  - Proper error handling (not string parsing)
+  - Composable from Erlang
+
+Why not a NIF?
+  - socket:open(16, raw, 0) works since OTP 22
+  - Erlang binary pattern matching is ideal for netlink parsing
+  - No C dependency for networking code
+
+Netlink basics:
+  Every message has a 16-byte header (nlmsghdr), followed by
+  a type-specific struct (ifinfomsg, ifaddrmsg, rtmsg), followed
+  by TLV attributes (NLA = netlink attribute).
+
+  All integers are NATIVE endian (little-endian on x86/ARM).
+  This is a kernel ABI that has not changed since Linux 2.6.
+
+Reference: man 7 netlink, man 7 rtnetlink
+""".
 
 -export([open/0,
          close/1,
@@ -129,26 +127,30 @@
 %%% Socket Operations
 %%%===================================================================
 
-%% @doc Open a netlink route socket.
-%%
-%% AF_NETLINK (16) is passed as integer because Erlang's socket
-%% module doesn't have a named atom for it. This works since OTP 22.
+-doc """
+Open a netlink route socket.
+
+AF_NETLINK (16) is passed as integer because Erlang's socket
+module doesn't have a named atom for it. This works since OTP 22.
+""".
 -spec open() -> {ok, socket:socket()} | {error, term()}.
 open() ->
     socket:open(?AF_NETLINK, raw, ?NETLINK_ROUTE).
 
-%% @doc Close a netlink socket.
+-doc "Close a netlink socket.".
 -spec close(socket:socket()) -> ok.
 close(Sock) ->
     socket:close(Sock).
 
-%% @doc Send a netlink message and wait for the kernel's ACK.
-%%
-%% Every netlink message with NLM_F_ACK set will receive an
-%% NLMSG_ERROR response. Error code 0 means success.
-%%
-%% For RTM_GETLINK, the response is a RTM_NEWLINK message
-%% (not NLMSG_ERROR), so use recv_response/1 instead.
+-doc """
+Send a netlink message and wait for the kernel's ACK.
+
+Every netlink message with NLM_F_ACK set will receive an
+NLMSG_ERROR response. Error code 0 means success.
+
+For RTM_GETLINK, the response is a RTM_NEWLINK message
+(not NLMSG_ERROR), so use recv_response/1 instead.
+""".
 -spec request(socket:socket(), iodata()) -> ok | {error, term()}.
 request(Sock, Msg) ->
     case socket:send(Sock, Msg) of
@@ -175,13 +177,15 @@ request(Sock, Msg) ->
 %%%   +---------------------------+
 %%%===================================================================
 
-%% @doc Create a bridge interface.
-%%
-%%   RTM_NEWLINK + IFLA_IFNAME + IFLA_LINKINFO{KIND="bridge"}
-%%
-%% Example:
-%%   Msg = msg_create_bridge(1, BridgeName),
-%%   request(Sock, Msg).
+-doc """
+Create a bridge interface.
+
+  RTM_NEWLINK + IFLA_IFNAME + IFLA_LINKINFO{KIND="bridge"}
+
+Example:
+  Msg = msg_create_bridge(1, BridgeName),
+  request(Sock, Msg).
+""".
 -spec msg_create_bridge(integer(), binary()) -> binary().
 msg_create_bridge(Seq, Name) ->
     Attrs = [
@@ -193,13 +197,15 @@ msg_create_bridge(Seq, Name) ->
     build_link_msg(?RTM_NEWLINK, create_flags(), Seq, _Ifindex = 0,
                    _IfFlags = 0, _IfChange = 0, Attrs).
 
-%% @doc Create a veth pair: HostName on this side, PeerName on the other.
-%%
-%%   RTM_NEWLINK + IFLA_IFNAME(host)
-%%               + IFLA_LINKINFO{KIND="veth", DATA{PEER{ifinfomsg + IFLA_IFNAME}}}
-%%
-%% The peer shows up as a separate interface. It can be moved
-%% into a container's network namespace with msg_set_netns_by_pid/3.
+-doc """
+Create a veth pair: HostName on this side, PeerName on the other.
+
+  RTM_NEWLINK + IFLA_IFNAME(host)
+              + IFLA_LINKINFO{KIND="veth", DATA{PEER{ifinfomsg + IFLA_IFNAME}}}
+
+The peer shows up as a separate interface. It can be moved
+into a container's network namespace with msg_set_netns_by_pid/3.
+""".
 -spec msg_create_veth(integer(), binary(), binary()) -> binary().
 msg_create_veth(Seq, HostName, PeerName) ->
     %% The peer is described as a nested ifinfomsg + attributes
@@ -219,12 +225,14 @@ msg_create_veth(Seq, HostName, PeerName) ->
     build_link_msg(?RTM_NEWLINK, create_flags(), Seq, _Ifindex = 0,
                    _IfFlags = 0, _IfChange = 0, Attrs).
 
-%% @doc Move an interface into another network namespace.
-%%
-%%   RTM_NEWLINK + IFLA_NET_NS_PID
-%%
-%% IfIndex: index of the interface to move (from msg_get_link).
-%% Pid: OS PID of the target process (not Erlang pid).
+-doc """
+Move an interface into another network namespace.
+
+  RTM_NEWLINK + IFLA_NET_NS_PID
+
+IfIndex: index of the interface to move (from msg_get_link).
+Pid: OS PID of the target process (not Erlang pid).
+""".
 -spec msg_set_netns_by_pid(integer(), integer(), non_neg_integer()) -> binary().
 msg_set_netns_by_pid(Seq, IfIndex, Pid) ->
     Attrs = [
@@ -233,12 +241,14 @@ msg_set_netns_by_pid(Seq, IfIndex, Pid) ->
     build_link_msg(?RTM_NEWLINK, ack_flags(), Seq, IfIndex,
                    _IfFlags = 0, _IfChange = 0, Attrs).
 
-%% @doc Attach an interface to a bridge (set master device).
-%%
-%%   RTM_NEWLINK + IFLA_MASTER
-%%
-%% IfIndex: the interface to attach.
-%% MasterIndex: the bridge's interface index.
+-doc """
+Attach an interface to a bridge (set master device).
+
+  RTM_NEWLINK + IFLA_MASTER
+
+IfIndex: the interface to attach.
+MasterIndex: the bridge's interface index.
+""".
 -spec msg_set_master(integer(), integer(), integer()) -> binary().
 msg_set_master(Seq, IfIndex, MasterIndex) ->
     Attrs = [
@@ -247,24 +257,28 @@ msg_set_master(Seq, IfIndex, MasterIndex) ->
     build_link_msg(?RTM_NEWLINK, ack_flags(), Seq, IfIndex,
                    _IfFlags = 0, _IfChange = 0, Attrs).
 
-%% @doc Set an interface UP.
-%%
-%%   RTM_NEWLINK with ifi_flags=IFF_UP, ifi_change=IFF_UP
-%%
-%% ifi_change is a bitmask that tells the kernel which flags to modify.
-%% Setting both flags and change to IFF_UP means: "set UP, don't touch
-%% anything else".
+-doc """
+Set an interface UP.
+
+  RTM_NEWLINK with ifi_flags=IFF_UP, ifi_change=IFF_UP
+
+ifi_change is a bitmask that tells the kernel which flags to modify.
+Setting both flags and change to IFF_UP means: "set UP, don't touch
+anything else".
+""".
 -spec msg_set_up(integer(), integer()) -> binary().
 msg_set_up(Seq, IfIndex) ->
     build_link_msg(?RTM_NEWLINK, ack_flags(), Seq, IfIndex,
                    _IfFlags = ?IFF_UP, _IfChange = ?IFF_UP, []).
 
-%% @doc Add an IPv4 address to an interface.
-%%
-%%   RTM_NEWADDR + IFA_LOCAL + IFA_ADDRESS
-%%
-%% Ip: {A, B, C, D} tuple.
-%% Prefixlen: subnet mask as prefix length (e.g. 24 for /24).
+-doc """
+Add an IPv4 address to an interface.
+
+  RTM_NEWADDR + IFA_LOCAL + IFA_ADDRESS
+
+Ip: {A, B, C, D} tuple.
+Prefixlen: subnet mask as prefix length (e.g. 24 for /24).
+""".
 -spec msg_add_addr(integer(), integer(), tuple(), integer()) -> binary().
 msg_add_addr(Seq, IfIndex, {A, B, C, D}, Prefixlen) ->
     AddrBin = <<A:8, B:8, C:8, D:8>>,
@@ -281,9 +295,11 @@ msg_add_addr(Seq, IfIndex, {A, B, C, D}, Prefixlen) ->
     <<Len:32/native, ?RTM_NEWADDR:16/native, Flags:16/native,
       Seq:32/native, 0:32/native, Payload/binary>>.
 
-%% @doc Add a default route (0.0.0.0/0) via a gateway.
-%%
-%%   RTM_NEWROUTE + RTA_GATEWAY
+-doc """
+Add a default route (0.0.0.0/0) via a gateway.
+
+  RTM_NEWROUTE + RTA_GATEWAY
+""".
 -spec msg_add_default_route(integer(), tuple()) -> binary().
 msg_add_default_route(Seq, {A, B, C, D}) ->
     %% rtmsg: family, dst_len, src_len, tos, table, protocol, scope, type, flags
@@ -304,22 +320,26 @@ msg_add_default_route(Seq, {A, B, C, D}) ->
     <<Len:32/native, ?RTM_NEWROUTE:16/native, Flags:16/native,
       Seq:32/native, 0:32/native, Payload/binary>>.
 
-%% @doc Delete a network interface.
-%%
-%%   RTM_DELLINK
-%%
-%% Deleting one end of a veth pair automatically deletes the other.
+-doc """
+Delete a network interface.
+
+  RTM_DELLINK
+
+Deleting one end of a veth pair automatically deletes the other.
+""".
 -spec msg_delete_link(integer(), integer()) -> binary().
 msg_delete_link(Seq, IfIndex) ->
     build_link_msg(?RTM_DELLINK, ack_flags(), Seq, IfIndex,
                    _IfFlags = 0, _IfChange = 0, []).
 
-%% @doc Request information about an interface by name.
-%%
-%%   RTM_GETLINK + IFLA_IFNAME
-%%
-%% Response is a RTM_NEWLINK message (not NLMSG_ERROR).
-%% Parse with parse_newlink/1.
+-doc """
+Request information about an interface by name.
+
+  RTM_GETLINK + IFLA_IFNAME
+
+Response is a RTM_NEWLINK message (not NLMSG_ERROR).
+Parse with parse_newlink/1.
+""".
 -spec msg_get_link(integer(), binary()) -> binary().
 msg_get_link(Seq, Name) ->
     Attrs = [
@@ -334,10 +354,12 @@ msg_get_link(Seq, Name) ->
 %%% Response Parsing
 %%%===================================================================
 
-%% @doc Receive and parse an ACK response.
-%%
-%% Netlink ACK = NLMSG_ERROR with error code 0.
-%% Any other error code is a failure (negated errno).
+-doc """
+Receive and parse an ACK response.
+
+Netlink ACK = NLMSG_ERROR with error code 0.
+Any other error code is a failure (negated errno).
+""".
 -spec recv_ack(socket:socket()) -> ok | {error, term()}.
 recv_ack(Sock) ->
     case socket:recv(Sock, 0, 5000) of
@@ -345,7 +367,7 @@ recv_ack(Sock) ->
         Error      -> Error
     end.
 
-%% @doc Receive a RTM_NEWLINK response and extract the interface index.
+-doc "Receive a RTM_NEWLINK response and extract the interface index.".
 -spec recv_ifindex(socket:socket()) -> {ok, integer()} | {error, term()}.
 recv_ifindex(Sock) ->
     case socket:recv(Sock, 0, 5000) of
@@ -396,10 +418,12 @@ parse_newlink_ifindex(_) ->
 %%% Internal: Message Building
 %%%===================================================================
 
-%% @doc Build a RTM_*LINK message with ifinfomsg header.
-%%
-%% All link operations (create, delete, modify) use the same structure:
-%%   nlmsghdr + ifinfomsg + NLA attributes
+-doc """
+Build a RTM_*LINK message with ifinfomsg header.
+
+All link operations (create, delete, modify) use the same structure:
+  nlmsghdr + ifinfomsg + NLA attributes
+""".
 -spec build_link_msg(integer(), integer(), integer(), integer(),
                      integer(), integer(), [binary()]) -> binary().
 build_link_msg(Type, Flags, Seq, IfIndex, IfFlags, IfChange, Attrs) ->
@@ -411,16 +435,18 @@ build_link_msg(Type, Flags, Seq, IfIndex, IfFlags, IfChange, Attrs) ->
       Seq:32/native, 0:32/native,
       Payload/binary>>.
 
-%% @doc Build an ifinfomsg struct (16 bytes).
-%%
-%% struct ifinfomsg {
-%%     unsigned char  ifi_family;    -- AF_UNSPEC (0) for most ops
-%%     unsigned char  __ifi_pad;
-%%     unsigned short ifi_type;      -- ARPHRD_* (0 = unspecified)
-%%     int            ifi_index;     -- interface index (0 = new)
-%%     unsigned int   ifi_flags;     -- IFF_UP, IFF_RUNNING, etc.
-%%     unsigned int   ifi_change;    -- bitmask of flags to change
-%% };
+-doc """
+Build an ifinfomsg struct (16 bytes).
+
+struct ifinfomsg {
+    unsigned char  ifi_family;    -- AF_UNSPEC (0) for most ops
+    unsigned char  __ifi_pad;
+    unsigned short ifi_type;      -- ARPHRD_* (0 = unspecified)
+    int            ifi_index;     -- interface index (0 = new)
+    unsigned int   ifi_flags;     -- IFF_UP, IFF_RUNNING, etc.
+    unsigned int   ifi_change;    -- bitmask of flags to change
+};
+""".
 -spec ifinfomsg(integer(), integer(), integer()) -> binary().
 ifinfomsg(Index, Flags, Change) ->
     <<0:8,                       %% ifi_family  (AF_UNSPEC)
@@ -430,15 +456,17 @@ ifinfomsg(Index, Flags, Change) ->
       Flags:32/native,           %% ifi_flags
       Change:32/native>>.        %% ifi_change
 
-%% @doc Build a netlink attribute (NLA).
-%%
-%% struct nlattr {
-%%     __u16 nla_len;   -- length including header (4 bytes)
-%%     __u16 nla_type;  -- attribute type
-%%     char  data[];    -- payload, padded to 4-byte alignment
-%% };
-%%
-%% Data can be binary or iolist (for nested attributes).
+-doc """
+Build a netlink attribute (NLA).
+
+struct nlattr {
+    __u16 nla_len;   -- length including header (4 bytes)
+    __u16 nla_type;  -- attribute type
+    char  data[];    -- payload, padded to 4-byte alignment
+};
+
+Data can be binary or iolist (for nested attributes).
+""".
 -spec nla(integer(), binary() | iolist()) -> binary().
 nla(Type, Data) when is_binary(Data) ->
     Len = 4 + byte_size(Data),
@@ -462,11 +490,13 @@ create_flags() -> ?NLM_F_REQUEST bor ?NLM_F_ACK bor ?NLM_F_CREATE bor ?NLM_F_EXC
 -spec ack_flags() -> integer().
 ack_flags()    -> ?NLM_F_REQUEST bor ?NLM_F_ACK.
 
-%% @doc Generate a unique sequence number for netlink messages.
-%%
-%% The kernel echoes the sequence number in responses, which lets
-%% us match requests to responses (important when multiple
-%% requests are in flight).
+-doc """
+Generate a unique sequence number for netlink messages.
+
+The kernel echoes the sequence number in responses, which lets
+us match requests to responses (important when multiple
+requests are in flight).
+""".
 next_seq() ->
     try persistent_term:get(erlkoenig_nl_seq) of
         N ->

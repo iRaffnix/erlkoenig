@@ -12,6 +12,7 @@
 -module(erlkoenig_ip_pool_tests).
 
 -include_lib("eunit/include/eunit.hrl").
+-include_lib("stdlib/include/assert.hrl").
 
 %% =================================================================
 %% Test generator with setup/teardown

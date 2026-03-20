@@ -14,15 +14,13 @@
 %% limitations under the License.
 %%
 
-%%%-------------------------------------------------------------------
-%%% @doc erlkoenig_event_log - Default event handler that logs events.
-%%%
-%%% Installed automatically by erlkoenig_events:start_link/0.
-%%% Logs container lifecycle events via logger.
-%%% @end
-%%%-------------------------------------------------------------------
-
 -module(erlkoenig_event_log).
+-moduledoc """
+Default event handler that logs events.
+
+Installed automatically by erlkoenig_events:start_link/0.
+Logs container lifecycle events via logger.
+""".
 
 -behaviour(gen_event).
 

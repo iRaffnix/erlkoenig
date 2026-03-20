@@ -8,6 +8,7 @@
 -module(erlkoenig_cgroup_tests).
 
 -include_lib("eunit/include/eunit.hrl").
+-include_lib("stdlib/include/assert.hrl").
 
 %% =================================================================
 %% Path construction

@@ -10,6 +10,7 @@
 -module(erlkoenig_dns_tests).
 
 -include_lib("eunit/include/eunit.hrl").
+-include_lib("stdlib/include/assert.hrl").
 
 %% We test the module's internal functions via the exported API where
 %% possible, and build raw DNS packets for codec tests.

@@ -13,6 +13,7 @@
 -module(erlkoenig_netlink_tests).
 
 -include_lib("eunit/include/eunit.hrl").
+-include_lib("stdlib/include/assert.hrl").
 
 %% Netlink constants (mirrored from erlkoenig_netlink.erl)
 -define(RTM_NEWLINK,  16).

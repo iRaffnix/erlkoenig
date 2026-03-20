@@ -14,19 +14,17 @@
 %% limitations under the License.
 %%
 
-%%%-------------------------------------------------------------------
-%% @doc erlkoenig_dns - Built-in DNS server for container service discovery.
-%%
-%% Listens on the bridge IP (10.0.0.1:53) for DNS queries.
-%% Resolves *.erlkoenig names to container IPs, forwards everything
-%% else to an upstream DNS server.
-%%
-%% Container names are registered/unregistered via register/2 and
-%% unregister/1. erlkoenig_ct calls these during lifecycle transitions.
-%% @end
-%%%-------------------------------------------------------------------
-
 -module(erlkoenig_dns).
+-moduledoc """
+Built-in DNS server for container service discovery.
+
+Listens on the bridge IP (10.0.0.1:53) for DNS queries.
+Resolves *.erlkoenig names to container IPs, forwards everything
+else to an upstream DNS server.
+
+Container names are registered/unregistered via register/2 and
+unregister/1. erlkoenig_ct calls these during lifecycle transitions.
+""".
 
 -behaviour(gen_server).
 
@@ -92,6 +90,7 @@ init({zone, #{zone := ZoneName, gateway := Gateway} = _Config}) ->
     do_init(ZoneName, Gateway).
 
 do_init(ZoneName, BindIp) ->
+    proc_lib:set_label({erlkoenig_dns, ZoneName}),
     Upstream = application:get_env(erlkoenig_core, dns_upstream, {8, 8, 8, 8}),
     Domain   = list_to_binary(
                  application:get_env(erlkoenig_core, dns_domain, "erlkoenig")),
@@ -116,7 +115,7 @@ register_zone_service(ZoneName) ->
     catch _:_ -> ok
     end.
 
-%% @doc Start with legacy config (single default zone).
+-doc "Start with legacy config (single default zone).".
 start_link(Config) when is_map(Config) ->
     gen_server:start_link(?MODULE, {zone, Config}, []).
 

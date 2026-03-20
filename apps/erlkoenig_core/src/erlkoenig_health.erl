@@ -14,26 +14,24 @@
 %% limitations under the License.
 %%
 
-%%%-------------------------------------------------------------------
-%%% @doc erlkoenig_health - Health checks for containers.
-%%%
-%%% Periodically checks container health via TCP connect.
-%%% If a check fails N times in a row, the container is restarted.
-%%%
-%%% Usage:
-%%%   erlkoenig_health:add(ContainerPid, #{
-%%%       type => tcp,
-%%%       port => 8080,
-%%%       interval => 5000,    %% ms between checks (default 5s)
-%%%       timeout => 2000,     %% connect timeout (default 2s)
-%%%       retries => 3         %% failures before action (default 3)
-%%%   }).
-%%%   erlkoenig_health:remove(ContainerPid).
-%%%   erlkoenig_health:status().
-%%% @end
-%%%-------------------------------------------------------------------
-
 -module(erlkoenig_health).
+-moduledoc """
+Health checks for containers.
+
+Periodically checks container health via TCP connect.
+If a check fails N times in a row, the container is restarted.
+
+Usage:
+  erlkoenig_health:add(ContainerPid, #{
+      type => tcp,
+      port => 8080,
+      interval => 5000,    %% ms between checks (default 5s)
+      timeout => 2000,     %% connect timeout (default 2s)
+      retries => 3         %% failures before action (default 3)
+  }).
+  erlkoenig_health:remove(ContainerPid).
+  erlkoenig_health:status().
+""".
 
 -behaviour(gen_server).
 
@@ -83,6 +81,7 @@ status() ->
 
 init([]) ->
     process_flag(trap_exit, true),
+    proc_lib:set_label(erlkoenig_health),
     {ok, #{}}.
 
 handle_call({add, Pid, Opts}, _From, State) ->

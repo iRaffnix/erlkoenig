@@ -14,31 +14,29 @@
 %% limitations under the License.
 %%
 
-%%%-------------------------------------------------------------------
-%%% @doc erlkoenig_cgroup - cgroups v2 resource limits per container.
-%%%
-%%% Manages a cgroup hierarchy for erlkoenig containers.
-%%% Each container gets a sub-cgroup named by its ID.
-%%%
-%%% The base cgroup path is auto-detected:
-%%%   - Under systemd with Delegate=yes: uses the delegated cgroup
-%%%     (e.g. /sys/fs/cgroup/system.slice/erlkoenig.service/erlkoenig/)
-%%%   - Running as root: /sys/fs/cgroup/erlkoenig/
-%%%
-%%% Supported limits (all optional):
-%%%   memory  - Max memory in bytes (written to memory.max)
-%%%   cpu     - CPU percentage of one core, 1-100 (written to cpu.max)
-%%%   pids    - Max number of processes (written to pids.max)
-%%%
-%%% The gen_server creates the top-level cgroup on init and enables
-%%% the required controllers. On terminate, it removes the top-level
-%%% cgroup (only succeeds if all containers are cleaned up).
-%%%
-%%% All operations are pure file I/O on cgroupfs — no os:cmd.
-%%% @end
-%%%-------------------------------------------------------------------
-
 -module(erlkoenig_cgroup).
+-moduledoc """
+cgroups v2 resource limits per container.
+
+Manages a cgroup hierarchy for erlkoenig containers.
+Each container gets a sub-cgroup named by its ID.
+
+The base cgroup path is auto-detected:
+  - Under systemd with Delegate=yes: uses the delegated cgroup
+    (e.g. /sys/fs/cgroup/system.slice/erlkoenig.service/erlkoenig/)
+  - Running as root: /sys/fs/cgroup/erlkoenig/
+
+Supported limits (all optional):
+  memory  - Max memory in bytes (written to memory.max)
+  cpu     - CPU percentage of one core, 1-100 (written to cpu.max)
+  pids    - Max number of processes (written to pids.max)
+
+The gen_server creates the top-level cgroup on init and enables
+the required controllers. On terminate, it removes the top-level
+cgroup (only succeeds if all containers are cleaned up).
+
+All operations are pure file I/O on cgroupfs — no os:cmd.
+""".
 
 -behaviour(gen_server).
 
@@ -72,45 +70,49 @@
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
-%% @doc Create a cgroup for a container.
+-doc "Create a cgroup for a container.".
 -spec create(binary()) -> ok | {error, term()}.
 create(ContainerId) ->
     gen_server:call(?MODULE, {create, ContainerId}).
 
-%% @doc Move a process into a container's cgroup.
+-doc "Move a process into a container's cgroup.".
 -spec attach(binary(), non_neg_integer()) -> ok | {error, term()}.
 attach(ContainerId, OsPid) ->
     gen_server:call(?MODULE, {attach, ContainerId, OsPid}).
 
-%% @doc Set resource limits for a container.
-%%
-%% Limits is a map with optional keys:
-%%   memory => Bytes      (e.g. 64_000_000 for 64 MB)
-%%   cpu    => Percent     (e.g. 50 for 50% of one core)
-%%   pids   => MaxPids    (e.g. 64)
+-doc """
+Set resource limits for a container.
+
+Limits is a map with optional keys:
+  memory => Bytes      (e.g. 64_000_000 for 64 MB)
+  cpu    => Percent     (e.g. 50 for 50% of one core)
+  pids   => MaxPids    (e.g. 64)
+""".
 -spec set_limits(binary(), map()) -> ok | {error, term()}.
 set_limits(ContainerId, Limits) ->
     gen_server:call(?MODULE, {set_limits, ContainerId, Limits}).
 
-%% @doc Remove a container's cgroup.
-%%
-%% The cgroup must be empty (no processes). Deleting a cgroup with
-%% processes still in it will fail with EBUSY.
+-doc """
+Remove a container's cgroup.
+
+The cgroup must be empty (no processes). Deleting a cgroup with
+processes still in it will fail with EBUSY.
+""".
 -spec destroy(binary()) -> ok | {error, term()}.
 destroy(ContainerId) ->
     gen_server:call(?MODULE, {destroy, ContainerId}).
 
-%% @doc Read live resource stats from a container's cgroup.
+-doc "Read live resource stats from a container's cgroup.".
 -spec read_stats(binary()) -> {ok, map()} | {error, term()}.
 read_stats(ContainerId) ->
     gen_server:call(?MODULE, {read_stats, ContainerId}).
 
-%% @doc Check if a container was OOM-killed by reading memory.events.
+-doc "Check if a container was OOM-killed by reading memory.events.".
 -spec was_oom_killed(binary()) -> boolean().
 was_oom_killed(ContainerId) ->
     gen_server:call(?MODULE, {was_oom_killed, ContainerId}).
 
-%% @doc Get the absolute cgroup directory path for a container.
+-doc "Get the absolute cgroup directory path for a container.".
 -spec path(binary()) -> {ok, string()} | {error, term()}.
 path(ContainerId) ->
     gen_server:call(?MODULE, {path, ContainerId}).
@@ -121,6 +123,7 @@ path(ContainerId) ->
 
 init([]) ->
     process_flag(trap_exit, true),
+    proc_lib:set_label(erlkoenig_cgroup),
     BasePath = detect_base_path(),
     logger:info("erlkoenig_cgroup: detected base path ~s", [BasePath]),
     case setup_top_level_cgroup(BasePath) of
@@ -226,14 +229,16 @@ terminate(_Reason, #state{base_path = BasePath}) ->
 container_path(BasePath, ContainerId) when is_binary(ContainerId) ->
     filename:join(BasePath, binary_to_list(ContainerId)).
 
-%% @doc Auto-detect the cgroup base path.
-%%
-%% Under systemd with Delegate=yes, the process runs in a delegated
-%% cgroup like /sys/fs/cgroup/system.slice/erlkoenig.service/.
-%% We use that directly as the base path for container cgroups.
-%%
-%% When running as root (or in the root cgroup), we create
-%% /sys/fs/cgroup/erlkoenig/ as a dedicated cgroup.
+-doc """
+Auto-detect the cgroup base path.
+
+Under systemd with Delegate=yes, the process runs in a delegated
+cgroup like /sys/fs/cgroup/system.slice/erlkoenig.service/.
+We use that directly as the base path for container cgroups.
+
+When running as root (or in the root cgroup), we create
+/sys/fs/cgroup/erlkoenig/ as a dedicated cgroup.
+""".
 -spec detect_base_path() -> string().
 detect_base_path() ->
     case file:read_file("/proc/self/cgroup") of
@@ -277,20 +282,16 @@ parse_cgroup_v2_lines([_ | Rest]) ->
 
 -spec setup_top_level_cgroup(string()) -> ok | {error, term()}.
 setup_top_level_cgroup(BasePath) ->
-    %% Ensure the base cgroup directory exists.
-    case ensure_dir(BasePath) of
-        ok ->
-            %% cgroups v2 "no internal process" rule: a cgroup that has
-            %% controllers enabled via subtree_control cannot also have
-            %% member processes. Move BEAM to a child cgroup first.
-            case maybe_move_self_to_init(BasePath) of
-                ok ->
-                    enable_controllers(BasePath);
-                {error, _} = Err ->
-                    Err
-            end;
-        {error, _} = Err ->
-            Err
+    maybe
+        %% Ensure the base cgroup directory exists.
+        ok ?= ensure_dir(BasePath),
+        %% cgroups v2 "no internal process" rule: a cgroup that has
+        %% controllers enabled via subtree_control cannot also have
+        %% member processes. Move BEAM to a child cgroup first.
+        ok ?= maybe_move_self_to_init(BasePath),
+        enable_controllers(BasePath)
+    else
+        {error, _} = Err -> Err
     end.
 
 -spec ensure_dir(string()) -> ok | {error, term()}.
@@ -311,29 +312,30 @@ ensure_dir(Path) ->
 -spec maybe_move_self_to_init(string()) -> ok | {error, term()}.
 maybe_move_self_to_init(BasePath) ->
     InitPath = filename:join(BasePath, "init"),
-    case ensure_dir(InitPath) of
-        ok ->
-            %% Read all PIDs currently in the parent cgroup
-            ParentProcs = filename:join(BasePath, "cgroup.procs"),
-            InitProcs = filename:join(InitPath, "cgroup.procs"),
+    ParentProcs = filename:join(BasePath, "cgroup.procs"),
+    InitProcs = filename:join(InitPath, "cgroup.procs"),
+    maybe
+        ok ?= ensure_dir(InitPath),
+        %% Read all PIDs currently in the parent cgroup
+        {ok, Bin} ?=
             case file:read_file(ParentProcs) of
-                {ok, Bin} ->
-                    Pids = [P || P <- binary:split(Bin, <<"\n">>, [global]),
-                                P =/= <<>>],
-                    logger:info("erlkoenig_cgroup: moving ~b pids to ~s",
-                                [length(Pids), InitPath]),
-                    %% Move each PID to the init cgroup
-                    lists:foreach(fun(Pid) ->
-                        _ = file:write_file(InitProcs, Pid)
-                    end, Pids),
-                    ok;
+                {ok, _} = Ok -> Ok;
                 {error, Reason} ->
                     logger:error("erlkoenig_cgroup: read cgroup.procs failed: ~p",
                                  [Reason]),
                     {error, Reason}
-            end;
-        {error, _} = Err ->
-            Err
+            end,
+        Pids = [P || P <- binary:split(Bin, <<"\n">>, [global]),
+                    P =/= <<>>],
+        logger:info("erlkoenig_cgroup: moving ~b pids to ~s",
+                    [length(Pids), InitPath]),
+        %% Move each PID to the init cgroup
+        lists:foreach(fun(Pid) ->
+            _ = file:write_file(InitProcs, Pid)
+        end, Pids),
+        ok
+    else
+        {error, _} = Err -> Err
     end.
 
 %% Enable controllers in the top-level cgroup so child cgroups

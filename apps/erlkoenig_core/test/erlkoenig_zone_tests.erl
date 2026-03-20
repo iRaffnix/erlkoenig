@@ -12,6 +12,7 @@
 -module(erlkoenig_zone_tests).
 
 -include_lib("eunit/include/eunit.hrl").
+-include_lib("stdlib/include/assert.hrl").
 
 %% =================================================================
 %% Default zone (legacy config)

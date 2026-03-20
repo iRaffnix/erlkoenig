@@ -12,6 +12,7 @@
 -module(erlkoenig_health_tests).
 
 -include_lib("eunit/include/eunit.hrl").
+-include_lib("stdlib/include/assert.hrl").
 
 %% We test the internal record and logic by simulating the state
 %% transitions that handle_failure/1, schedule_check/1, and

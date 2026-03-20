@@ -1,0 +1,79 @@
+#{containers =>
+      [#{args => [<<"8080">>],
+         binary => <<"/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server">>,
+         name => <<"proxy">>,
+         ports => [{8080,8080}],
+         restart => always,
+         ip => {10,0,1,10},
+         zone => dmz,
+         limits => #{cpu => 2,memory => 268435456,pids => 100},
+         health_check => #{port => 8080,interval => 5000,retries => 3},
+         observe => [forks,execs,exits,oom],
+         policy =>
+             #{on_fork_flood => kill,on_oom => restart,
+               allowed_comms => [<<"app">>],
+               on_unexpected_exec => kill,max_forks_per_min => 10},
+         firewall =>
+             #{chains =>
+                   [#{name => <<"inbound">>,priority => 0,type => filter,
+                      policy => drop,hook => input,
+                      rules =>
+                          [ct_established_accept,icmp_accept,
+                           {tcp_accept,8080},
+                           {log_drop,<<"DROP: ">>}]}]}},
+       #{args => [<<"4000">>],
+         binary => <<"/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server">>,
+         name => <<"api">>,
+         restart => {on_failure,5},
+         ip => {10,0,2,10},
+         zone => app,
+         limits => #{cpu => 4,memory => 536870912,pids => 200},
+         health_check => #{port => 4000,interval => 10000,retries => 3},
+         observe => [forks,execs,exits,oom],
+         policy =>
+             #{on_fork_flood => kill,on_oom => restart,
+               max_forks_per_sec => 10,max_forks_per_min => 50},
+         firewall =>
+             #{chains =>
+                   [#{name => <<"inbound">>,priority => 0,type => filter,
+                      policy => drop,hook => input,
+                      rules =>
+                          [ct_established_accept,icmp_accept,
+                           {tcp_accept,4000},
+                           {log_drop,<<"DROP: ">>}]}]}},
+       #{args => [<<"5000">>],
+         binary => <<"/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server">>,
+         name => <<"worker">>,restart => on_failure,
+         ip => {10,0,2,20},
+         zone => app,
+         limits => #{cpu => 2,memory => 268435456,pids => 50},
+         observe => [forks,exits,oom],
+         policy =>
+             #{on_fork_flood => alert,on_oom => restart,
+               max_forks_per_min => 200},
+         firewall =>
+             #{chains =>
+                   [#{name => <<"inbound">>,priority => 0,type => filter,
+                      policy => drop,hook => input,
+                      rules =>
+                          [ct_established_accept,icmp_accept,
+                           {udp_accept,53},
+                           accept]}]}},
+       #{args => [<<"6379">>],
+         binary => <<"/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server">>,
+         name => <<"cache">>,restart => always,
+         ip => {10,0,3,10},
+         zone => data,
+         limits => #{cpu => 1,memory => 134217728,pids => 30},
+         health_check => #{port => 6379,interval => 5000,retries => 5},
+         observe => [forks,oom],
+         policy =>
+             #{on_fork_flood => kill,on_oom => alert,max_forks_per_min => 3},
+         firewall =>
+             #{chains =>
+                   [#{name => <<"inbound">>,priority => 0,type => filter,
+                      policy => drop,hook => input,
+                      rules =>
+                          [ct_established_accept,icmp_accept,
+                           {tcp_accept,6379},
+                           {log_drop,<<"DROP: ">>}]}]}}]}.

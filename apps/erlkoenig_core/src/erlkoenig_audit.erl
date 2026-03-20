@@ -4,22 +4,20 @@
 %% Licensed under the Apache License, Version 2.0
 %%
 
-%%%-------------------------------------------------------------------
-%% @doc Append-only audit log for security-relevant events.
-%%
-%% Writes JSON Lines to /var/log/erlkoenig/audit.jsonl.
-%% Each event gets a monotonic sequence number and ISO 8601 timestamp.
-%%
-%% Usage:
-%%   erlkoenig_audit:log(#{type => binary_verify, subject => <<"proxy">>,
-%%                         result => ok, details => #{sha256 => <<"a1b2">>}}).
-%%
-%% Non-blocking (gen_server:cast). File is re-opened on write error
-%% to support external log rotation (logrotate copytruncate).
-%% @end
-%%%-------------------------------------------------------------------
-
 -module(erlkoenig_audit).
+-moduledoc """
+Append-only audit log for security-relevant events.
+
+Writes JSON Lines to /var/log/erlkoenig/audit.jsonl.
+Each event gets a monotonic sequence number and ISO 8601 timestamp.
+
+Usage:
+  erlkoenig_audit:log(#{type => binary_verify, subject => <<"proxy">>,
+                        result => ok, details => #{sha256 => <<"a1b2">>}}).
+
+Non-blocking (gen_server:cast). File is re-opened on write error
+to support external log rotation (logrotate copytruncate).
+""".
 
 -behaviour(gen_server).
 
@@ -45,20 +43,24 @@
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
-%% @doc Log a security event. Non-blocking.
-%%
-%% Event must contain: type, subject, result.
-%% Optional: details (map with type-specific metadata).
+-doc """
+Log a security event. Non-blocking.
+
+Event must contain: type, subject, result.
+Optional: details (map with type-specific metadata).
+""".
 -spec log(map()) -> ok.
 log(Event) when is_map(Event) ->
     gen_server:cast(?MODULE, {log, Event}).
 
-%% @doc Query audit events. Blocking.
-%%
-%% Options:
-%%   since => UnixSeconds (filter by timestamp)
-%%   type  => atom() (filter by event type)
-%%   limit => pos_integer() (max results, default 100)
+-doc """
+Query audit events. Blocking.
+
+Options:
+  since => UnixSeconds (filter by timestamp)
+  type  => atom() (filter by event type)
+  limit => pos_integer() (max results, default 100)
+""".
 -spec query(map()) -> {ok, [map()]} | {error, term()}.
 query(Opts) when is_map(Opts) ->
     gen_server:call(?MODULE, {query, Opts}, 30_000).
@@ -68,6 +70,7 @@ query(Opts) when is_map(Opts) ->
 %%%===================================================================
 
 init([]) ->
+    proc_lib:set_label(erlkoenig_audit),
     Path = application:get_env(erlkoenig_core, audit_path, ?DEFAULT_PATH),
     case open_log(Path) of
         {ok, Fd} ->
@@ -155,54 +158,25 @@ encode_event(Seq, Event) ->
     Result = maps:get(result, Event, undefined),
     Details = maps:get(details, Event, #{}),
     Ts = iso8601_now(),
-    %% Build JSON manually — no external JSON library needed.
-    %% We control all inputs so injection is not a concern.
-    Base = [
-        <<"{\"seq\":">>, integer_to_binary(Seq),
-        <<",\"ts\":\"">>, Ts, <<"\"">>,
-        <<",\"type\":\"">>, to_bin(Type), <<"\"">>,
-        <<",\"subject\":\"">>, escape_json(to_bin(Subject)), <<"\"">>,
-        <<",\"result\":">>, encode_result(Result)
-    ],
-    DetailPairs = maps:fold(fun(K, V, Acc) ->
-        [<<",\"">>, to_bin(K), <<"\":">>, encode_value(V) | Acc]
-    end, [], Details),
-    [Base, DetailPairs, <<"}">>].
+    Base = #{
+        <<"seq">> => Seq,
+        <<"ts">> => Ts,
+        <<"type">> => to_bin(Type),
+        <<"subject">> => to_bin(Subject),
+        <<"result">> => encode_result(Result)
+    },
+    Full = maps:fold(fun(K, V, Acc) ->
+        Acc#{to_bin(K) => V}
+    end, Base, Details),
+    json:encode(Full).
 
--spec encode_result(term()) -> iodata().
-encode_result(ok) -> <<"\"ok\"">>;
+-spec encode_result(term()) -> binary() | null.
+encode_result(ok) -> <<"ok">>;
 encode_result({error, Reason}) ->
-    [<<"\"error:">>, escape_json(to_bin(Reason)), <<"\"">>];
-encode_result(undefined) -> <<"null">>;
+    <<"error:", (to_bin(Reason))/binary>>;
+encode_result(undefined) -> null;
 encode_result(Other) ->
-    [<<"\"">>, escape_json(to_bin(Other)), <<"\"">>].
-
--spec encode_value(term()) -> iodata().
-encode_value(V) when is_integer(V) -> integer_to_binary(V);
-encode_value(V) when is_float(V)   -> float_to_binary(V, [{decimals, 3}]);
-encode_value(true)  -> <<"true">>;
-encode_value(false) -> <<"false">>;
-encode_value(V) ->
-    [<<"\"">>, escape_json(to_bin(V)), <<"\"">>].
-
--spec escape_json(binary()) -> binary().
-escape_json(Bin) ->
-    << <<(escape_char(C))/binary>> || <<C>> <= Bin >>.
-
--spec escape_char(byte()) -> binary().
-escape_char($")  -> <<"\\\"">>;
-escape_char($\\) -> <<"\\\\">>;
-escape_char($\n) -> <<"\\n">>;
-escape_char($\r) -> <<"\\r">>;
-escape_char($\t) -> <<"\\t">>;
-escape_char(C) when C < 32 ->
-    Hex = integer_to_binary(C, 16),
-    Padded = case byte_size(Hex) of
-        1 -> <<"0", Hex/binary>>;
-        _ -> Hex
-    end,
-    <<"\\u00", Padded/binary>>;
-escape_char(C) -> <<C>>.
+    to_bin(Other).
 
 -spec to_bin(term()) -> binary().
 to_bin(B) when is_binary(B)  -> B;

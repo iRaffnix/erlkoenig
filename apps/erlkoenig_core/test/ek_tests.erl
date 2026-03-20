@@ -10,6 +10,7 @@
 -module(ek_tests).
 
 -include_lib("eunit/include/eunit.hrl").
+-include_lib("stdlib/include/assert.hrl").
 
 %% ek's formatting functions are not exported, so we test them
 %% indirectly by calling the module and capturing io output, or

@@ -14,29 +14,28 @@
 %% limitations under the License.
 %%
 
-%%%-------------------------------------------------------------------
-%%% @doc ek - Erlkoenig Operator Shell.
-%%%
-%%% Two-letter module for interactive server administration.
-%%% Every function prints formatted output and returns ok.
-%%% Use erlkoenig_core:* for programmatic access.
-%%%
-%%%   ek:help().           — Show all commands
-%%%   ek:ps().             — List containers
-%%%   ek:top().            — Live resource usage
-%%%   ek:inspect(web).     — Container details
-%%%   ek:logs(web).        — Stream stdout/stderr
-%%%   ek:stop(web).        — Stop container
-%%%   ek:restart(web).     — Restart container
-%%%   ek:load(File).       — Load DSL config
-%%%   ek:reload(File).     — Delta-update config
-%%%   ek:dns(Name).        — DNS lookup
-%%%   ek:health().         — Health check status
-%%%   ek:zones().          — List network zones
-%%%   ek:events().         — Stream lifecycle events
-%%% @end
-%%%-------------------------------------------------------------------
 -module(ek).
+-moduledoc """
+Erlkoenig Operator Shell.
+
+Two-letter module for interactive server administration.
+Every function prints formatted output and returns ok.
+Use erlkoenig_core:* for programmatic access.
+
+  ek:help().           -- Show all commands
+  ek:ps().             -- List containers
+  ek:top().            -- Live resource usage
+  ek:inspect(web).     -- Container details
+  ek:logs(web).        -- Stream stdout/stderr
+  ek:stop(web).        -- Stop container
+  ek:restart(web).     -- Restart container
+  ek:load(File).       -- Load DSL config
+  ek:reload(File).     -- Delta-update config
+  ek:dns(Name).        -- DNS lookup
+  ek:health().         -- Health check status
+  ek:zones().          -- List network zones
+  ek:events().         -- Stream lifecycle events
+""".
 
 -export([help/0, ps/0, top/0,
          inspect/1, logs/1, stop/1, restart/1,
@@ -735,7 +734,7 @@ print_event(Other) ->
 %% Internal — name resolution
 %%====================================================================
 
-%% @doc Find a container info map by name (atom, binary, or string).
+-doc "Find a container info map by name (atom, binary, or string).".
 -spec find_container(atom() | binary() | string()) -> {ok, map()} | not_found.
 find_container(Name) ->
     Bin = to_bin(Name),
@@ -748,7 +747,7 @@ find_container(Name) ->
         false -> not_found
     end.
 
-%% @doc Find a container's Erlang pid by name.
+-doc "Find a container's Erlang pid by name.".
 -spec find_pid(atom() | binary() | string()) -> {ok, pid()} | not_found.
 find_pid(Name) ->
     Bin = to_bin(Name),

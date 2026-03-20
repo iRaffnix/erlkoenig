@@ -14,20 +14,18 @@
 %% limitations under the License.
 %%
 
-%%%-------------------------------------------------------------------
-%% @doc Bridge lifecycle manager.
-%%
-%% Creates the erlkoenig bridge at startup and tears it down on
-%% termination. Holds the bridge interface index in state so
-%% other modules don't need to look it up repeatedly.
-%%
-%% NAT/forwarding is out of scope for Phase 3. Containers can
-%% reach each other and the host via the bridge, but not the
-%% outside world yet.
-%% @end
-%%%-------------------------------------------------------------------
-
 -module(erlkoenig_bridge).
+-moduledoc """
+Bridge lifecycle manager.
+
+Creates the erlkoenig bridge at startup and tears it down on
+termination. Holds the bridge interface index in state so
+other modules don't need to look it up repeatedly.
+
+NAT/forwarding is out of scope for Phase 3. Containers can
+reach each other and the host via the bridge, but not the
+outside world yet.
+""".
 
 -behaviour(gen_server).
 
@@ -47,22 +45,22 @@
 %%% API
 %%%===================================================================
 
-%% @doc Start with legacy config (single default zone).
+-doc "Start with legacy config (single default zone).".
 -spec start_link() -> gen_server:start_ret().
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, legacy, []).
 
-%% @doc Start with zone config map.
+-doc "Start with zone config map.".
 -spec start_link(map()) -> gen_server:start_ret().
 start_link(Config) ->
     gen_server:start_link(?MODULE, {zone, Config}, []).
 
-%% @doc Get the bridge interface index (default zone).
+-doc "Get the bridge interface index (default zone).".
 -spec ifindex() -> non_neg_integer().
 ifindex() ->
     gen_server:call(?MODULE, ifindex).
 
-%% @doc Get the bridge interface index for a specific zone.
+-doc "Get the bridge interface index for a specific zone.".
 -spec ifindex(atom()) -> non_neg_integer().
 ifindex(default) ->
     %% Try registered name first (backward compat), then zone registry
@@ -92,6 +90,7 @@ init({zone, #{zone := ZoneName, bridge := Bridge, gateway := Gateway,
     do_init(ZoneName, Bridge, Gateway, Netmask).
 
 do_init(ZoneName, Bridge, Gateway, Netmask) ->
+    proc_lib:set_label({erlkoenig_bridge, ZoneName}),
     {ok, Sock} = erlkoenig_netlink:open(),
     case create_bridge(Sock, Bridge, Gateway, Netmask) of
         {ok, Idx} ->

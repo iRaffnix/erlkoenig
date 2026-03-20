@@ -1,0 +1,36 @@
+#{containers =>
+      [#{args => [<<"8080">>],
+         binary => <<"/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server">>,
+         name => <<"api">>,
+         ports => [{8080,8080}],
+         restart => {on_failure,5},
+         ip => {10,0,0,10},
+         limits => #{cpu => 2,memory => 268435456,pids => 50},
+         observe => [forks,execs,exits,oom],
+         policy =>
+             #{on_fork_flood => kill,on_oom => restart,
+               allowed_comms => [<<"app">>],
+               on_unexpected_exec => kill,max_forks_per_sec => 5,
+               max_forks_per_min => 20},
+         firewall =>
+             #{chains =>
+                   [#{name => <<"inbound">>,priority => 0,type => filter,
+                      policy => drop,hook => input,
+                      rules =>
+                          [ct_established_accept,icmp_accept,
+                           {tcp_accept,8080},
+                           {log_drop,<<"DROP: ">>}]}]}},
+       #{binary => <<"/opt/erlkoenig/rt/demo/test-erlkoenig-sleeper">>,
+         name => <<"worker">>,restart => on_failure,
+         ip => {10,0,0,20},
+         limits => #{cpu => 4,memory => 536870912,pids => 100},
+         observe => [forks,exits,oom],
+         policy =>
+             #{on_fork_flood => alert,on_oom => restart,
+               max_forks_per_min => 100}},
+       #{binary => <<"/opt/erlkoenig/rt/demo/test-erlkoenig-sleeper">>,
+         name => <<"db">>,restart => always,
+         ip => {10,0,0,30},
+         limits => #{cpu => 2,memory => 134217728,pids => 30},
+         observe => [oom],
+         policy => #{on_oom => alert}}]}.

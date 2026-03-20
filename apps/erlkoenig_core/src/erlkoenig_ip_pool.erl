@@ -14,17 +14,15 @@
 %% limitations under the License.
 %%
 
-%%%-------------------------------------------------------------------
-%% @doc IP address pool for container networking.
-%%
-%% Manages a /24 subnet, handing out addresses .2 through .254.
-%% Released addresses are recycled (free-list).
-%%
-%% All access is serialized through the gen_server to avoid races.
-%% @end
-%%%-------------------------------------------------------------------
-
 -module(erlkoenig_ip_pool).
+-moduledoc """
+IP address pool for container networking.
+
+Manages a /24 subnet, handing out addresses .2 through .254.
+Released addresses are recycled (free-list).
+
+All access is serialized through the gen_server to avoid races.
+""".
 
 -behaviour(gen_server).
 
@@ -46,28 +44,28 @@
 %%% API
 %%%===================================================================
 
-%% @doc Start with legacy config (single default zone).
+-doc "Start with legacy config (single default zone).".
 -spec start_link() -> gen_server:start_ret().
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, legacy, []).
 
-%% @doc Start with zone config map.
+-doc "Start with zone config map.".
 -spec start_link(map()) -> gen_server:start_ret().
 start_link(Config) ->
     gen_server:start_link(?MODULE, {zone, Config}, []).
 
-%% @doc Allocate from the default zone.
+-doc "Allocate from the default zone.".
 -spec allocate() -> {ok, inet:ip4_address()} | {error, exhausted}.
 allocate() ->
     gen_server:call(?MODULE, allocate).
 
-%% @doc Allocate from a specific zone.
+-doc "Allocate from a specific zone.".
 -spec allocate(atom()) -> {ok, inet:ip4_address()} | {error, exhausted}.
 allocate(ZoneName) ->
     Pid = erlkoenig_zone:ip_pool(ZoneName),
     gen_server:call(Pid, allocate).
 
-%% @doc Release an IP back to its zone's pool.
+-doc "Release an IP back to its zone's pool.".
 -spec release(inet:ip4_address()) -> ok.
 release(Ip) ->
     %% Find the right pool by subnet match, or use default
@@ -76,7 +74,7 @@ release(Ip) ->
         error     -> gen_server:cast(?MODULE, {release, Ip})
     end.
 
-%% @doc Return the number of currently allocated IPs (default zone).
+-doc "Return the number of currently allocated IPs (default zone).".
 -spec used_count() -> non_neg_integer().
 used_count() ->
     gen_server:call(?MODULE, used_count).
@@ -86,11 +84,13 @@ used_count() ->
 %%%===================================================================
 
 init(legacy) ->
+    proc_lib:set_label({erlkoenig_ip_pool, default}),
     {A, B, C, _} = application:get_env(erlkoenig_core, subnet, {10, 0, 0, 0}),
     register_zone_service(default),
     {ok, #state{zone = default, subnet = {A, B, C, 0}, next = 2, free = []}};
 
 init({zone, #{zone := ZoneName, subnet := {A, B, C, _}} = _Config}) ->
+    proc_lib:set_label({erlkoenig_ip_pool, ZoneName}),
     register_zone_service(ZoneName),
     {ok, #state{zone = ZoneName, subnet = {A, B, C, 0}, next = 2, free = []}}.
 

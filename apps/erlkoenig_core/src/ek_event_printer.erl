@@ -14,14 +14,13 @@
 %% limitations under the License.
 %%
 
-%%%-------------------------------------------------------------------
-%%% @doc Event handler for ek:events().
-%%%
-%%% Forwards erlkoenig lifecycle events to a shell process.
-%%% Installed/removed by ek:events().
-%%% @end
-%%%-------------------------------------------------------------------
 -module(ek_event_printer).
+-moduledoc """
+Event handler for ek:events().
+
+Forwards erlkoenig lifecycle events to a shell process.
+Installed/removed by ek:events().
+""".
 -behaviour(gen_event).
 
 -export([init/1, handle_event/2, handle_call/2, handle_info/2,

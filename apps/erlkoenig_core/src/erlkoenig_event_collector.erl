@@ -14,21 +14,19 @@
 %% limitations under the License.
 %%
 
-%%%-------------------------------------------------------------------
-%%% @doc erlkoenig_event_collector - Collects events into an ETS table.
-%%%
-%%% A gen_event handler that stores all events with timestamps in an
-%%% ETS table for later inspection. Useful for demos and testing.
-%%%
-%%% Usage:
-%%%   Tab = ets:new(events, [ordered_set, public]),
-%%%   erlkoenig_core:subscribe(erlkoenig_event_collector, [Tab]).
-%%%   %% ... events are now stored in Tab as {MonotonicTime, Event} ...
-%%%   erlkoenig_core:unsubscribe(erlkoenig_event_collector, [Tab]).
-%%% @end
-%%%-------------------------------------------------------------------
-
 -module(erlkoenig_event_collector).
+-moduledoc """
+Collects events into an ETS table.
+
+A gen_event handler that stores all events with timestamps in an
+ETS table for later inspection. Useful for demos and testing.
+
+Usage:
+  Tab = ets:new(events, [ordered_set, public]),
+  erlkoenig_core:subscribe(erlkoenig_event_collector, [Tab]).
+  %% ... events are now stored in Tab as {MonotonicTime, Event} ...
+  erlkoenig_core:unsubscribe(erlkoenig_event_collector, [Tab]).
+""".
 
 -behaviour(gen_event).
 

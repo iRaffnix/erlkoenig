@@ -1,6 +1,7 @@
 -module(erlkoenig_audit_tests).
 
 -include_lib("eunit/include/eunit.hrl").
+-include_lib("stdlib/include/assert.hrl").
 
 test_path() ->
     "/tmp/erlkoenig_audit_test_" ++

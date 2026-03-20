@@ -9,6 +9,7 @@
 -module(erlkoenig_config_tests).
 
 -include_lib("eunit/include/eunit.hrl").
+-include_lib("stdlib/include/assert.hrl").
 
 %% =================================================================
 %% parse/1 -- Term file reading

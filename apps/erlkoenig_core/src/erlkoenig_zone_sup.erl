@@ -14,28 +14,26 @@
 %% limitations under the License.
 %%
 
-%%%-------------------------------------------------------------------
-%% @doc Top-level supervisor for all network zones.
-%%
-%% Reads zone definitions from erlkoenig_zone and creates a
-%% rest_for_one child supervisor per zone, each containing
-%% bridge, ip_pool and dns services.
-%%
-%% Architecture:
-%%   erlkoenig_zone_sup (one_for_one)
-%%     +-- zone_default_sup (rest_for_one)
-%%     |     +-- erlkoenig_bridge (for zone default)
-%%     |     +-- erlkoenig_ip_pool (for zone default)
-%%     |     +-- erlkoenig_dns (for zone default)
-%%     +-- zone_dmz_sup (rest_for_one)
-%%     |     +-- erlkoenig_bridge (for zone dmz)
-%%     |     +-- erlkoenig_ip_pool (for zone dmz)
-%%     |     +-- erlkoenig_dns (for zone dmz)
-%%     ...
-%% @end
-%%%-------------------------------------------------------------------
-
 -module(erlkoenig_zone_sup).
+-moduledoc """
+Top-level supervisor for all network zones.
+
+Reads zone definitions from erlkoenig_zone and creates a
+rest_for_one child supervisor per zone, each containing
+bridge, ip_pool and dns services.
+
+Architecture:
+  erlkoenig_zone_sup (one_for_one)
+    +-- zone_default_sup (rest_for_one)
+    |     +-- erlkoenig_bridge (for zone default)
+    |     +-- erlkoenig_ip_pool (for zone default)
+    |     +-- erlkoenig_dns (for zone default)
+    +-- zone_dmz_sup (rest_for_one)
+    |     +-- erlkoenig_bridge (for zone dmz)
+    |     +-- erlkoenig_ip_pool (for zone dmz)
+    |     +-- erlkoenig_dns (for zone dmz)
+    ...
+""".
 
 -behaviour(supervisor).
 
@@ -48,13 +46,13 @@
 start_link() ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, top).
 
-%% @doc Dynamically start a new zone supervisor tree.
+-doc "Dynamically start a new zone supervisor tree.".
 -spec start_zone(atom()) -> {ok, pid()} | {error, term()}.
 start_zone(ZoneName) ->
     ChildSpec = zone_child_spec(ZoneName),
     supervisor:start_child(?MODULE, ChildSpec).
 
-%% @doc Stop and remove a zone supervisor tree.
+-doc "Stop and remove a zone supervisor tree.".
 -spec stop_zone(atom()) -> ok | {error, term()}.
 stop_zone(ZoneName) ->
     ChildId = {zone_sup, ZoneName},

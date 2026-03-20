@@ -14,21 +14,19 @@
 %% limitations under the License.
 %%
 
-%%%-------------------------------------------------------------------
-%% @doc Zone registry and configuration manager.
-%%
-%% Reads zone definitions from application env and stores them in
-%% an ETS table together with service PIDs (bridge, ip_pool, dns).
-%%
-%% If no {zones, ...} key is set, a single `default' zone is built
-%% from the legacy keys bridge_name, subnet, gateway, netmask.
-%%
-%% This module is purely a registry -- supervision lives in
-%% erlkoenig_zone_sup.
-%% @end
-%%%-------------------------------------------------------------------
-
 -module(erlkoenig_zone).
+-moduledoc """
+Zone registry and configuration manager.
+
+Reads zone definitions from application env and stores them in
+an ETS table together with service PIDs (bridge, ip_pool, dns).
+
+If no {zones, ...} key is set, a single `default' zone is built
+from the legacy keys bridge_name, subnet, gateway, netmask.
+
+This module is purely a registry -- supervision lives in
+erlkoenig_zone_sup.
+""".
 
 -behaviour(gen_server).
 
@@ -65,12 +63,12 @@
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
-%% @doc Return the list of configured zone names.
+-doc "Return the list of configured zone names.".
 -spec zones() -> [zone_name()].
 zones() ->
     [Name || {Name, Cfg} <- ets:tab2list(?TAB), is_atom(Name), is_map(Cfg)].
 
-%% @doc Get the config map for a zone. Crashes on unknown zone.
+-doc "Get the config map for a zone. Crashes on unknown zone.".
 -spec zone_config(zone_name()) -> zone_config().
 zone_config(Zone) when is_atom(Zone) ->
     case ets:lookup(?TAB, Zone) of
@@ -78,37 +76,37 @@ zone_config(Zone) when is_atom(Zone) ->
         _                              -> error({unknown_zone, Zone})
     end.
 
-%% @doc Register a service PID for a zone.
+-doc "Register a service PID for a zone.".
 -spec register_service(zone_name(), service_type(), pid()) -> ok.
 register_service(Zone, Type, Pid) when is_atom(Zone), is_atom(Type), is_pid(Pid) ->
     gen_server:call(?MODULE, {register_service, Zone, Type, Pid}).
 
-%% @doc Look up the bridge PID for a zone. Crashes if not registered.
+-doc "Look up the bridge PID for a zone. Crashes if not registered.".
 -spec bridge(zone_name()) -> pid().
 bridge(Zone) ->
     lookup_service_or_crash(Zone, bridge).
 
-%% @doc Look up the IP pool PID for a zone. Crashes if not registered.
+-doc "Look up the IP pool PID for a zone. Crashes if not registered.".
 -spec ip_pool(zone_name()) -> pid().
 ip_pool(Zone) ->
     lookup_service_or_crash(Zone, ip_pool).
 
-%% @doc Look up the DNS PID for a zone. Crashes if not registered.
+-doc "Look up the DNS PID for a zone. Crashes if not registered.".
 -spec dns(zone_name()) -> pid().
 dns(Zone) ->
     lookup_service_or_crash(Zone, dns).
 
-%% @doc Return the name of the default zone.
+-doc "Return the name of the default zone.".
 -spec default_zone() -> zone_name().
 default_zone() ->
     default.
 
-%% @doc Create a new zone at runtime. Starts bridge, ip_pool, dns.
+-doc "Create a new zone at runtime. Starts bridge, ip_pool, dns.".
 -spec create(zone_name(), zone_config()) -> ok | {error, term()}.
 create(Name, Config) when is_atom(Name), is_map(Config) ->
     gen_server:call(?MODULE, {create_zone, Name, normalize_config(Config)}, 15000).
 
-%% @doc Destroy a zone. Fails if containers are still using it.
+-doc "Destroy a zone. Fails if containers are still using it.".
 -spec destroy(zone_name()) -> ok | {error, term()}.
 destroy(Name) when is_atom(Name) ->
     gen_server:call(?MODULE, {destroy_zone, Name}).
@@ -118,6 +116,7 @@ destroy(Name) when is_atom(Name) ->
 %%%===================================================================
 
 init([]) ->
+    proc_lib:set_label(erlkoenig_zone),
     ?TAB = ets:new(?TAB, [set, named_table, public, {read_concurrency, true}]),
     Zones = load_zones(),
     lists:foreach(fun({Name, Cfg}) ->
@@ -199,7 +198,7 @@ terminate(_Reason, _State) ->
 %%% Internal
 %%%===================================================================
 
-%% @doc Load zone configs from app env. Falls back to legacy keys.
+-doc "Load zone configs from app env. Falls back to legacy keys.".
 -spec load_zones() -> [{zone_name(), zone_config()}].
 load_zones() ->
     case application:get_env(erlkoenig_core, zones) of
@@ -209,7 +208,7 @@ load_zones() ->
             [build_default_zone()]
     end.
 
-%% @doc Build a single default zone from legacy flat config keys.
+-doc "Build a single default zone from legacy flat config keys.".
 -spec build_default_zone() -> {zone_name(), zone_config()}.
 build_default_zone() ->
     Bridge  = application:get_env(erlkoenig_core, bridge_name, <<"erlkoenig_br0">>),
@@ -223,7 +222,7 @@ build_default_zone() ->
             policy  => allow_outbound},
     {default, Cfg}.
 
-%% @doc Ensure all required keys are present, fill in defaults.
+-doc "Ensure all required keys are present, fill in defaults.".
 -spec normalize_config(map()) -> zone_config().
 normalize_config(Cfg) when is_map(Cfg) ->
     #{bridge  => maps:get(bridge,  Cfg, <<"erlkoenig_br0">>),
@@ -232,7 +231,7 @@ normalize_config(Cfg) when is_map(Cfg) ->
       netmask => maps:get(netmask, Cfg, 24),
       policy  => maps:get(policy,  Cfg, allow_outbound)}.
 
-%% @doc Look up a service PID by zone + type. Returns {ok, Pid} or error.
+-doc "Look up a service PID by zone + type. Returns {ok, Pid} or error.".
 -spec lookup_service(zone_name(), service_type()) -> {ok, pid()} | {error, not_registered}.
 lookup_service(Zone, Type) ->
     case ets:lookup(?TAB, {Zone, Type}) of
@@ -247,7 +246,7 @@ lookup_service_or_crash(Zone, Type) ->
         {error, _} -> error({zone_service_not_registered, Zone, Type})
     end.
 
-%% @doc Check if any running container belongs to this zone.
+-doc "Check if any running container belongs to this zone.".
 -spec zone_has_containers(zone_name()) -> boolean().
 zone_has_containers(Zone) ->
     lists:any(fun(Info) ->

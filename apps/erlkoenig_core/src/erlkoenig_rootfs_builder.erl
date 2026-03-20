@@ -28,6 +28,10 @@ Handles the case where erlkoenig_fuse modules are NOT available
 
 -export([build/2, build/3]).
 
+%% Runtime-optional modules from sibling projects (erlkoenig_fuse, erlkoenig_elf).
+%% Called via try/catch to handle absence gracefully.
+-dialyzer({no_missing_calls, [check_fuse_available/0, do_build/3, generate_seccomp/1]}).
+
 %%====================================================================
 %% API
 %%====================================================================

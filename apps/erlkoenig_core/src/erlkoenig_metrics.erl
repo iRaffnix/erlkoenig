@@ -67,8 +67,8 @@ from erlkoenig_ct (forwarded from the C runtime's BPF ring buffer).
 subscribe() ->
     case ets:info(?TABLE) of
         undefined ->
-            ets:new(?TABLE, [named_table, public, set,
-                             {keypos, #metrics.id}]);
+            _ = ets:new(?TABLE, [named_table, public, set,
+                                  {keypos, #metrics.id}]);
         _ ->
             ok
     end,

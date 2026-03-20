@@ -50,8 +50,8 @@ start_link() ->
         {ok, Pid} ->
             %% Install default handlers.
             gen_event:add_handler(?MODULE, erlkoenig_event_log, []),
-            erlkoenig_metrics:subscribe(),
-            erlkoenig_policy:subscribe(),
+            _ = erlkoenig_metrics:subscribe(),
+            _ = erlkoenig_policy:subscribe(),
             {ok, Pid};
         Error ->
             Error

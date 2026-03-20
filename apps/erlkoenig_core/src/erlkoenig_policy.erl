@@ -59,8 +59,8 @@ and removed when it stops.
 subscribe() ->
     case ets:info(?TABLE) of
         undefined ->
-            ets:new(?TABLE, [named_table, public, set,
-                             {keypos, #pol.id}]);
+            _ = ets:new(?TABLE, [named_table, public, set,
+                                  {keypos, #pol.id}]);
         _ ->
             ok
     end,

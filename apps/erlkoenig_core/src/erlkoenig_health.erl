@@ -195,9 +195,9 @@ handle_failure(#check{failures = F, retries = Max, pid = Pid} = Check) ->
                            [Pid, NewF, Max]),
             erlkoenig_events:notify({container_unhealthy, get_id(Pid), NewF}),
             %% Restart: stop + the restart policy handles the rest
-            try _ = erlkoenig_ct:stop_container(Pid)
-            catch _:_ -> ok
-            end,
+            _ = try erlkoenig_ct:stop_container(Pid)
+                catch _:_ -> ok
+                end,
             Check2#check{failures = 0};
         false ->
             logger:info("health check failed for ~p (~p/~p)",

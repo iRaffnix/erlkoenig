@@ -29,6 +29,11 @@ TESTS=(
     "13_net_setup.escript        Netzwerk-Stack (Bridge, veth, Netlink)"
     "14_pty.escript              PTY + Stdin Integration"
     "15_dsl_config.escript       DSL Config Pipeline (escript → term → load)"
+    "16_proc_masking.escript     Process Masking"
+    "17_signature.escript        Binary Signature Verification"
+    "18_bind_mount_volume.escript Persistent Volumes (Bind Mount)"
+    "19_cgroup_topology.escript  cgroup Topology (beam/ + containers/)"
+    "20_beam_survives_oom.escript BEAM überlebt Container OOM-Kill"
 )
 
 echo ""

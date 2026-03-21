@@ -328,7 +328,7 @@ fi
 
 # ── Create directories ───────────────────────────────────
 
-mkdir -p "$PREFIX" "$RT_DIR" "$RT_DIR/demo" /etc/erlkoenig /var/lib/erlkoenig/volumes
+mkdir -p "$PREFIX" "$RT_DIR" "$RT_DIR/demo" /etc/erlkoenig /var/lib/erlkoenig/volumes /var/log/erlkoenig
 
 # ── Extract OTP release ──────────────────────────────────
 
@@ -349,11 +349,6 @@ ok "OTP release extracted"
 info "Installing C runtime ..."
 install -m 755 "$TMPDIR/erlkoenig_rt" "$RT_DIR/erlkoenig_rt"
 chown root:root "$RT_DIR/erlkoenig_rt"
-setcap \
-    cap_sys_admin,cap_net_admin,cap_sys_chroot,cap_sys_ptrace,\
-cap_setpcap,cap_setuid,cap_setgid,cap_dac_override,\
-cap_bpf,cap_sys_resource+ep \
-    "$RT_DIR/erlkoenig_rt"
 
 ok "C runtime: $RT_DIR/erlkoenig_rt ($(wc -c < "$RT_DIR/erlkoenig_rt") bytes)"
 
@@ -366,6 +361,9 @@ fi
 
 # ── Install demo binaries (optional) ─────────────────────
 
+DEMOS_INSTALLED=false
+
+# From tarball (CI release artifacts)
 if [ -f "$TMPDIR/static-demo-binaries.tar.gz" ] && [ -s "$TMPDIR/static-demo-binaries.tar.gz" ]; then
     tar xzf "$TMPDIR/static-demo-binaries.tar.gz" -C "$TMPDIR" 2>/dev/null || true
     if [ -d "$TMPDIR/static-demo-binaries" ]; then
@@ -373,8 +371,22 @@ if [ -f "$TMPDIR/static-demo-binaries.tar.gz" ] && [ -s "$TMPDIR/static-demo-bin
         cp "$TMPDIR"/static-demo-binaries/echo-server "$RT_DIR/" 2>/dev/null || true
         cp "$TMPDIR"/static-demo-binaries/reverse-proxy "$RT_DIR/" 2>/dev/null || true
         cp "$TMPDIR"/static-demo-binaries/api-server "$RT_DIR/" 2>/dev/null || true
-        ok "Demo binaries installed"
+        DEMOS_INSTALLED=true
     fi
+fi
+
+# From loose files in --local dir (local build artifacts)
+if [ "$DEMOS_INSTALLED" = false ] && [ -n "$LOCAL_DIR" ]; then
+    LOOSE_DEMOS=$(find "$LOCAL_DIR" -maxdepth 1 -name 'test-erlkoenig-*' -type f 2>/dev/null | head -1)
+    if [ -n "$LOOSE_DEMOS" ]; then
+        cp "$LOCAL_DIR"/test-erlkoenig-* "$RT_DIR/demo/" 2>/dev/null || true
+        chmod 755 "$RT_DIR/demo/"* 2>/dev/null || true
+        DEMOS_INSTALLED=true
+    fi
+fi
+
+if [ "$DEMOS_INSTALLED" = true ]; then
+    ok "Demo binaries installed"
 fi
 
 # ── File permissions ─────────────────────────────────────
@@ -393,7 +405,23 @@ chmod 755 "$RT_DIR" "$RT_DIR/erlkoenig_rt"
 # Volume base dir owned by service user
 chown "$SERVICE_USER":"$SERVICE_USER" /var/lib/erlkoenig/volumes
 
+# Log directory owned by service user
+chown "$SERVICE_USER":"$SERVICE_USER" /var/log/erlkoenig
+
 ok "Permissions set"
+
+# ── File capabilities on C runtime ─────────────────────
+# MUST happen AFTER all chown operations — chown strips file capabilities.
+
+if command -v setcap >/dev/null 2>&1; then
+    setcap \
+        'cap_sys_admin,cap_net_admin,cap_sys_chroot,cap_sys_ptrace,cap_setpcap,cap_setuid,cap_setgid,cap_dac_override,cap_bpf,cap_sys_resource=ep' \
+        "$RT_DIR/erlkoenig_rt"
+    ok "Capabilities set on erlkoenig_rt"
+else
+    warn "setcap not found — install libcap2-bin and run:"
+    warn "  setcap 'cap_sys_admin,...=ep' $RT_DIR/erlkoenig_rt"
+fi
 
 # ── Fix escript shebang to use bundled ERTS ──────────────
 

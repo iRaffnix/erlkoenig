@@ -58,13 +58,39 @@ recovery_test_() ->
       fun recover_cleanup_on_dead/1,
       fun recover_no_comm_mode/1,
       fun recover_multiple_mixed/1,
-      fun recovery_results_format/1
+      fun recovery_results_format/1,
+      fun cleanup_dead_tries_destroy/1
      ]}.
 
 %% Standalone tests: is_process_alive_os is not exported,
 %% so we test liveness detection indirectly through recover/0.
 %% The dead/alive PID tests above (recover_dead_process, recover_alive_no_socket)
 %% cover the same logic end-to-end.
+
+%%====================================================================
+%% Pure function tests — migration_needed/2
+%%====================================================================
+
+migration_needed_test() ->
+    %% Old path (binary from DETS) differs from new path (string from cgroup:path)
+    ?assertEqual(migrate,
+                 erlkoenig_recovery:migration_needed(
+                     <<"/sys/fs/cgroup/erlkoenig/web-1">>,
+                     "/sys/fs/cgroup/erlkoenig/containers/web-1")).
+
+migration_not_needed_test() ->
+    %% Same path — no migration needed
+    ?assertEqual(ok,
+                 erlkoenig_recovery:migration_needed(
+                     <<"/sys/fs/cgroup/erlkoenig/containers/web-1">>,
+                     "/sys/fs/cgroup/erlkoenig/containers/web-1")).
+
+migration_needed_same_content_test() ->
+    %% Same content as binary vs string — should return ok (no migration)
+    Path = "/sys/fs/cgroup/erlkoenig/containers/app-42",
+    ?assertEqual(ok,
+                 erlkoenig_recovery:migration_needed(
+                     list_to_binary(Path), Path)).
 
 %%====================================================================
 %% Individual test functions
@@ -176,6 +202,32 @@ recovery_results_format({_Pid, _TmpDir, _DetsPath}) ->
                     Status =:= dead orelse
                     is_tuple(Status))
         end, Results)
+    end.
+
+cleanup_dead_tries_destroy({_Pid, TmpDir, _DetsPath}) ->
+    fun() ->
+        %% Register a dead container with a cgroup path.
+        %% cleanup_dead will try erlkoenig_cgroup:destroy(Id) via catch —
+        %% since the cgroup gen_server is not running, this must not crash.
+        FakeSock = filename:join(TmpDir, "cgroup_dead.sock"),
+        ok = file:write_file(FakeSock, <<>>),
+
+        ok = erlkoenig_node_state:register_container(<<"cgroup-dead">>,
+                 #{os_pid => 999999999,
+                   socket_path => list_to_binary(FakeSock),
+                   cgroup => <<"/sys/fs/cgroup/erlkoenig/web-1">>,
+                   comm_mode => socket}),
+        %% recover/0 will detect the dead process and call cleanup_dead,
+        %% which tries erlkoenig_cgroup:destroy(Id). The catch ensures
+        %% no crash even without the gen_server running.
+        {ok, Results} = erlkoenig_recovery:recover(),
+        ?assertEqual(1, length(Results)),
+        ?assertEqual({<<"cgroup-dead">>, dead}, hd(Results)),
+        %% DETS entry cleaned up
+        ?assertEqual({error, not_found},
+                     erlkoenig_node_state:get_container(<<"cgroup-dead">>)),
+        %% Socket file cleaned up
+        ?assertNot(filelib:is_file(FakeSock))
     end.
 
 %% Test with an ALIVE process — recovery will detect it as alive, but

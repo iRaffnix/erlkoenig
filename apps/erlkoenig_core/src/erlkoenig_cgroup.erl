@@ -16,24 +16,33 @@
 
 -module(erlkoenig_cgroup).
 -moduledoc """
-cgroups v2 resource limits per container.
+cgroups v2 resource management with protected BEAM topology.
 
-Manages a cgroup hierarchy for erlkoenig containers.
-Each container gets a sub-cgroup named by its ID.
+Manages a three-level cgroup hierarchy for erlkoenig:
+
+    <base>/                     — top-level delegated/created cgroup
+    <base>/beam/                — BEAM VM processes (memory.min guarantee)
+    <base>/containers/          — ceiling cgroup for all containers
+    <base>/containers/<id>/     — per-container cgroup
 
 The base cgroup path is auto-detected:
   - Under systemd with Delegate=yes: uses the delegated cgroup
     (e.g. /sys/fs/cgroup/system.slice/erlkoenig.service/erlkoenig/)
   - Running as root: /sys/fs/cgroup/erlkoenig/
 
-Supported limits (all optional):
+The beam/ subtree gets a kernel-guaranteed memory reserve (memory.min),
+a leak-protection ceiling (memory.max), elevated CPU priority (cpu.weight),
+and a PID limit. The containers/ subtree gets an aggregate ceiling for
+memory and PIDs so that container workloads cannot starve the BEAM.
+
+Supported per-container limits (all optional):
   memory  - Max memory in bytes (written to memory.max)
   cpu     - CPU percentage of one core, 1-100 (written to cpu.max)
   pids    - Max number of processes (written to pids.max)
 
-The gen_server creates the top-level cgroup on init and enables
-the required controllers. On terminate, it removes the top-level
-cgroup (only succeeds if all containers are cleaned up).
+The gen_server creates the full topology on init and enables the required
+controllers. On terminate, it removes containers/, beam/, and base
+(best-effort, log and ignore errors).
 
 All operations are pure file I/O on cgroupfs — no os:cmd.
 """.
@@ -47,8 +56,17 @@ All operations are pure file I/O on cgroupfs — no os:cmd.
          set_limits/2,
          destroy/1,
          read_stats/1,
+         read_containers_stats/0,
          was_oom_killed/1,
          path/1]).
+
+%% Configuration (exported for testing)
+-export([beam_config/0,
+         containers_config/0,
+         validate_beam_config/1,
+         validate_containers_config/1,
+         compute_containers_memory_max/3,
+         parse_memtotal/1]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
@@ -58,8 +76,13 @@ All operations are pure file I/O on cgroupfs — no os:cmd.
 %% CPU period in microseconds (fixed at 1 second).
 -define(CPU_PERIOD, 1_000_000).
 
+%% Minimum containers memory — below this nothing useful runs.
+-define(MIN_CONTAINERS_MEMORY, 134_217_728). %% 128 MB
+
 -record(state, {
-    base_path :: string()   %% e.g. "/sys/fs/cgroup/system.slice/erlkoenig.service/erlkoenig"
+    base_path       :: string(),   %% e.g. "/sys/fs/cgroup/system.slice/erlkoenig.service/erlkoenig"
+    beam_path       :: string(),   %% base_path ++ "/beam"
+    containers_path :: string()    %% base_path ++ "/containers"
 }).
 
 %% =================================================================
@@ -107,6 +130,11 @@ destroy(ContainerId) ->
 read_stats(ContainerId) ->
     gen_server:call(?MODULE, {read_stats, ContainerId}).
 
+-doc "Read stats from the containers ceiling cgroup (aggregate).".
+-spec read_containers_stats() -> {ok, map()} | {error, term()}.
+read_containers_stats() ->
+    gen_server:call(?MODULE, read_containers_stats).
+
 -doc "Check if a container was OOM-killed by reading memory.events.".
 -spec was_oom_killed(binary()) -> boolean().
 was_oom_killed(ContainerId) ->
@@ -126,17 +154,19 @@ init([]) ->
     proc_lib:set_label(erlkoenig_cgroup),
     BasePath = detect_base_path(),
     logger:info("erlkoenig_cgroup: detected base path ~s", [BasePath]),
-    case setup_top_level_cgroup(BasePath) of
-        ok ->
+    case setup_protected_topology(BasePath) of
+        {ok, BeamPath, ContainersPath} ->
             logger:info("erlkoenig_cgroup: setup complete at ~s", [BasePath]),
-            {ok, #state{base_path = BasePath}};
+            {ok, #state{base_path = BasePath,
+                        beam_path = BeamPath,
+                        containers_path = ContainersPath}};
         {error, Reason} ->
             logger:error("erlkoenig_cgroup: setup failed at ~s: ~p", [BasePath, Reason]),
             {stop, {cgroup_setup_failed, Reason}}
     end.
 
-handle_call({create, ContainerId}, _From, #state{base_path = Base} = State) ->
-    Path = container_path(Base, ContainerId),
+handle_call({create, ContainerId}, _From, #state{containers_path = CPath} = State) ->
+    Path = container_path(CPath, ContainerId),
     Result = case file:make_dir(Path) of
         ok              -> ok;
         {error, eexist} -> ok;
@@ -144,13 +174,13 @@ handle_call({create, ContainerId}, _From, #state{base_path = Base} = State) ->
     end,
     {reply, Result, State};
 
-handle_call({attach, ContainerId, OsPid}, _From, #state{base_path = Base} = State) ->
-    Path = filename:join(container_path(Base, ContainerId), "cgroup.procs"),
+handle_call({attach, ContainerId, OsPid}, _From, #state{containers_path = CPath} = State) ->
+    Path = filename:join(container_path(CPath, ContainerId), "cgroup.procs"),
     Result = file:write_file(Path, integer_to_list(OsPid)),
     {reply, Result, State};
 
-handle_call({set_limits, ContainerId, Limits}, _From, #state{base_path = Base} = State) ->
-    Path = container_path(Base, ContainerId),
+handle_call({set_limits, ContainerId, Limits}, _From, #state{containers_path = CPath} = State) ->
+    Path = container_path(CPath, ContainerId),
     Results = lists:flatten([
         apply_limit(Path, memory, maps:get(memory, Limits, undefined)),
         apply_limit(Path, cpu,    maps:get(cpu, Limits, undefined)),
@@ -162,8 +192,8 @@ handle_call({set_limits, ContainerId, Limits}, _From, #state{base_path = Base} =
     end,
     {reply, Result, State};
 
-handle_call({destroy, ContainerId}, _From, #state{base_path = Base} = State) ->
-    Path = container_path(Base, ContainerId),
+handle_call({destroy, ContainerId}, _From, #state{containers_path = CPath} = State) ->
+    Path = container_path(CPath, ContainerId),
     Result = case file:del_dir(Path) of
         ok              -> ok;
         {error, enoent} -> ok;
@@ -171,8 +201,8 @@ handle_call({destroy, ContainerId}, _From, #state{base_path = Base} = State) ->
     end,
     {reply, Result, State};
 
-handle_call({read_stats, ContainerId}, _From, #state{base_path = Base} = State) ->
-    Path = container_path(Base, ContainerId),
+handle_call({read_stats, ContainerId}, _From, #state{containers_path = CPath} = State) ->
+    Path = container_path(CPath, ContainerId),
     Result = case filelib:is_dir(Path) of
         false ->
             {error, enoent};
@@ -187,8 +217,23 @@ handle_call({read_stats, ContainerId}, _From, #state{base_path = Base} = State) 
     end,
     {reply, Result, State};
 
-handle_call({was_oom_killed, ContainerId}, _From, #state{base_path = Base} = State) ->
-    Path = container_path(Base, ContainerId),
+handle_call(read_containers_stats, _From, #state{containers_path = CPath} = State) ->
+    Result = case filelib:is_dir(CPath) of
+        false ->
+            {error, enoent};
+        true ->
+            Stats = lists:foldl(fun(F, Acc) -> F(CPath, Acc) end, #{}, [
+                fun read_memory_current/2,
+                fun read_memory_peak/2,
+                fun read_cpu_stat/2,
+                fun read_pids_current/2
+            ]),
+            {ok, Stats}
+    end,
+    {reply, Result, State};
+
+handle_call({was_oom_killed, ContainerId}, _From, #state{containers_path = CPath} = State) ->
+    Path = container_path(CPath, ContainerId),
     File = filename:join(Path, "memory.events"),
     Result = case file:read_file(File) of
         {ok, Bin} -> parse_oom_kill(Bin);
@@ -196,8 +241,8 @@ handle_call({was_oom_killed, ContainerId}, _From, #state{base_path = Base} = Sta
     end,
     {reply, Result, State};
 
-handle_call({path, ContainerId}, _From, #state{base_path = Base} = State) ->
-    Path = container_path(Base, ContainerId),
+handle_call({path, ContainerId}, _From, #state{containers_path = CPath} = State) ->
+    Path = container_path(CPath, ContainerId),
     Result = case filelib:is_dir(Path) of
         true  -> {ok, Path};
         false -> {error, not_found}
@@ -213,12 +258,135 @@ handle_cast(_Msg, State) ->
 handle_info(_Msg, State) ->
     {noreply, State}.
 
-terminate(_Reason, #state{base_path = BasePath}) ->
+terminate(_Reason, #state{base_path = BasePath, beam_path = BeamPath,
+                          containers_path = ContainersPath}) ->
     %% Best-effort removal of cgroup hierarchy.
-    %% init/ may have our processes — can't delete while running.
-    %% Container cgroups should already be cleaned up.
-    _ = file:del_dir(filename:join(BasePath, "init")),
-    _ = file:del_dir(BasePath),
+    %% Clean up containers/, then beam/, then base.
+    %% del_dir on non-empty cgroups will fail — log and ignore.
+    case file:del_dir(ContainersPath) of
+        ok -> ok;
+        {error, CErr} ->
+            logger:warning("erlkoenig_cgroup: del_dir ~s failed: ~p",
+                           [ContainersPath, CErr])
+    end,
+    case file:del_dir(BeamPath) of
+        ok -> ok;
+        {error, BErr} ->
+            logger:warning("erlkoenig_cgroup: del_dir ~s failed: ~p",
+                           [BeamPath, BErr])
+    end,
+    case file:del_dir(BasePath) of
+        ok -> ok;
+        {error, BaseErr} ->
+            logger:warning("erlkoenig_cgroup: del_dir ~s failed: ~p",
+                           [BasePath, BaseErr])
+    end,
+    ok.
+
+%% =================================================================
+%% Configuration (A2)
+%% =================================================================
+
+-doc "Read beam cgroup configuration from app env with defaults.".
+-spec beam_config() -> map().
+beam_config() ->
+    Cfg = application:get_env(erlkoenig_core, resource_protection, #{}),
+    Beam = #{memory_min => maps:get(beam_memory_min, Cfg, 268_435_456),
+             memory_max => maps:get(beam_memory_max, Cfg, 536_870_912),
+             cpu_weight => maps:get(beam_cpu_weight, Cfg, 200),
+             pids_max   => maps:get(beam_pids_max, Cfg, 8192)},
+    ok = validate_beam_config(Beam),
+    Beam.
+
+-doc "Read containers ceiling configuration from app env, resolving 'auto'.".
+-spec containers_config() -> map().
+containers_config() ->
+    Cfg = application:get_env(erlkoenig_core, resource_protection, #{}),
+    MemMax = case maps:get(containers_memory_max, Cfg, auto) of
+        auto ->
+            {ok, MemTotal} = read_memtotal(),
+            HostReserve = maps:get(host_reserve, Cfg, 1_073_741_824),
+            BeamMax = maps:get(beam_memory_max, Cfg, 536_870_912),
+            compute_containers_memory_max(MemTotal, HostReserve, BeamMax);
+        Explicit when is_integer(Explicit) ->
+            Explicit
+    end,
+    PidsMax = maps:get(containers_pids_max, Cfg, 24576),
+    Containers = #{memory_max => MemMax, pids_max => PidsMax},
+    ok = validate_containers_config(Containers),
+    Containers.
+
+-doc "Validate beam cgroup configuration. Crashes on invalid config.".
+-spec validate_beam_config(map()) -> ok | no_return().
+validate_beam_config(#{memory_min := Min, memory_max := Max,
+                       cpu_weight := Weight, pids_max := Pids}) ->
+    Min > 0 orelse error({invalid_config, beam_memory_min_must_be_positive, Min}),
+    Max >= Min orelse error({invalid_config, beam_memory_max_lt_min, #{max => Max, min => Min}}),
+    Weight > 0 orelse error({invalid_config, beam_cpu_weight_must_be_positive, Weight}),
+    Pids > 0 orelse error({invalid_config, beam_pids_max_must_be_positive, Pids}),
+    ok.
+
+-doc "Validate containers ceiling configuration. Crashes on invalid config.".
+-spec validate_containers_config(map()) -> ok | no_return().
+validate_containers_config(#{memory_max := MemMax, pids_max := Pids}) ->
+    MemMax >= ?MIN_CONTAINERS_MEMORY orelse
+        error({invalid_config, containers_memory_max_too_low,
+               #{value => MemMax, minimum => ?MIN_CONTAINERS_MEMORY}}),
+    Pids > 0 orelse error({invalid_config, containers_pids_max_must_be_positive, Pids}),
+    ok.
+
+-doc "Pure function: compute containers memory ceiling from system parameters.".
+-spec compute_containers_memory_max(pos_integer(), non_neg_integer(), non_neg_integer()) ->
+    pos_integer().
+compute_containers_memory_max(MemTotal, HostReserve, BeamMax) ->
+    MemTotal - HostReserve - BeamMax.
+
+-doc "Read total system memory from /proc/meminfo.".
+-spec read_memtotal() -> {ok, pos_integer()} | {error, term()}.
+read_memtotal() ->
+    case file:read_file("/proc/meminfo") of
+        {ok, Bin} ->
+            case parse_memtotal(Bin) of
+                {ok, _} = Ok -> Ok;
+                error -> {error, memtotal_parse_failed}
+            end;
+        {error, Reason} ->
+            {error, {meminfo_unavailable, Reason}}
+    end.
+
+-doc "Parse MemTotal from /proc/meminfo content.".
+-spec parse_memtotal(binary()) -> {ok, pos_integer()} | error.
+parse_memtotal(Bin) ->
+    Lines = binary:split(Bin, <<"\n">>, [global]),
+    parse_memtotal_lines(Lines).
+
+-spec parse_memtotal_lines([binary()]) -> {ok, pos_integer()} | error.
+parse_memtotal_lines([]) -> error;
+parse_memtotal_lines([Line | Rest]) ->
+    case binary:split(Line, <<" ">>, [global, trim_all]) of
+        [<<"MemTotal:">>, KBStr, <<"kB">>] ->
+            try {ok, binary_to_integer(KBStr) * 1024}
+            catch _:_ -> error
+            end;
+        _ ->
+            parse_memtotal_lines(Rest)
+    end.
+
+-doc "Log applied protection configuration at notice level.".
+-spec log_protection_config(map(), map(), string()) -> ok.
+log_protection_config(BeamCfg, ContainersCfg, Source) ->
+    logger:notice("erlkoenig_cgroup: beam protection: "
+                  "memory.min=~s memory.max=~s cpu.weight=~b pids.max=~b [~s]",
+                  [format_bytes(maps:get(memory_min, BeamCfg)),
+                   format_bytes(maps:get(memory_max, BeamCfg)),
+                   maps:get(cpu_weight, BeamCfg),
+                   maps:get(pids_max, BeamCfg),
+                   Source]),
+    logger:notice("erlkoenig_cgroup: containers ceiling: "
+                  "memory.max=~s pids.max=~b [~s]",
+                  [format_bytes(maps:get(memory_max, ContainersCfg)),
+                   maps:get(pids_max, ContainersCfg),
+                   Source]),
     ok.
 
 %% =================================================================
@@ -226,8 +394,8 @@ terminate(_Reason, #state{base_path = BasePath}) ->
 %% =================================================================
 
 -spec container_path(string(), binary()) -> string().
-container_path(BasePath, ContainerId) when is_binary(ContainerId) ->
-    filename:join(BasePath, binary_to_list(ContainerId)).
+container_path(ContainersPath, ContainerId) when is_binary(ContainerId) ->
+    filename:join(ContainersPath, binary_to_list(ContainerId)).
 
 -doc """
 Auto-detect the cgroup base path.
@@ -251,19 +419,28 @@ detect_base_path() ->
                     %% Delegated cgroup — use it directly.
                     %% CgroupPath is absolute (e.g. "/system.slice/erlkoenig.service")
                     %% so we concatenate rather than join (which would drop the prefix).
-                    %% Strip trailing "/init" — that's the child cgroup we create
-                    %% in maybe_move_self_to_init/1 to satisfy the "no internal
-                    %% process" rule. The base path is the parent.
-                    BaseCgroup = case lists:suffix("/init", CgroupPath) of
-                        true  -> lists:sublist(CgroupPath, length(CgroupPath) - 5);
-                        false -> CgroupPath
-                    end,
+                    %% Strip trailing "/init" or "/beam" — those are child cgroups
+                    %% from previous or current topology. The base path is the parent.
+                    BaseCgroup = strip_child_cgroup(CgroupPath),
                     ?CGROUP_ROOT ++ BaseCgroup;
                 error ->
                     filename:join(?CGROUP_ROOT, "erlkoenig")
             end;
         _ ->
             filename:join(?CGROUP_ROOT, "erlkoenig")
+    end.
+
+%% Strip trailing /init or /beam from a cgroup path — those are child
+%% cgroups from the old or new topology.
+-spec strip_child_cgroup(string()) -> string().
+strip_child_cgroup(Path) ->
+    case lists:suffix("/init", Path) of
+        true  -> lists:sublist(Path, length(Path) - 5);
+        false ->
+            case lists:suffix("/beam", Path) of
+                true  -> lists:sublist(Path, length(Path) - 5);
+                false -> Path
+            end
     end.
 
 %% Parse the cgroup v2 path from /proc/self/cgroup.
@@ -280,16 +457,40 @@ parse_cgroup_v2_lines([<<"0::", Path/binary>> | _]) ->
 parse_cgroup_v2_lines([_ | Rest]) ->
     parse_cgroup_v2_lines(Rest).
 
--spec setup_top_level_cgroup(string()) -> ok | {error, term()}.
-setup_top_level_cgroup(BasePath) ->
+-spec setup_protected_topology(string()) -> {ok, string(), string()} | {error, term()}.
+setup_protected_topology(BasePath) ->
+    BeamPath = filename:join(BasePath, "beam"),
+    ContainersPath = filename:join(BasePath, "containers"),
     maybe
-        %% Ensure the base cgroup directory exists.
+        %% 1. Ensure base cgroup directory exists
         ok ?= ensure_dir(BasePath),
-        %% cgroups v2 "no internal process" rule: a cgroup that has
-        %% controllers enabled via subtree_control cannot also have
-        %% member processes. Move BEAM to a child cgroup first.
-        ok ?= maybe_move_self_to_init(BasePath),
-        enable_controllers(BasePath)
+        %% 2. Create beam/ and containers/ subtrees
+        ok ?= ensure_dir(BeamPath),
+        ok ?= ensure_dir(ContainersPath),
+        %% 3. Move BEAM processes to beam/.
+        %%    Processes may be in BasePath/cgroup.procs (root cgroup) or
+        %%    in BasePath/init/cgroup.procs (systemd DelegateSubgroup=init).
+        %%    Move from both sources — one will be a no-op.
+        InitPath = filename:join(BasePath, "init"),
+        ok ?= move_processes_to(InitPath, BeamPath),
+        ok ?= move_processes_to(BasePath, BeamPath),
+        %% 3b. Verify: neither BasePath nor init/ has processes left
+        ok ?= verify_no_processes(BasePath),
+        ok ?= verify_no_processes(InitPath),
+        %% 4. Enable controllers on BasePath (for beam/ and containers/)
+        ok ?= enable_controllers(BasePath),
+        %% 5. Enable controllers on containers/ (for container subdirs)
+        ok ?= enable_controllers(ContainersPath),
+        %% 6. Apply limits to beam/
+        ok ?= apply_beam_limits(BeamPath),
+        %% 7. Apply ceiling to containers/
+        ok ?= apply_containers_ceiling(ContainersPath),
+        %% 8. Determine config source for logging
+        BeamCfg = beam_config(),
+        ContainersCfg = containers_config(),
+        Source = config_source(),
+        log_protection_config(BeamCfg, ContainersCfg, Source),
+        {ok, BeamPath, ContainersPath}
     else
         {error, _} = Err -> Err
     end.
@@ -304,42 +505,64 @@ ensure_dir(Path) ->
             {error, Reason}
     end.
 
-%% Move ALL processes from BasePath to an "init" child cgroup.
-%% This is needed for systemd-delegated cgroups where the BEAM
-%% (and erl_child_setup) starts in the delegated cgroup.
-%% Without this, enabling subtree_control would fail with EBUSY
-%% due to the "no internal process" rule.
--spec maybe_move_self_to_init(string()) -> ok | {error, term()}.
-maybe_move_self_to_init(BasePath) ->
-    InitPath = filename:join(BasePath, "init"),
-    ParentProcs = filename:join(BasePath, "cgroup.procs"),
-    InitProcs = filename:join(InitPath, "cgroup.procs"),
-    maybe
-        ok ?= ensure_dir(InitPath),
-        %% Read all PIDs currently in the parent cgroup
-        {ok, Bin} ?=
-            case file:read_file(ParentProcs) of
-                {ok, _} = Ok -> Ok;
-                {error, Reason} ->
-                    logger:error("erlkoenig_cgroup: read cgroup.procs failed: ~p",
-                                 [Reason]),
-                    {error, Reason}
-            end,
-        Pids = [P || P <- binary:split(Bin, <<"\n">>, [global]),
-                    P =/= <<>>],
-        logger:info("erlkoenig_cgroup: moving ~b pids to ~s",
-                    [length(Pids), InitPath]),
-        %% Move each PID to the init cgroup
-        lists:foreach(fun(Pid) ->
-            _ = file:write_file(InitProcs, Pid)
-        end, Pids),
-        ok
-    else
-        {error, _} = Err -> Err
+%% Move ALL processes from SourcePath to TargetPath.
+%% This satisfies the cgroups v2 "no internal process" rule:
+%% a cgroup with subtree_control enabled cannot have member processes.
+-spec move_processes_to(string(), string()) -> ok | {error, term()}.
+move_processes_to(SourcePath, TargetPath) ->
+    SourceProcs = filename:join(SourcePath, "cgroup.procs"),
+    TargetProcs = filename:join(TargetPath, "cgroup.procs"),
+    case file:read_file(SourceProcs) of
+        {ok, Bin} ->
+            Pids = [P || P <- binary:split(Bin, <<"\n">>, [global]),
+                        P =/= <<>>],
+            case Pids of
+                [] ->
+                    ok;
+                _ ->
+                    logger:info("erlkoenig_cgroup: moving ~b pids from ~s to ~s",
+                                [length(Pids), SourcePath, TargetPath]),
+                    lists:foreach(fun(Pid) ->
+                        _ = file:write_file(TargetProcs, Pid)
+                    end, Pids),
+                    ok
+            end;
+        {error, enoent} ->
+            %% Source cgroup doesn't exist (e.g. no init/ subgroup) — skip
+            ok;
+        {error, Reason} ->
+            logger:error("erlkoenig_cgroup: read ~s failed: ~p",
+                         [SourceProcs, Reason]),
+            {error, Reason}
     end.
 
-%% Enable controllers in the top-level cgroup so child cgroups
-%% can use them.
+%% Verify that no processes remain in a cgroup.
+%% This is a hard requirement — if processes remain, enabling
+%% subtree_control will fail with EBUSY.
+-spec verify_no_processes(string()) -> ok | {error, term()}.
+verify_no_processes(BasePath) ->
+    ProcsFile = filename:join(BasePath, "cgroup.procs"),
+    case file:read_file(ProcsFile) of
+        {ok, Bin} ->
+            Pids = [P || P <- binary:split(Bin, <<"\n">>, [global]),
+                        P =/= <<>>],
+            case Pids of
+                [] -> ok;
+                _  ->
+                    logger:error("erlkoenig_cgroup: ~b processes remain in ~s after move",
+                                 [length(Pids), BasePath]),
+                    {error, processes_remain_in_base}
+            end;
+        {error, enoent} ->
+            %% Cgroup doesn't exist (e.g. init/ was never created) — ok
+            ok;
+        {error, Reason} ->
+            logger:error("erlkoenig_cgroup: read cgroup.procs ~s failed: ~p",
+                         [BasePath, Reason]),
+            {error, Reason}
+    end.
+
+%% Enable controllers in a cgroup so child cgroups can use them.
 -spec enable_controllers(string()) -> ok | {error, term()}.
 enable_controllers(BasePath) ->
     SubtreeControl = filename:join(BasePath, "cgroup.subtree_control"),
@@ -347,6 +570,70 @@ enable_controllers(BasePath) ->
         ok    -> ok;
         Error -> Error
     end.
+
+%% Apply beam protection limits — hard init step.
+-spec apply_beam_limits(string()) -> ok | {error, term()}.
+apply_beam_limits(BeamPath) ->
+    Cfg = beam_config(),
+    maybe
+        ok ?= write_cgroup_file(BeamPath, "memory.min",
+                                integer_to_list(maps:get(memory_min, Cfg))),
+        ok ?= write_cgroup_file(BeamPath, "memory.max",
+                                integer_to_list(maps:get(memory_max, Cfg))),
+        ok ?= write_cgroup_file(BeamPath, "cpu.weight",
+                                integer_to_list(maps:get(cpu_weight, Cfg))),
+        ok ?= write_cgroup_file(BeamPath, "pids.max",
+                                integer_to_list(maps:get(pids_max, Cfg)))
+    else
+        {error, _} = Err -> Err
+    end.
+
+%% Apply containers ceiling limits — hard init step.
+-spec apply_containers_ceiling(string()) -> ok | {error, term()}.
+apply_containers_ceiling(ContainersPath) ->
+    Cfg = containers_config(),
+    maybe
+        ok ?= write_cgroup_file(ContainersPath, "memory.max",
+                                integer_to_list(maps:get(memory_max, Cfg))),
+        ok ?= write_cgroup_file(ContainersPath, "pids.max",
+                                integer_to_list(maps:get(pids_max, Cfg)))
+    else
+        {error, _} = Err -> Err
+    end.
+
+%% Write a value to a cgroup control file.
+-spec write_cgroup_file(string(), string(), string()) -> ok | {error, term()}.
+write_cgroup_file(CgroupPath, Filename, Value) ->
+    File = filename:join(CgroupPath, Filename),
+    case file:write_file(File, Value) of
+        ok -> ok;
+        {error, Reason} ->
+            logger:error("erlkoenig_cgroup: write ~s failed: ~p", [File, Reason]),
+            {error, Reason}
+    end.
+
+%% Determine the source of configuration for logging.
+-spec config_source() -> string().
+config_source() ->
+    case application:get_env(erlkoenig_core, resource_protection) of
+        undefined -> "defaults";
+        {ok, Cfg} ->
+            case maps:get(containers_memory_max, Cfg, auto) of
+                auto -> "auto";
+                _    -> "sys.config"
+            end
+    end.
+
+%% Format bytes as a human-readable string.
+-spec format_bytes(non_neg_integer()) -> string().
+format_bytes(Bytes) when Bytes >= 1_073_741_824 ->
+    io_lib:format("~.1fG", [Bytes / 1_073_741_824]);
+format_bytes(Bytes) when Bytes >= 1_048_576 ->
+    io_lib:format("~.1fM", [Bytes / 1_048_576]);
+format_bytes(Bytes) when Bytes >= 1024 ->
+    io_lib:format("~.1fK", [Bytes / 1024]);
+format_bytes(Bytes) ->
+    io_lib:format("~bB", [Bytes]).
 
 %% -- Stats readers ---------------------------------------------------
 

@@ -48,7 +48,9 @@ PrivateTmp=yes
 ProtectClock=yes
 RestrictSUIDSGID=yes
 ProtectKernelTunables=yes
-ProtectControlGroups=yes
+## ProtectControlGroups=yes is NOT set — erlkoenig needs write access
+## to its delegated cgroup subtree for container resource limits.
+## Delegate=yes + DelegateSubgroup=init gives us a writable subtree.
 
 [Install]
 WantedBy=multi-user.target

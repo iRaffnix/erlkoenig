@@ -50,24 +50,12 @@ jobs:
           path: |
             _build
             ~/.cache/rebar3
-          key: rebar3-otp28-${{ runner.os }}-${{ hashFiles('rebar.lock', 'rebar.config') }}
+          key: erlang-${{ hashFiles('rebar.lock', 'rebar.config') }}
           restore-keys: |
-            rebar3-otp28-${{ runner.os }}-
+            erlang-
 
-      - name: Compile
-        run: rebar3 compile
-
-      - name: Check formatting
-        run: rebar3 fmt --check
-
-      - name: Cross-reference analysis
-        run: rebar3 xref
-
-      - name: EUnit
-        run: rebar3 eunit
-
-      - name: Dialyzer
-        run: make dialyzer
+      - name: CI gate
+        run: make check
 
   # ── Kernel Tests (privileged, root) ──────────────────────
   kernel:

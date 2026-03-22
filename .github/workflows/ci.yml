@@ -55,7 +55,7 @@ jobs:
             erlang-
 
       - name: CI gate
-        run: make check
+        run: make test dialyzer
 
   # ── Kernel Tests (privileged, root) ──────────────────────
   kernel:

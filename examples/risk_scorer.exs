@@ -5,9 +5,6 @@ defmodule RiskScorer do
   Two container instances query PostgreSQL for customer risk assessment.
   BPF L4 load balancer distributes traffic across both.
 
-  Network policy is explicit: containers can only reach DNS on the
-  bridge and PostgreSQL on the gateway. No internet access.
-
   Deploy:
     erlkoenig compile examples/risk_scorer.exs
     ek:load("examples/risk_scorer.term")
@@ -21,6 +18,35 @@ defmodule RiskScorer do
     image "risk_scorer", path: "/var/lib/erlkoenig/images/risk_scorer.erofs"
   end
 
+  # ── Host Firewall ────────────────────────────────────
+
+  firewall "host" do
+    counters [:ssh, :http, :pg, :dropped, :banned]
+
+    set "blocklist", :ipv4_addr, timeout: 3_600_000
+    set "blocklist6", :ipv6_addr, timeout: 3_600_000
+
+    chain "inbound", hook: :input, policy: :drop do
+      accept :established
+      accept :loopback
+      accept :icmp
+      accept_tcp 22, counter: :ssh, limit: {25, burst: 5}
+      accept_tcp 8080, counter: :http
+      drop_if_in_set "blocklist", counter: :banned
+      log_and_drop "HOST_DROP: ", counter: :dropped
+    end
+
+    chain "forward", hook: :forward, priority: -10, policy: :drop do
+      accept :established
+      accept_on_interface "vh_*"
+      accept_output_interface "vh_*"
+    end
+
+    chain "postrouting", hook: :postrouting, type: :nat, policy: :accept do
+      masquerade_not_via "erlkoenig_br0"
+    end
+  end
+
   # ── Network Zone + Containers ────────────────────────
 
   zone "apps",
@@ -28,9 +54,8 @@ defmodule RiskScorer do
     netmask: 24,
     pool: {{10, 0, 0, 10}, {10, 0, 0, 250}} do
 
-    # Network policy: explicit, deny-by-default
-    allow :dns                          # containers can resolve names
-    allow :gateway, ports: [5432]       # containers can reach PG on host
+    allow :dns
+    allow :gateway, ports: [5432]
 
     container "scorer-1",
       image: "risk_scorer",

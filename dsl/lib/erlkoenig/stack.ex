@@ -143,24 +143,14 @@ defmodule Erlkoenig.Stack do
 
   defmacro firewall(name, opts \\ [], do: block) do
     quote do
-      # Use the existing ErlkoenigNft.Firewall.Builder
-      var!(ek_fw_builder) = ErlkoenigNft.Firewall.Builder.new(
-        unquote(name), unquote(opts))
-      unquote(rewrite_firewall_block(block))
-      @stack_firewall ErlkoenigNft.Firewall.Builder.to_term(var!(ek_fw_builder))
+      # Set up @fw_builder so ErlkoenigNft.Firewall macros work
+      import ErlkoenigNft.Firewall, except: [firewall: 2, firewall: 3]
+      Module.register_attribute(__MODULE__, :fw_builder, accumulate: false)
+      @fw_builder ErlkoenigNft.Firewall.Builder.new(unquote(name), unquote(opts))
+      unquote(block)
+      @stack_firewall ErlkoenigNft.Firewall.Builder.to_term(@fw_builder)
     end
   end
-
-  # Rewrite firewall block macros to use var!(ek_fw_builder)
-  # This delegates to the existing builder's functions
-  defp rewrite_firewall_block(block), do: block
-
-  # Firewall sub-macros (chain, set, counters, etc.)
-  # These delegate to the ErlkoenigNft.Firewall module macros.
-  # Users write them inside the firewall block.
-
-  # We re-export the most common ones here so they work in Stack context.
-  # The full set of firewall macros is available via `import ErlkoenigNft.Firewall`.
 
   # --- zone block ---
 

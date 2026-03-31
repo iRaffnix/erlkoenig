@@ -110,14 +110,26 @@ defmodule Erlkoenig.CLI do
     check_file!(input_file)
     info("Validating #{input_file} ...")
 
-    [{module, _}] = Code.compile_file(input_file)
-    containers = if function_exported?(module, :containers, 0),
-      do: module.containers(),
-      else: error("Module #{inspect(module)} has no containers/0 function")
+    mod = find_dsl_module(input_file)
+    term = extract_term(mod)
+
+    containers = case term do
+      %{zones: zones} ->
+        Enum.flat_map(zones, fn z -> Map.get(z, :containers, []) end)
+      %{containers: cts} -> cts
+      _ -> []
+    end
 
     errors = validate_containers(containers)
     case errors do
-      [] -> info("OK - #{length(containers)} container(s), no errors")
+      [] ->
+        parts = []
+        parts = if Map.has_key?(term, :zones), do: parts ++ ["#{length(Map.get(term, :zones, []))} zone(s)"], else: parts
+        parts = parts ++ ["#{length(containers)} container(s)"]
+        parts = if Map.has_key?(term, :firewall), do: parts ++ ["firewall"], else: parts
+        parts = if Map.has_key?(term, :steering), do: parts ++ ["steering"], else: parts
+        parts = if Map.has_key?(term, :ct_guard), do: parts ++ ["guard"], else: parts
+        info("OK - #{Enum.join(parts, ", ")}")
       errs ->
         Enum.each(errs, fn e -> error_msg("  ERROR: #{e}") end)
         error("#{length(errs)} error(s) found")
@@ -374,18 +386,22 @@ defmodule Erlkoenig.CLI do
     case modules do
       [{mod, _}] -> mod
       list when is_list(list) ->
+        # Prefer Stack (config/0), fallback to legacy (containers/0)
         Enum.find_value(list, fn {mod, _} ->
-          if function_exported?(mod, :containers, 0), do: mod
-        end) || error("No module with containers/0 found")
+          if function_exported?(mod, :config, 0) or
+             function_exported?(mod, :containers, 0), do: mod
+        end) || error("No module with config/0 or containers/0 found")
     end
   end
 
   defp extract_term(module) do
     cond do
+      function_exported?(module, :config, 0) ->
+        module.config()
       function_exported?(module, :containers, 0) ->
         %{containers: module.containers()}
       true ->
-        error("Module #{inspect(module)} has no containers/0 function")
+        error("Module #{inspect(module)} has no config/0 or containers/0 function")
     end
   end
 
@@ -403,7 +419,13 @@ defmodule Erlkoenig.CLI do
   end
 
   defp check_duplicate_ips(containers) do
-    for %{ip: ip, name: name} <- containers, ip != nil, do: {ip, name}
+    pairs = for ct <- containers,
+                ip = ct[:ip],
+                ip != nil,
+                name = ct[:name],
+                do: {ip, name}
+
+    pairs
     |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
     |> Enum.filter(fn {_ip, names} -> length(names) > 1 end)
     |> Enum.map(fn {ip, names} ->

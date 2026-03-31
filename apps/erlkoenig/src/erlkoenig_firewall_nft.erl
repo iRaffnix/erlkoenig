@@ -634,6 +634,23 @@ allow_to_rules(Unknown, _GwIp, _Bridge) ->
     logger:warning("[firewall] unknown allow directive: ~p", [Unknown]),
     [].
 
+%% Interface name matching — handles wildcards ("vh_*") and exact names.
+%% Wildcard: compare only the prefix bytes (before *), not padded to 16.
+%% Exact: pad to 16 bytes and compare all.
+-spec ifname_match(iifname | oifname, eq | neq, binary()) -> list().
+ifname_match(MetaKey, Op, Name) ->
+    case binary:split(Name, <<"*">>) of
+        [Prefix, <<>>] ->
+            %% Wildcard: "vh_*" → compare prefix only
+            %% nft uses cmp with just the prefix bytes (no padding)
+            [nft_expr_ir:meta(MetaKey, 1),
+             nft_expr_ir:cmp(Op, 1, <<Prefix/binary, 0>>)];
+        _ ->
+            %% Exact match: pad to IFNAMSIZ
+            [nft_expr_ir:meta(MetaKey, 1),
+             nft_expr_ir:cmp(Op, 1, pad_ifname(Name))]
+    end.
+
 %% pad_ifname/1 defined above (shared with zone masq rules).
 
 %%====================================================================
@@ -695,21 +712,15 @@ compile_generic_matches(Opts) ->
     ])).
 
 compile_match_iif(#{iif := Name}) ->
-    NameBin = iolist_to_binary(Name),
-    {true, [nft_expr_ir:meta(iifname, 1),
-            nft_expr_ir:cmp(eq, 1, pad_ifname(NameBin))]};
+    {true, ifname_match(iifname, eq, iolist_to_binary(Name))};
 compile_match_iif(_) -> false.
 
 compile_match_oif(#{oif := Name}) ->
-    NameBin = iolist_to_binary(Name),
-    {true, [nft_expr_ir:meta(oifname, 1),
-            nft_expr_ir:cmp(eq, 1, pad_ifname(NameBin))]};
+    {true, ifname_match(oifname, eq, iolist_to_binary(Name))};
 compile_match_oif(_) -> false.
 
 compile_match_oif_neq(#{oif_neq := Name}) ->
-    NameBin = iolist_to_binary(Name),
-    {true, [nft_expr_ir:meta(oifname, 1),
-            nft_expr_ir:cmp(neq, 1, pad_ifname(NameBin))]};
+    {true, ifname_match(oifname, neq, iolist_to_binary(Name))};
 compile_match_oif_neq(_) -> false.
 
 compile_match_saddr(#{saddr := {A, B, C, D, Prefix}}) ->
@@ -766,7 +777,9 @@ compile_match_udp(_) -> false.
 
 compile_match_set(#{set := SetName}) ->
     SetBin = iolist_to_binary(SetName),
-    {true, [nft_expr_ir:ip_saddr(1),
+    {true, [nft_expr_ir:meta(nfproto, 1),
+            nft_expr_ir:cmp(eq, 1, <<2>>),
+            nft_expr_ir:ip_saddr(1),
             nft_expr_ir:lookup(1, SetBin)]};
 compile_match_set(_) -> false.
 

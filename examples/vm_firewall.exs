@@ -1,4 +1,5 @@
 defmodule VmFirewall do
+  
   @moduledoc """
   Host firewall for the erlkoenig demo VM (erlkoenig-2).
 
@@ -56,14 +57,12 @@ defmodule VmFirewall do
     end
 
     # ── Postrouting: NAT for containers ────────────────
-
     chain "postrouting", hook: :postrouting, type: :nat, policy: :accept do
       rule :masquerade, oif_neq: "erlkoenig_br0"
     end
   end
 
   # ── Threat Detection ─────────────────────────────────
-
   guard do
     detect :conn_flood, threshold: 200, window: 10
     detect :port_scan, threshold: 30, window: 60

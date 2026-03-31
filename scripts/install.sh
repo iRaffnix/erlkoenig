@@ -152,7 +152,6 @@ User=root
 Group=$SERVICE_USER
 
 Environment=ERL_EPMD_ADDRESS=127.0.0.1
-Environment=ERL_EPMD_PORT=4369
 
 ExecStart=$PREFIX/bin/erlkoenig foreground
 
@@ -162,20 +161,16 @@ TimeoutStopSec=30
 Restart=on-failure
 RestartSec=5
 
-RuntimeDirectory=erlkoenig
-RuntimeDirectoryMode=0770
-
+Delegate=yes
 LimitNOFILE=65536
 LimitMEMLOCK=infinity
+NoNewPrivileges=no
 
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE CAP_SYS_ADMIN CAP_SYS_CHROOT CAP_SETUID CAP_SETGID CAP_DAC_OVERRIDE
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE CAP_SYS_ADMIN CAP_SYS_CHROOT CAP_SETUID CAP_SETGID CAP_DAC_OVERRIDE CAP_KILL
-
-# NOT set: ProtectHome, PrivateTmp, ProtectClock, etc.
-# These install seccomp filters and mount namespaces that prevent
-# the C runtime from creating container namespaces (clone, mount,
-# pivot_root). The runtime applies its OWN security hardening
-# after CMD_GO (seccomp, landlock, cap-drop).
+# No capability restrictions, no ProtectHome, no PrivateTmp.
+# The C runtime needs full root capabilities for:
+#   clone(CLONE_NEWPID|CLONE_NEWNS|...), mount, pivot_root,
+#   mknod, setuid/setgid, seccomp, netlink.
+# Runtime applies its OWN hardening after CMD_GO.
 
 [Install]
 WantedBy=multi-user.target

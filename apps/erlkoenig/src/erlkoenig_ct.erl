@@ -285,21 +285,21 @@ creating_do_spawn(#ct_data{comm_mode = port} = Data) ->
     {keep_state, Data#ct_data{port = Port},
      [{state_timeout, ?SPAWN_TIMEOUT, spawn_timeout}]};
 creating_do_spawn(#ct_data{comm_mode = socket, id = ContainerId} = Data) ->
-    RtBin = rt_path(),
     SocketPath = make_socket_path(ContainerId),
     ok = filelib:ensure_dir(binary_to_list(SocketPath)),
-    %% Start C runtime via setsid so it runs in its own session.
-    %% This decouples it from the BEAM's process group, allowing
-    %% clone(CLONE_NEWPID|...) to work even when the BEAM runs
-    %% under systemd with security restrictions.
-    %% Monitoring happens via the TCP socket (tcp_closed = runtime dead).
-    SockStr = binary_to_list(SocketPath),
+    %% Start C runtime via systemd template unit.
+    %% This is the only reliable way to get full capabilities:
+    %% the BEAM's os:cmd/spawn inherits a reduced cap set that
+    %% cannot be elevated by file capabilities (kernel security).
+    %% The template unit erlkoenig-rt@.service runs as root with
+    %% full caps in its own cgroup/session.
+    %% Monitoring: TCP socket (tcp_closed = runtime dead).
+    IdStr = binary_to_list(ContainerId),
     ShCmd = lists:flatten(io_lib:format(
-        "setsid ~s --socket ~s --id ~s </dev/null >/dev/null 2>/dev/null &",
-        [RtBin, SockStr, binary_to_list(ContainerId)])),
-    [] = os:cmd(ShCmd),
+        "systemctl start erlkoenig-rt@~s 2>/dev/null", [IdStr])),
+    os:cmd(ShCmd),
     %% Wait for C runtime to bind the socket, then connect
-    case wait_and_connect(SocketPath, 5000) of
+    case wait_and_connect(SocketPath, 15000) of
         {ok, Sock} ->
             ok = inet:setopts(Sock, [binary, {packet, 4}, {active, true}]),
             %% Protocol handshake via socket
@@ -1206,12 +1206,12 @@ comm_mode(Opts) ->
 -doc "Get the socket directory from application config.".
 -spec socket_dir() -> binary().
 socket_dir() ->
-    case application:get_env(erlkoenig, socket_dir, "/run/erlkoenig/containers/") of
+    case application:get_env(erlkoenig, socket_dir, "/run/erlkoenig/") of
         Path when is_list(Path) -> list_to_binary(Path);
         Path when is_binary(Path) -> Path
     end.
 
--doc "Generate the socket path for a container.".
+-doc "Generate the socket path for a container. Must match erlkoenig-rt@.service.".
 -spec make_socket_path(binary()) -> binary().
 make_socket_path(ContainerId) ->
     Dir = socket_dir(),
@@ -1241,7 +1241,10 @@ wait_and_connect(SocketPath, Timeout, Interval) ->
             timer:sleep(Interval),
             wait_and_connect(SocketPath, Timeout - Interval, Interval);
         {error, Reason} ->
-            {error, Reason}
+            logger:warning("wait_and_connect: ~s failed: ~p (retrying)",
+                          [SockPathStr, Reason]),
+            timer:sleep(Interval),
+            wait_and_connect(SocketPath, Timeout - Interval, Interval)
     end.
 
 -doc "Try to connect to a still-running C runtime's socket.".

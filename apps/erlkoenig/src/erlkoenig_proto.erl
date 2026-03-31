@@ -443,31 +443,47 @@ decode(_) ->
 decode_tag(?TAG_REPLY_OK, _) ->
     {ok, reply_ok, #{}};
 
-decode_tag(?TAG_REPLY_ERROR, <<Code:32/big-signed,
-                               MsgLen:16/big, Msg:MsgLen/binary, _/binary>>) ->
-    {ok, reply_error, #{code => Code, message => Msg}};
 decode_tag(?TAG_REPLY_ERROR, Bin) ->
-    %% Try TLV decode
+    %% TLV: Attr 1 = errno (int32), Attr 2 = message (string)
     Attrs = decode_tlv_attrs(Bin),
-    Code = maps:get(code, Attrs, -1),
-    Msg = maps:get(message, Attrs, <<"unknown">>),
+    Code = case maps:find(1, Attrs) of
+        {ok, <<C:32/big-signed>>} -> C;
+        _ -> -1
+    end,
+    Msg = case maps:find(2, Attrs) of
+        {ok, M} when is_binary(M) -> M;
+        _ -> <<"unknown">>
+    end,
     {ok, reply_error, #{code => Code, message => Msg}};
 
-decode_tag(?TAG_REPLY_CONTAINER_PID, <<Pid:32/big,
-                                       NsLen:16/big, Ns:NsLen/binary, _/binary>>) ->
-    {ok, reply_container_pid, #{child_pid => Pid, netns_path => Ns}};
 decode_tag(?TAG_REPLY_CONTAINER_PID, Bin) ->
-    %% Try TLV
+    %% TLV: Attr 1 = PID (uint32), Attr 2 = netns path (string)
     Attrs = decode_tlv_attrs(Bin),
-    {ok, reply_container_pid, Attrs};
+    Pid = case maps:find(1, Attrs) of
+        {ok, <<P:32/big>>} -> P;
+        _ -> 0
+    end,
+    Ns = case maps:find(2, Attrs) of
+        {ok, N} when is_binary(N) -> N;
+        _ -> <<>>
+    end,
+    {ok, reply_container_pid, #{child_pid => Pid, netns_path => Ns}};
 
 decode_tag(?TAG_REPLY_READY, _) ->
     {ok, reply_ready, #{}};
 
-decode_tag(?TAG_REPLY_EXITED, <<ExitCode:32/big-signed, Signal:8, _/binary>>) ->
+decode_tag(?TAG_REPLY_EXITED, Bin) ->
+    Attrs = decode_tlv_attrs(Bin),
+    ExitCode = case maps:find(1, Attrs) of
+        {ok, <<EC:32/big-signed>>} -> EC;
+        _ -> -1
+    end,
+    Signal = case maps:find(2, Attrs) of
+        {ok, <<S:8>>} -> S;
+        {ok, <<S:32/big>>} -> S;
+        _ -> 0
+    end,
     {ok, reply_exited, #{exit_code => ExitCode, term_signal => Signal}};
-decode_tag(?TAG_REPLY_EXITED, _) ->
-    {ok, reply_exited, #{exit_code => -1, term_signal => 0}};
 
 decode_tag(?TAG_REPLY_STATUS, <<State:8, Pid:32/big, Uptime:64/big, _/binary>>) ->
     {ok, reply_status, #{state => State, child_pid => Pid, uptime_ms => Uptime}};

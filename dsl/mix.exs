@@ -1,10 +1,10 @@
-defmodule ErlkoenigEx.MixProject do
+defmodule Erlkoenig.DSL.MixProject do
   use Mix.Project
 
   def project do
     [
-      app: :erlkoenig_ex,
-      version: "0.3.0",
+      app: :erlkoenig_dsl,
+      version: "0.4.0",
       elixir: "~> 1.18",
       deps: deps(),
       escript: escript()
@@ -14,7 +14,8 @@ defmodule ErlkoenigEx.MixProject do
   defp escript do
     [
       main_module: Erlkoenig.CLI,
-      name: "erlkoenig-dsl"
+      name: "erlkoenig",
+      embed_elixir: true
     ]
   end
 

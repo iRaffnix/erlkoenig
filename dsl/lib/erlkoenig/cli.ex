@@ -16,113 +16,59 @@
 
 defmodule Erlkoenig.CLI do
   @moduledoc """
-  Escript entry point for erlkoenig-dsl.
+  Escript entry point for erlkoenig.
 
-  Usage:
-      erlkoenig-dsl compile config.exs [-o output.term]
-      erlkoenig-dsl validate config.exs
+  Local commands (no daemon needed):
+      erlkoenig compile stack.exs [-o output.term]
+      erlkoenig validate stack.exs
+      erlkoenig show stack.exs
+      erlkoenig sign <binary> --cert <cert.pem> --key <key.pem>
+      erlkoenig verify <binary> [--trust-root <ca.pem>]
+      erlkoenig pki create-root-ca ...
+
+  Runtime commands (via Erlang distribution):
+      erlkoenig ps
+      erlkoenig stop <id>
+      erlkoenig ban <ip>
+      erlkoenig unban <ip>
+      erlkoenig counters
+      erlkoenig status
+
+  Runtime commands require a running erlkoenig node. The CLI connects
+  via Erlang distribution (rpc:call), not a custom socket protocol.
   """
 
-  @bash_completion ~S"""
-  _erlkoenig_dsl() {
-      local cur prev commands
-      COMPREPLY=()
-      cur="${COMP_WORDS[COMP_CWORD]}"
-      prev="${COMP_WORDS[COMP_CWORD-1]}"
-      commands="compile validate sign verify pki push artifacts artifact tag"
-
-      case "$COMP_CWORD" in
-          1)
-              COMPREPLY=($(compgen -W "$commands --help" -- "$cur"))
-              ;;
-          *)
-              case "$prev" in
-                  compile|validate)
-                      COMPREPLY=($(compgen -f -X '!*.exs' -- "$cur"))
-                      ;;
-                  -o)
-                      COMPREPLY=($(compgen -f -X '!*.term' -- "$cur"))
-                      ;;
-                  *)
-                      case "${COMP_WORDS[1]}" in
-                          compile)
-                              COMPREPLY=($(compgen -W "-o" -- "$cur"))
-                              ;;
-                      esac
-                      ;;
-              esac
-              ;;
-      esac
-  }
-  complete -o default -F _erlkoenig_dsl erlkoenig-dsl
-  """
-
-  @zsh_completion ~S"""
-  #compdef erlkoenig-dsl
-
-  _erlkoenig_dsl() {
-      local -a commands
-      commands=(
-          'compile:Compile a DSL .exs file to an Erlang .term file'
-          'validate:Check a DSL .exs file for errors'
-          'sign:Sign a static binary with Ed25519'
-          'verify:Verify a binary signature and certificate chain'
-          'pki:Create certificates (root-ca, sub-ca, signing-cert)'
-          'push:Push a binary artifact to the daemon'
-          'artifacts:List artifacts'
-          'artifact:Show or delete an artifact'
-          'tag:Add a tag to an artifact'
-      )
-
-      _arguments -C \
-          '1:command:->command' \
-          '*::arg:->args'
-
-      case "$state" in
-          command)
-              _describe 'command' commands
-              ;;
-          args)
-              case "${words[1]}" in
-                  compile)
-                      _arguments \
-                          '1:input file:_files -g "*.exs"' \
-                          '-o[output file]:output file:_files -g "*.term"'
-                      ;;
-                  validate)
-                      _arguments '1:input file:_files -g "*.exs"'
-                      ;;
-              esac
-              ;;
-      esac
-  }
-
-  _erlkoenig_dsl "$@"
-  """
+  @default_node :"erlkoenig@127.0.0.1"
 
   def main(args) do
     case args do
-      ["deploy" | rest]    -> deploy(rest)
+      # Local commands (no daemon)
       ["compile" | rest]   -> compile(rest)
       ["validate" | rest]  -> validate(rest)
+      ["show" | rest]      -> show(rest)
       ["sign" | rest]      -> sign(rest)
       ["verify" | rest]    -> verify(rest)
       ["pki" | rest]       -> pki(rest)
-      ["spawn" | rest]     -> ctl_spawn(rest)
-      ["stop" | rest]      -> ctl_stop(rest)
-      ["ps" | _]           -> ctl_ps()
-      ["inspect" | rest]   -> ctl_inspect(rest)
-      ["audit" | rest]     -> ctl_audit(rest)
-      ["status" | _]       -> ctl_status()
-      ["push" | rest]      -> ctl_push(rest)
-      ["artifacts" | rest] -> ctl_artifacts(rest)
-      ["artifact" | rest]  -> ctl_artifact(rest)
-      ["tag" | rest]       -> ctl_tag(rest)
-      ["--completions", shell] -> completions(shell)
-      [flag] when flag in ["--help", "-h"] -> usage()
-      _ -> usage()
+
+      # Runtime commands (via Erlang distribution)
+      ["ps" | _]           -> rpc_cmd(fn -> :erlkoenig.list() end, &render_ps/1)
+      ["stop" | rest]      -> cmd_stop(rest)
+      ["inspect" | rest]   -> cmd_inspect(rest)
+      ["status" | _]       -> rpc_cmd(fn -> :erlkoenig_nft.status() end, &render_status/1)
+      ["ban" | rest]       -> cmd_ban(rest)
+      ["unban" | rest]     -> cmd_unban(rest)
+      ["counters" | _]     -> rpc_cmd(fn -> :erlkoenig_nft.rates() end, &render_counters/1)
+      ["guard", "stats"]   -> rpc_cmd(fn -> :erlkoenig_nft.guard_stats() end, &render_map/1)
+      ["guard", "banned"]  -> rpc_cmd(fn -> :erlkoenig_nft.guard_banned() end, &render_list/1)
+
+      ["--help" | _]       -> usage()
+      ["-h" | _]           -> usage()
+      ["--version" | _]    -> IO.puts("erlkoenig 0.4.0")
+      _                    -> usage()
     end
   end
+
+  # --- Compile / Validate / Show ---
 
   defp compile(args) do
     {opts, files, _} =
@@ -130,131 +76,225 @@ defmodule Erlkoenig.CLI do
 
     case files do
       [input_file] -> do_compile(input_file, opts)
-      _ -> error("Usage: erlkoenig-dsl compile <file.exs> [-o output.term]")
+      _ -> error("Usage: erlkoenig compile <file.exs> [-o output.term]")
     end
   end
 
   defp validate(args) do
     case args do
       [input_file] -> do_validate(input_file)
-      _ -> error("Usage: erlkoenig-dsl validate <file.exs>")
+      _ -> error("Usage: erlkoenig validate <file.exs>")
+    end
+  end
+
+  defp show(args) do
+    case args do
+      [input_file] -> do_show(input_file)
+      _ -> error("Usage: erlkoenig show <file.exs>")
     end
   end
 
   defp do_compile(input_file, opts) do
     check_file!(input_file)
-
-    output_file =
-      Keyword.get(opts, :output, Path.rootname(input_file) <> ".term")
+    output_file = Keyword.get(opts, :output, Path.rootname(input_file) <> ".term")
 
     info("Compiling #{input_file} ...")
-
     mod = find_dsl_module(input_file)
     term = extract_term(mod)
-
     formatted = :io_lib.format(~c"~tp.~n", [term])
     File.write!(output_file, formatted)
-
     info("Written to #{output_file}")
   end
 
   defp do_validate(input_file) do
     check_file!(input_file)
-
     info("Validating #{input_file} ...")
 
     [{module, _}] = Code.compile_file(input_file)
-
-    containers =
-      if function_exported?(module, :containers, 0) do
-        module.containers()
-      else
-        error("Module #{inspect(module)} has no containers/0 function")
-      end
+    containers = if function_exported?(module, :containers, 0),
+      do: module.containers(),
+      else: error("Module #{inspect(module)} has no containers/0 function")
 
     errors = validate_containers(containers)
-
     case errors do
-      [] ->
-        info("OK - #{length(containers)} container(s), no errors")
-
+      [] -> info("OK - #{length(containers)} container(s), no errors")
       errs ->
         Enum.each(errs, fn e -> error_msg("  ERROR: #{e}") end)
         error("#{length(errs)} error(s) found")
     end
   end
 
-  defp find_dsl_module(input_file) do
+  defp do_show(input_file) do
+    check_file!(input_file)
     modules = Code.compile_file(input_file)
 
-    case modules do
-      [{mod, _}] ->
-        mod
-
-      list when is_list(list) ->
-        Enum.find_value(list, fn {mod, _} ->
-          if function_exported?(mod, :containers, 0), do: mod
-        end) || error("No module with containers/0 found")
-    end
-  end
-
-  defp extract_term(module) do
-    cond do
-      function_exported?(module, :containers, 0) ->
-        %{containers: module.containers()}
-
-      true ->
-        error("Module #{inspect(module)} has no containers/0 function")
-    end
-  end
-
-  defp validate_containers(containers) do
-    ip_errors = check_duplicate_ips(containers)
-    port_errors = check_duplicate_ports(containers)
-    field_errors = Enum.flat_map(containers, &check_container_fields/1)
-    ip_errors ++ port_errors ++ field_errors
-  end
-
-  defp check_container_fields(%{name: name} = ct) do
-    errs = []
-    errs = if ct[:binary] == nil, do: errs ++ ["#{name}: missing binary path"], else: errs
-    errs = if ct[:ip] == nil, do: errs ++ ["#{name}: missing IP address"], else: errs
-    errs
-  end
-
-  defp check_duplicate_ips(containers) do
-    ips = for %{ip: ip, name: name} <- containers, ip != nil, do: {ip, name}
-
-    ips
-    |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
-    |> Enum.filter(fn {_ip, names} -> length(names) > 1 end)
-    |> Enum.map(fn {ip, names} ->
-      "duplicate IP #{inspect(ip)} in containers: #{Enum.join(names, ", ")}"
+    Enum.each(modules, fn {mod, _} ->
+      cond do
+        function_exported?(mod, :config, 0) ->
+          ErlkoenigNft.CLI.Formatter.render_firewall(mod.config(), mod)
+        function_exported?(mod, :guard_config, 0) ->
+          ErlkoenigNft.CLI.Formatter.render_guard(mod.guard_config(), mod)
+        function_exported?(mod, :watches, 0) ->
+          ErlkoenigNft.CLI.Formatter.render_watch(mod.watches(), mod)
+        function_exported?(mod, :containers, 0) ->
+          render_containers(mod.containers())
+        true -> :skip
+      end
     end)
   end
 
-  defp check_duplicate_ports(containers) do
-    ports =
-      for %{name: name} = ct <- containers,
-          {host_port, _} <- Map.get(ct, :ports, []),
-          do: {host_port, name}
+  # --- Runtime commands via rpc ---
 
-    ports
-    |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
-    |> Enum.filter(fn {_port, names} -> length(names) > 1 end)
-    |> Enum.map(fn {port, names} ->
-      "duplicate host port #{port} in containers: #{Enum.join(names, ", ")}"
+  defp cmd_stop([id | _]) do
+    rpc_cmd(fn ->
+      case :erlkoenig.find_by_id(String.to_charlist(id)) do
+        {:ok, pid} -> :erlkoenig.stop(pid)
+        err -> err
+      end
+    end, fn
+      :ok -> info("Stopped: #{id}")
+      err -> error("Stop failed: #{inspect(err)}")
+    end)
+  end
+  defp cmd_stop(_), do: error("Usage: erlkoenig stop <container-id>")
+
+  defp cmd_inspect([id | _]) do
+    rpc_cmd(fn ->
+      case :erlkoenig.find_by_id(String.to_charlist(id)) do
+        {:ok, pid} -> :erlkoenig.inspect(pid)
+        err -> err
+      end
+    end, &render_map/1)
+  end
+  defp cmd_inspect(_), do: error("Usage: erlkoenig inspect <container-id>")
+
+  defp cmd_ban([ip | _]) do
+    rpc_cmd(fn -> :erlkoenig_nft.ban(String.to_charlist(ip)) end, fn
+      :ok -> info("Banned: #{ip}")
+      err -> error("Ban failed: #{inspect(err)}")
+    end)
+  end
+  defp cmd_ban(_), do: error("Usage: erlkoenig ban <ip>")
+
+  defp cmd_unban([ip | _]) do
+    rpc_cmd(fn -> :erlkoenig_nft.unban(String.to_charlist(ip)) end, fn
+      :ok -> info("Unbanned: #{ip}")
+      err -> error("Unban failed: #{inspect(err)}")
+    end)
+  end
+  defp cmd_unban(_), do: error("Usage: erlkoenig unban <ip>")
+
+  defp rpc_cmd(fun, renderer) do
+    node = get_node()
+    ensure_distributed()
+
+    case :rpc.call(node, :erlang, :apply, [fun, []]) do
+      {:badrpc, :nodedown} ->
+        error("Cannot connect to #{node}. Is erlkoenig running?")
+      {:badrpc, reason} ->
+        error("RPC failed: #{inspect(reason)}")
+      result ->
+        renderer.(result)
+    end
+  end
+
+  defp ensure_distributed do
+    case Node.alive?() do
+      true -> :ok
+      false ->
+        name = :"erlkoenig_cli_#{:rand.uniform(999999)}@127.0.0.1"
+        case :net_kernel.start(name, %{name_domain: :longnames}) do
+          {:ok, _} ->
+            cookie = get_cookie()
+            if cookie, do: Node.set_cookie(cookie)
+            :ok
+          {:error, reason} ->
+            error("Cannot start distribution: #{inspect(reason)}")
+        end
+    end
+  end
+
+  defp get_node do
+    case System.get_env("ERLKOENIG_NODE") do
+      nil -> @default_node
+      name -> String.to_atom(name)
+    end
+  end
+
+  defp get_cookie do
+    case System.get_env("ERLKOENIG_COOKIE") do
+      nil ->
+        cookie_file = Path.expand("~/.erlang.cookie")
+        if File.exists?(cookie_file) do
+          cookie_file |> File.read!() |> String.trim() |> String.to_atom()
+        else
+          nil
+        end
+      cookie -> String.to_atom(cookie)
+    end
+  end
+
+  # --- Renderers ---
+
+  defp render_ps(containers) when is_list(containers) do
+    case containers do
+      [] -> info("(no containers)")
+      _ ->
+        IO.puts(pad("ID", 14) <> pad("NAME", 16) <> pad("STATE", 12) <>
+                pad("IP", 16) <> "PID")
+        Enum.each(containers, fn ct ->
+          id = ct |> Map.get(:id, <<>>) |> binary_part(0, min(byte_size(Map.get(ct, :id, <<>>)), 12))
+          name = Map.get(ct, :name, "-")
+          state = Map.get(ct, :state, :unknown)
+          ip = Map.get(ct, :net_info, %{}) |> Map.get(:ip, "-") |> format_ip()
+          pid = Map.get(ct, :os_pid, "-")
+          IO.puts(pad("#{id}", 14) <> pad("#{name}", 16) <> pad("#{state}", 12) <>
+                  pad("#{ip}", 16) <> "#{pid}")
+        end)
+    end
+  end
+  defp render_ps(other), do: IO.puts(inspect(other))
+
+  defp render_status(data) when is_map(data) do
+    Enum.each(data, fn {k, v} -> IO.puts("#{k}: #{inspect(v)}") end)
+  end
+  defp render_status(other), do: IO.puts(inspect(other))
+
+  defp render_counters(data) when is_map(data) do
+    Enum.each(data, fn {name, rates} ->
+      pps = Map.get(rates, :pps, 0.0)
+      bps = Map.get(rates, :bps, 0.0)
+      IO.puts("#{pad("#{name}", 20)} #{format_rate(pps)} pps  #{format_rate(bps)} bps")
+    end)
+  end
+  defp render_counters(other), do: IO.puts(inspect(other))
+
+  defp render_map(data) when is_map(data) do
+    IO.puts(:io_lib.format(~c"~tp", [data]))
+  end
+  defp render_map(other), do: IO.puts(inspect(other))
+
+  defp render_list(data) when is_list(data) do
+    Enum.each(data, fn item -> IO.puts(inspect(item)) end)
+  end
+  defp render_list(other), do: IO.puts(inspect(other))
+
+  defp render_containers(containers) do
+    Enum.each(containers, fn ct ->
+      name = Map.get(ct, :name, "?")
+      binary = Map.get(ct, :binary, "?")
+      ip = Map.get(ct, :ip, nil) |> format_ip()
+      IO.puts("  #{pad("#{name}", 16)} #{pad("#{ip}", 16)} #{binary}")
     end)
   end
 
-  # --- Sign ---
+  # --- Sign / Verify / PKI (unchanged) ---
 
   defp sign(args) do
     {opts, files, _} =
       OptionParser.parse(args,
         strict: [cert: :string, key: :string, git_sha: :string, out: :string],
-        aliases: [c: :cert, k: :key, o: :out]
-      )
+        aliases: [c: :cert, k: :key, o: :out])
 
     case files do
       [binary_path] ->
@@ -269,27 +309,19 @@ defmodule Erlkoenig.CLI do
           {:ok, sig_data} ->
             File.write!(out, sig_data)
             info("Signed: #{binary_path}")
-            info("  Output:    #{out}")
-            info("  SHA256:    #{sha256_file(binary_path)}")
-            if opts[:git_sha], do: info("  Git SHA:   #{opts[:git_sha]}")
-
-          {:error, reason} ->
-            error("Sign failed: #{inspect(reason)}")
+            info("  Output:  #{out}")
+            info("  SHA256:  #{sha256_file(binary_path)}")
+          {:error, reason} -> error("Sign failed: #{inspect(reason)}")
         end
-
-      _ ->
-        error("Usage: erlkoenig sign <binary> --cert <cert.pem> --key <key.pem> [--git-sha <sha>] [-o output.sig]")
+      _ -> error("Usage: erlkoenig sign <binary> --cert <cert.pem> --key <key.pem>")
     end
   end
-
-  # --- Verify ---
 
   defp verify(args) do
     {opts, files, _} =
       OptionParser.parse(args,
         strict: [sig: :string, trust_root: :string],
-        aliases: [s: :sig, t: :trust_root]
-      )
+        aliases: [s: :sig, t: :trust_root])
 
     case files do
       [binary_path] ->
@@ -301,91 +333,96 @@ defmodule Erlkoenig.CLI do
           {:ok, meta} ->
             info("Binary:    #{binary_path}")
             info("SHA256:    #{meta.sha256}")
-            info("Git SHA:   #{meta.git_sha}")
             info("Signer:    #{meta.signer}")
             info("Signed at: #{format_timestamp(meta.timestamp)}")
             info("Chain:     #{length(meta.chain)} certificate(s)")
-
-            if trust_root = opts[:trust_root] do
-              check_file!(trust_root)
-
-              case Erlkoenig.Sig.verify_chain(meta.chain, trust_root) do
-                :ok -> info("Trust:     OK (chains to #{trust_root})")
-                {:error, reason} -> error("Trust:     FAILED — #{inspect(reason)}")
-              end
-            end
-
             info("Result:    OK")
-
-          {:error, reason} ->
-            error("Verification failed: #{inspect(reason)}")
+          {:error, reason} -> error("Verification failed: #{inspect(reason)}")
         end
-
-      _ ->
-        error("Usage: erlkoenig verify <binary> [--sig <file.sig>] [--trust-root <ca.pem>]")
+      _ -> error("Usage: erlkoenig verify <binary> [--sig <file.sig>]")
     end
   end
-
-  # --- PKI ---
 
   defp pki(args) do
     case args do
-      ["create-root-ca" | rest] -> pki_create_root_ca(rest)
-      ["create-sub-ca" | rest] -> pki_create_sub_ca(rest)
-      ["create-signing-cert" | rest] -> pki_create_signing_cert(rest)
-      _ -> error("""
-        Usage:
-          erlkoenig pki create-root-ca --cn <name> --out <cert.pem> --key-out <key.pem> [--validity 10y]
-          erlkoenig pki create-sub-ca --cn <name> --ca <ca.pem> --ca-key <ca.key> --out <cert.pem> --key-out <key.pem>
-          erlkoenig pki create-signing-cert --cn <name> --ca <ca.pem> --ca-key <ca.key> --out <cert.pem> --key-out <key.pem>
-        """)
+      ["create-root-ca" | rest] -> pki_create(rest, &Erlkoenig.PKI.create_root_ca/1, "Root CA")
+      ["create-sub-ca" | rest] -> pki_create(rest, &Erlkoenig.PKI.create_sub_ca/1, "Sub-CA")
+      ["create-signing-cert" | rest] -> pki_create(rest, &Erlkoenig.PKI.create_signing_cert/1, "Signing cert")
+      _ -> error("Usage: erlkoenig pki create-root-ca --cn <name> --out <cert.pem> --key-out <key.pem>")
     end
   end
 
-  defp pki_create_root_ca(args) do
+  defp pki_create(args, fun, label) do
     {opts, _, _} =
       OptionParser.parse(args,
-        strict: [cn: :string, out: :string, key_out: :string, validity: :string])
+        strict: [cn: :string, out: :string, key_out: :string, validity: :string,
+                 ca: :string, ca_key: :string])
 
-    case Erlkoenig.PKI.create_root_ca(opts) do
+    case fun.(opts) do
       {:ok, cert, key} ->
-        info("Root CA created:")
+        info("#{label} created:")
         info("  Certificate: #{cert}")
         info("  Private key: #{key}")
-      {:error, reason} ->
-        error("Failed: #{inspect(reason)}")
+      {:error, reason} -> error("Failed: #{inspect(reason)}")
     end
   end
 
-  defp pki_create_sub_ca(args) do
-    {opts, _, _} =
-      OptionParser.parse(args,
-        strict: [cn: :string, ca: :string, ca_key: :string, out: :string, key_out: :string, validity: :string])
+  # --- Module loading ---
 
-    case Erlkoenig.PKI.create_sub_ca(opts) do
-      {:ok, cert, key} ->
-        info("Sub-CA created:")
-        info("  Certificate: #{cert}")
-        info("  Private key: #{key}")
-      {:error, reason} ->
-        error("Failed: #{inspect(reason)}")
+  defp find_dsl_module(input_file) do
+    modules = Code.compile_file(input_file)
+    case modules do
+      [{mod, _}] -> mod
+      list when is_list(list) ->
+        Enum.find_value(list, fn {mod, _} ->
+          if function_exported?(mod, :containers, 0), do: mod
+        end) || error("No module with containers/0 found")
     end
   end
 
-  defp pki_create_signing_cert(args) do
-    {opts, _, _} =
-      OptionParser.parse(args,
-        strict: [cn: :string, ca: :string, ca_key: :string, out: :string, key_out: :string, validity: :string])
-
-    case Erlkoenig.PKI.create_signing_cert(opts) do
-      {:ok, cert, key} ->
-        info("Signing certificate created:")
-        info("  Certificate: #{cert}")
-        info("  Private key: #{key}")
-      {:error, reason} ->
-        error("Failed: #{inspect(reason)}")
+  defp extract_term(module) do
+    cond do
+      function_exported?(module, :containers, 0) ->
+        %{containers: module.containers()}
+      true ->
+        error("Module #{inspect(module)} has no containers/0 function")
     end
   end
+
+  defp validate_containers(containers) do
+    check_duplicate_ips(containers) ++
+    check_duplicate_ports(containers) ++
+    Enum.flat_map(containers, &check_container_fields/1)
+  end
+
+  defp check_container_fields(%{name: name} = ct) do
+    errs = []
+    errs = if ct[:binary] == nil, do: errs ++ ["#{name}: missing binary path"], else: errs
+    errs = if ct[:ip] == nil, do: errs ++ ["#{name}: missing IP address"], else: errs
+    errs
+  end
+
+  defp check_duplicate_ips(containers) do
+    for %{ip: ip, name: name} <- containers, ip != nil, do: {ip, name}
+    |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
+    |> Enum.filter(fn {_ip, names} -> length(names) > 1 end)
+    |> Enum.map(fn {ip, names} ->
+      "duplicate IP #{inspect(ip)} in containers: #{Enum.join(names, ", ")}"
+    end)
+  end
+
+  defp check_duplicate_ports(containers) do
+    for %{name: name} = ct <- containers,
+        {host_port, _} <- Map.get(ct, :ports, []),
+        do: {host_port, name}
+    |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
+    |> Enum.filter(fn {_port, names} -> length(names) > 1 end)
+    |> Enum.map(fn {port, names} ->
+      "duplicate host port #{port} in containers: #{Enum.join(names, ", ")}"
+    end)
+  end
+
+  # --- Helpers ---
 
   defp sha256_file(path) do
     path |> File.read!() |> then(&:crypto.hash(:sha256, &1)) |> Base.encode16(case: :lower)
@@ -397,395 +434,58 @@ defmodule Erlkoenig.CLI do
     |> to_string()
   end
 
-  defp check_file!(path) do
-    unless File.exists?(path) do
-      error("File not found: #{path}")
-    end
-  end
-
-  # --- Deploy ---
-
-  defp deploy(args) do
-    case args do
-      [input_file] -> do_deploy(input_file)
-      _ -> error("Usage: erlkoenig deploy <stack.exs>")
-    end
-  end
-
-  defp do_deploy(input_file) do
-    check_file!(input_file)
-    info("Compiling #{input_file} ...")
-
-    mod = find_dsl_module(input_file)
-    spawn_list = mod.spawn_opts()
-
-    info("  #{length(spawn_list)} container(s) found")
-    info("")
-
-    # Deploy in order (last defined = probably depends on earlier ones, so reverse)
-    results = Enum.map(Enum.reverse(spawn_list), fn {name, binary, opts} ->
-      deploy_one(name, binary, opts)
-    end)
-
-    ok_count = Enum.count(results, &match?(:ok, &1))
-    fail_count = Enum.count(results, &match?({:error, _}, &1))
-
-    info("")
-    if fail_count == 0 do
-      info("#{ok_count}/#{length(spawn_list)} containers running.")
-    else
-      error_msg("#{ok_count} started, #{fail_count} failed.")
-      System.halt(1)
-    end
-  end
-
-  defp deploy_one(name, binary, opts) do
-    info("Deploying #{name} (#{format_ip(opts[:ip])}) ...")
-
-    # Build spawn JSON
-    opts_map = %{}
-    opts_map = if opts[:ip], do: Map.put(opts_map, "ip", format_ip(opts[:ip])), else: opts_map
-    opts_map = if opts[:args], do: Map.put(opts_map, "args", opts[:args]), else: opts_map
-    opts_map = if opts[:signature_required], do: Map.put(opts_map, "signature", "required"), else: opts_map
-    json = encode_simple_json(opts_map)
-
-    case Erlkoenig.Ctl.spawn_container(binary, json) do
-      {:ok, resp} ->
-        info("  Started: #{name} (#{resp})")
-        # Brief pause for container to initialize
-        Process.sleep(1000)
-        :ok
-      {:error, msg} ->
-        error_msg("  Failed: #{name} — #{msg}")
-        {:error, msg}
-    end
-  end
-
   defp format_ip({a, b, c, d}), do: "#{a}.#{b}.#{c}.#{d}"
-  defp format_ip(nil), do: "auto"
+  defp format_ip(nil), do: "-"
   defp format_ip(other), do: "#{other}"
 
-  # --- Control socket commands ---
-
-  defp ctl_spawn(args) do
-    {opts, files, _} =
-      OptionParser.parse(args,
-        strict: [ip: :string, args: :string, limits: :string,
-                 firewall: :string, seccomp: :string, signature: :string])
-
-    case files do
-      [binary_path] ->
-        opts_map = %{}
-        opts_map = if opts[:ip], do: Map.put(opts_map, "ip", opts[:ip]), else: opts_map
-        opts_map = if opts[:args], do: Map.put(opts_map, "args", String.split(opts[:args], ",")), else: opts_map
-        opts_map = if opts[:signature], do: Map.put(opts_map, "signature", opts[:signature]), else: opts_map
-        # Simple JSON encoding (no dependency needed for flat maps)
-        json = encode_simple_json(opts_map)
-
-        case Erlkoenig.Ctl.spawn_container(binary_path, json) do
-          {:ok, resp} -> info("Started: #{resp}")
-          {:error, msg} -> error("Spawn failed: #{msg}")
-        end
-
-      _ ->
-        error("Usage: erlkoenig spawn <binary> --ip <addr> [--args <a,b,c>]")
-    end
-  end
-
-  defp ctl_stop(args) do
-    case args do
-      [container_id] ->
-        case Erlkoenig.Ctl.stop_container(container_id) do
-          {:ok, _} -> info("Stopped: #{container_id}")
-          {:error, msg} -> error("Stop failed: #{msg}")
-        end
-      _ ->
-        error("Usage: erlkoenig stop <container-id>")
-    end
-  end
-
-  defp ctl_ps do
-    case Erlkoenig.Ctl.ps() do
-      {:ok, data} ->
-        if byte_size(data) > 0, do: IO.puts(data), else: info("(no containers)")
-      {:error, msg} -> error("ps failed: #{msg}")
-    end
-  end
-
-  defp ctl_inspect(args) do
-    case args do
-      [container_id] ->
-        case Erlkoenig.Ctl.inspect_container(container_id) do
-          {:ok, data} -> IO.puts(data)
-          {:error, msg} -> error("Inspect failed: #{msg}")
-        end
-      _ ->
-        error("Usage: erlkoenig inspect <container-id>")
-    end
-  end
-
-  defp ctl_audit(args) do
-    {opts, _, _} =
-      OptionParser.parse(args, strict: [type: :string, since: :string, limit: :integer])
-
-    json = encode_simple_json(Map.new(opts, fn {k, v} -> {to_string(k), v} end))
-
-    case Erlkoenig.Ctl.audit(json) do
-      {:ok, data} ->
-        if byte_size(data) > 0, do: IO.puts(data), else: info("(no events)")
-      {:error, msg} -> error("Audit failed: #{msg}")
-    end
-  end
-
-  defp ctl_status do
-    case Erlkoenig.Ctl.status() do
-      {:ok, data} -> IO.puts(data)
-      {:error, msg} -> error("Status failed: #{msg}")
-    end
-  end
-
-  defp ctl_push(args) do
-    {opts, files, _} =
-      OptionParser.parse(args,
-        strict: [name: :string, tag: :keep, files: :string,
-                 sign: :boolean, key: :string, cert: :string],
-        aliases: [n: :name, t: :tag, f: :files])
-
-    case files do
-      [binary_path] ->
-        check_file!(binary_path)
-
-        push_opts = [
-          name: opts[:name],
-          tag: Keyword.get_values(opts, :tag),
-          files: opts[:files],
-          sign: opts[:sign],
-          key: opts[:key],
-          cert: opts[:cert]
-        ]
-
-        info("Pushing #{binary_path} ...")
-
-        case Erlkoenig.Ctl.push(binary_path, push_opts) do
-          {:ok, resp_payload} ->
-            result = Erlkoenig.Ctl.decode_push_response(resp_payload)
-            name = Map.get(result, :name, "?")
-            hash = Map.get(result, :manifest_hash, <<>>)
-            info("Pushed #{name} -> manifest:#{hex(hash)}")
-
-          {:error, msg} ->
-            error("Push failed: #{msg}")
-        end
-
-      _ ->
-        error("Usage: erlkoenig push <binary> [--name NAME] [--tag TAG] [--files DIR]")
-    end
-  end
-
-  defp ctl_artifacts(args) do
-    {opts, _, _} =
-      OptionParser.parse(args, strict: [tag: :string], aliases: [t: :tag])
-
-    case Erlkoenig.Ctl.artifacts(tag: opts[:tag]) do
-      {:ok, resp_payload} ->
-        artifacts = Erlkoenig.Ctl.decode_artifacts_response(resp_payload)
-
-        case artifacts do
-          [] ->
-            info("(no artifacts)")
-
-          _ ->
-            # Header
-            IO.puts(pad("NAME", 20) <> pad("TAGS", 24) <> "PUSHED")
-
-            Enum.each(artifacts, fn a ->
-              name = Map.get(a, :name, "?")
-              tags = Map.get(a, :tags, []) |> Enum.join(",")
-              pushed = Map.get(a, :pushed_at, 0) |> format_unix_time()
-              IO.puts(pad(to_string(name), 20) <> pad(tags, 24) <> pushed)
-            end)
-        end
-
-      {:error, msg} ->
-        error("artifacts failed: #{msg}")
-    end
-  end
-
-  defp ctl_artifact(args) do
-    case args do
-      ["delete", name] ->
-        case Erlkoenig.Ctl.delete_artifact(name) do
-          {:ok, _} -> info("Deleted: #{name}")
-          {:error, msg} -> error("Delete failed: #{msg}")
-        end
-
-      [name] ->
-        case Erlkoenig.Ctl.artifact_info(name) do
-          {:ok, resp_payload} ->
-            a = Erlkoenig.Ctl.decode_artifact_info_response(resp_payload)
-            name_str = Map.get(a, :name, "?")
-            manifest = Map.get(a, :manifest_hash, <<>>) |> hex()
-            binary_hash = Map.get(a, :binary_hash, <<>>) |> hex()
-            tags = Map.get(a, :tags, []) |> Enum.join(", ")
-            pushed = Map.get(a, :pushed_at, 0) |> format_unix_time()
-            binary_size = Map.get(a, :binary_size, 0)
-            files = Map.get(a, :files, [])
-
-            IO.puts("Name:     #{name_str}")
-            IO.puts("Manifest: #{manifest}")
-            IO.puts("Binary:   #{binary_hash}")
-            IO.puts("Size:     #{format_bytes(binary_size)}")
-            IO.puts("Tags:     #{tags}")
-            IO.puts("Pushed:   #{pushed}")
-
-            if files != [] do
-              IO.puts("Files:    #{length(files)}")
-
-              Enum.each(files, fn
-                {path, size} ->
-                  IO.puts("  #{path} (#{format_bytes(size)})")
-                other ->
-                  IO.puts("  #{inspect(other)}")
-              end)
-            end
-
-          {:error, msg} ->
-            error("artifact failed: #{msg}")
-        end
-
-      _ ->
-        error("Usage: erlkoenig artifact <name> | erlkoenig artifact delete <name>")
-    end
-  end
-
-  defp ctl_tag(args) do
-    case args do
-      [name, tag] ->
-        case Erlkoenig.Ctl.tag_artifact(name, tag) do
-          {:ok, _} -> info("Tagged #{name} with #{tag}")
-          {:error, msg} -> error("Tag failed: #{msg}")
-        end
-
-      _ ->
-        error("Usage: erlkoenig tag <name> <tag>")
-    end
-  end
-
-  defp hex(bin) when is_binary(bin) and byte_size(bin) > 0 do
-    Base.encode16(bin, case: :lower) |> String.slice(0, 16)
-  end
-  defp hex(_), do: "-"
+  defp format_rate(r) when r >= 1_000_000, do: "#{Float.round(r / 1_000_000, 1)}M"
+  defp format_rate(r) when r >= 1_000, do: "#{Float.round(r / 1_000, 1)}K"
+  defp format_rate(r) when is_float(r), do: "#{Float.round(r, 1)}"
+  defp format_rate(r), do: "#{r}"
 
   defp pad(str, width) do
     len = String.length(str)
     if len >= width, do: str <> " ", else: str <> String.duplicate(" ", width - len)
   end
 
-  defp format_unix_time(0), do: "-"
-  defp format_unix_time(ts) when is_integer(ts) do
-    {{y, mo, d}, {h, mi, _s}} =
-      :calendar.gregorian_seconds_to_datetime(ts + 62_167_219_200)
-
-    :io_lib.format("~4..0B-~2..0B-~2..0B ~2..0B:~2..0B", [y, mo, d, h, mi])
-    |> to_string()
-  end
-  defp format_unix_time(_), do: "-"
-
-  defp format_bytes(n) when is_integer(n) and n >= 1_048_576 do
-    "#{Float.round(n / 1_048_576, 1)} MB"
-  end
-  defp format_bytes(n) when is_integer(n) and n >= 1024 do
-    "#{Float.round(n / 1024, 1)} KB"
-  end
-  defp format_bytes(n) when is_integer(n), do: "#{n} B"
-  defp format_bytes(_), do: "-"
-
-  defp encode_simple_json(map) when map_size(map) == 0, do: "{}"
-  defp encode_simple_json(map) do
-    pairs = Enum.map(map, fn {k, v} ->
-      "\"#{k}\":#{encode_json_value(v)}"
-    end)
-    "{" <> Enum.join(pairs, ",") <> "}"
-  end
-
-  defp encode_json_value(v) when is_binary(v), do: "\"#{v}\""
-  defp encode_json_value(v) when is_integer(v), do: Integer.to_string(v)
-  defp encode_json_value(v) when is_list(v) do
-    items = Enum.map(v, &encode_json_value/1)
-    "[" <> Enum.join(items, ",") <> "]"
-  end
-  defp encode_json_value(v), do: "\"#{v}\""
-
-  defp completions("bash") do
-    IO.puts(@bash_completion)
-  end
-
-  defp completions("zsh") do
-    IO.puts(@zsh_completion)
-  end
-
-  defp completions(other) do
-    error("Unknown shell: #{other}. Supported: bash, zsh")
-  end
-
-  defp usage do
-    IO.puts("""
-    erlkoenig-dsl - Erlkoenig configuration compiler
-
-    Usage:
-        erlkoenig deploy <stack.exs>
-        erlkoenig spawn <binary> --ip <addr> [--args <a,b>]
-        erlkoenig ps
-        erlkoenig stop <container-id>
-        erlkoenig inspect <container-id>
-        erlkoenig status
-        erlkoenig audit [--type <event-type>]
-        erlkoenig compile <file.exs> [-o output.term]
-        erlkoenig sign <binary> --cert <cert.pem> --key <key.pem>
-        erlkoenig verify <binary> [--trust-root <ca.pem>]
-        erlkoenig push <binary> [--name NAME] [--tag TAG] [--files DIR]
-        erlkoenig artifacts [--tag TAG]
-        erlkoenig artifact <name>
-        erlkoenig artifact delete <name>
-        erlkoenig tag <name> <tag>
-        erlkoenig pki create-root-ca --cn <name> --out <cert.pem> --key-out <key.pem>
-        erlkoenig --help
-
-    Container management (via Unix socket):
-        deploy      Deploy all containers from a stack.exs file
-        spawn       Start a single container
-        ps          List running containers
-        stop        Stop a container
-        inspect     Show container details
-        status      Show daemon status
-        audit       Query audit log
-
-    Artifact management:
-        push        Push a binary artifact to the daemon
-        artifacts   List artifacts [--tag TAG]
-        artifact    Show artifact details / delete
-        tag         Add a tag to an artifact
-
-    Build & Security:
-        compile     Compile a DSL .exs file to an Erlang .term file
-        validate    Check a DSL .exs file for errors
-        sign        Sign a static binary with Ed25519
-        verify      Verify a binary signature and certificate chain
-        pki         Create certificates for testing
-
-    Shell completion:
-        eval "$(erlkoenig-dsl --completions bash)"
-        eval "$(erlkoenig-dsl --completions zsh)"
-    """)
-
-    System.halt(1)
+  defp check_file!(path) do
+    unless File.exists?(path), do: error("File not found: #{path}")
   end
 
   defp info(msg), do: IO.puts(msg)
   defp error_msg(msg), do: IO.puts(:stderr, msg)
-
   defp error(msg) do
     IO.puts(:stderr, msg)
+    System.halt(1)
+  end
+
+  defp usage do
+    IO.puts("""
+    erlkoenig - Zero-trust container runtime
+
+    Local commands (no daemon needed):
+        compile <file.exs> [-o out.term]    Compile DSL to Erlang term file
+        validate <file.exs>                 Check DSL for errors
+        show <file.exs>                     Render firewall/container config
+        sign <binary> --cert --key          Sign binary with Ed25519
+        verify <binary>                     Verify binary signature
+        pki create-root-ca ...              Create PKI certificates
+
+    Runtime commands (via Erlang distribution):
+        ps                                  List running containers
+        stop <id>                           Stop a container
+        inspect <id>                        Container details
+        status                              Firewall status
+        ban <ip>                            Ban IP address
+        unban <ip>                           Unban IP address
+        counters                            Show counter rates
+        guard stats                         Threat detection stats
+        guard banned                        List banned IPs
+
+    Environment:
+        ERLKOENIG_NODE      Target node (default: erlkoenig@127.0.0.1)
+        ERLKOENIG_COOKIE    Erlang cookie (default: ~/.erlang.cookie)
+    """)
     System.halt(1)
   end
 end

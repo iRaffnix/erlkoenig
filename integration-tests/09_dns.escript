@@ -10,10 +10,10 @@ main(_) ->
     test_helper:boot(),
 
     {P1, P2} = test_helper:step("2 benannte Container spawnen", fun() ->
-        {ok, A} = erlkoenig_core:spawn(test_helper:demo("echo_server"),
+        {ok, A} = erlkoenig:spawn(test_helper:demo("echo_server"),
             #{ip => {10,0,0,10}, args => [<<"7001">>],
               name => <<"webserver">>}),
-        {ok, B} = erlkoenig_core:spawn(test_helper:demo("echo_server"),
+        {ok, B} = erlkoenig:spawn(test_helper:demo("echo_server"),
             #{ip => {10,0,0,20}, args => [<<"7002">>],
               name => <<"database">>}),
         io:format("    webserver=10.0.0.10  database=10.0.0.20~n"),

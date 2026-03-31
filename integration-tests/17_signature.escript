@@ -24,7 +24,7 @@ main(_) ->
     {ok, Cwd} = file:get_cwd(),
     EbinDirs = filelib:wildcard(filename:join([Cwd, "_build", "*", "lib", "*", "ebin"])),
     lists:foreach(fun(Dir) -> code:add_pathz(Dir) end, EbinDirs),
-    FixtureDir = filename:join([Cwd, "apps", "erlkoenig_core", "test", "fixtures"]),
+    FixtureDir = filename:join([Cwd, "apps", "erlkoenig", "test", "fixtures"]),
     RootCA = filename:join(FixtureDir, "root-ca.pem"),
     SigningCert = filename:join(FixtureDir, "signing.pem"),
     SubCACert = filename:join(FixtureDir, "sub-ca.pem"),

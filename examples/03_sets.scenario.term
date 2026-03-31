@@ -1,0 +1,24 @@
+#{
+    config => "examples/03_sets.term",
+    chain => <<"inbound">>,
+    policy => accept,
+    sets => #{
+        <<"blocklist">> => [{192,0,2,99},{10,66,66,66}]
+    },
+    packets => [
+        %% Blocked IP: matched by set_lookup_drop (rule 1)
+        #{name => <<"banned_ip">>,
+          proto => tcp, saddr => {192,0,2,99}, dport => 80,
+          expect => drop},
+
+        %% Another blocked IP
+        #{name => <<"also_banned">>,
+          proto => tcp, saddr => {10,66,66,66}, dport => 22,
+          expect => drop},
+
+        %% Clean IP: passes set check, accepted by default policy
+        #{name => <<"clean_ip">>,
+          proto => tcp, saddr => {10,0,0,1}, dport => 80,
+          expect => accept}
+    ]
+}.

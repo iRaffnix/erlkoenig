@@ -29,7 +29,7 @@ main([]) ->
     code:add_pathsz(filelib:wildcard("/opt/erlkoenig/lib/*/ebin")),
     code:add_pathsz(filelib:wildcard("_build/default/lib/*/ebin")),
     code:add_pathsz(filelib:wildcard("_build/default/checkouts/*/ebin")),
-    application:load(erlkoenig_core),
+    application:load(erlkoenig),
 
     %% Cleanup leftovers from previous runs
     os:cmd("ip link del veth_testnet0 2>/dev/null"),

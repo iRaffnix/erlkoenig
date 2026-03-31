@@ -11,7 +11,7 @@ main(_) ->
 
     %% Spawn a sleeper container
     Pid = test_helper:step("Container spawnen", fun() ->
-        {ok, P} = erlkoenig_core:spawn(test_helper:demo("sleeper"),
+        {ok, P} = erlkoenig:spawn(test_helper:demo("sleeper"),
             #{ip => {10,0,0,10}, args => [<<"5">>]}),
         io:format("    pid=~p~n", [P]),
         {ok, P}
@@ -21,7 +21,7 @@ main(_) ->
 
     %% Inspect
     test_helper:step("Inspect (state=running)", fun() ->
-        Info = erlkoenig_core:inspect(Pid),
+        Info = erlkoenig:inspect(Pid),
         State = maps:get(state, Info),
         Id = maps:get(id, Info),
         OsPid = maps:get(os_pid, Info),
@@ -34,13 +34,13 @@ main(_) ->
 
     %% Stop and verify state
     test_helper:step("Stop (graceful SIGTERM)", fun() ->
-        ok = erlkoenig_core:stop(Pid),
+        ok = erlkoenig:stop(Pid),
         io:format("    Container gestoppt~n"),
         ok
     end),
 
     test_helper:step("Verify state=stopped", fun() ->
-        Info = erlkoenig_core:inspect(Pid),
+        Info = erlkoenig:inspect(Pid),
         case maps:get(state, Info) of
             stopped ->
                 io:format("    state=stopped~n"),
@@ -52,7 +52,7 @@ main(_) ->
 
     %% Spawn another, let it exit naturally
     test_helper:step("Natural exit (crasher, 2s countdown)", fun() ->
-        {ok, P2} = erlkoenig_core:spawn(test_helper:demo("crasher"),
+        {ok, P2} = erlkoenig:spawn(test_helper:demo("crasher"),
             #{ip => {10,0,0,11}, args => [<<"2">>]}),
         wait_for_state(P2, stopped, 10)
     end),
@@ -62,7 +62,7 @@ main(_) ->
 
 wait_for_state(_Pid, _Target, 0) -> {error, timeout};
 wait_for_state(Pid, Target, N) ->
-    try erlkoenig_core:inspect(Pid) of
+    try erlkoenig:inspect(Pid) of
         Info ->
             case maps:get(state, Info) of
                 Target ->

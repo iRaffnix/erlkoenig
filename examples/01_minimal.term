@@ -1,0 +1,16 @@
+#{
+    table => <<"minimal">>,
+    chains => [
+        #{
+            name => <<"inbound">>,
+            type => filter,
+            hook => input,
+            priority => 0,
+            policy => drop,
+            rules => [
+                {tcp_accept,22},
+                {tcp_accept,80}
+            ]
+        }
+    ]
+}.

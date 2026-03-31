@@ -1,0 +1,112 @@
+#{
+    table => <<"edge_router">>,
+    counters => [<<"ssh">>,<<"dns">>,<<"ntp">>,<<"dropped">>],
+    sets => [
+        {
+            <<"blocklist">>,
+            ipv4_addr,
+            #{elements => [<<"198.51.100.0">>,<<"203.0.113.0">>,<<"192.0.2.1">>]}
+        },
+        {<<"allow_pairs">>,concat,#{fields => [ipv4_addr,inet_service]}}
+    ],
+    vmaps => [#{name => <<"port_vmap">>, type => inet_service, entries => [{22,{jump,<<"ssh_chain">>}},{80,{jump,<<"http_chain">>}},{443,{jump,<<"https_chain">>}},{53,accept}]}],
+    chains => [
+        #{
+            name => <<"raw_prerouting">>,
+            type => filter,
+            hook => prerouting,
+            priority => -300,
+            policy => accept,
+            rules => [
+                {notrack,53,udp},
+                {notrack,123,udp}
+            ]
+        },
+        #{
+            name => <<"prerouting_filter">>,
+            type => filter,
+            hook => prerouting,
+            priority => -200,
+            policy => accept,
+            rules => [
+                {set_lookup_drop,<<"blocklist">>,<<"dropped">>},
+                fib_rpf_drop
+            ]
+        },
+        #{
+            name => <<"inbound">>,
+            type => filter,
+            hook => input,
+            priority => 0,
+            policy => drop,
+            rules => [
+                ct_established_accept,
+                {iifname_accept,<<"lo">>},
+                {vmap_dispatch,tcp,<<"port_vmap">>},
+                {concat_set_lookup,<<"allow_pairs">>,[ip_saddr,tcp_dport],drop},
+                {udp_accept,123,<<"ntp">>},
+                icmp_accept,
+                {log_drop_nflog,<<"EDGE-DROP: ">>,1,<<"dropped">>}
+            ]
+        },
+        #{
+            name => <<"ssh_chain">>,
+            type => filter,
+            hook => input,
+            priority => 10,
+            policy => drop,
+            rules => [{tcp_accept_limited,22,<<"ssh">>,#{burst => 3, rate => 5}}]
+        },
+        #{
+            name => <<"http_chain">>,
+            type => filter,
+            hook => input,
+            priority => 10,
+            policy => drop,
+            rules => [{tcp_accept,80}]
+        },
+        #{
+            name => <<"https_chain">>,
+            type => filter,
+            hook => input,
+            priority => 10,
+            policy => drop,
+            rules => [{tcp_accept,443}]
+        },
+        #{
+            name => <<"forward">>,
+            type => filter,
+            hook => forward,
+            priority => 0,
+            policy => drop,
+            rules => [
+                ct_established_accept,
+                fib_rpf_drop,
+                {log_drop,<<"EDGE-FWD-DROP: ">>}
+            ]
+        }
+    ],
+    ct_guard => #{
+        ban_duration => 3600,
+        cleanup_interval => 30000,
+        conn_flood => {50,10},
+        port_scan => {15,60},
+        whitelist => [
+            {127,0,0,1},
+            {127,0,0,1}
+        ]
+    },
+    watch => #{
+        table => <<"erlkoenig_ct">>,
+        name => <<"edge">>,
+        family => 1,
+        counters => [<<"dns">>,<<"ntp">>,<<"dropped">>],
+        actions => [log],
+        interval => 1000,
+        thresholds => [
+            {<<"dns">>,<<"dns">>,pps,'>',5000},
+            {<<"ntp">>,<<"ntp">>,pps,'>',1000},
+            {<<"dropped">>,<<"dropped">>,pps,'>',500}
+        ]
+    }
+}.

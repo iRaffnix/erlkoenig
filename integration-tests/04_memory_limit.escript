@@ -10,7 +10,7 @@ main(_) ->
     test_helper:boot(),
 
     Pid = test_helper:step("mem_eater mit 32MB Limit spawnen", fun() ->
-        {ok, P} = erlkoenig_core:spawn(test_helper:demo("mem_eater"),
+        {ok, P} = erlkoenig:spawn(test_helper:demo("mem_eater"),
             #{ip => {10,0,0,10},
               limits => #{memory => 32 * 1024 * 1024}}),  %% 32MB
         io:format("    mem_eater allocates 8MB blocks until OOM~n"),
@@ -23,7 +23,7 @@ main(_) ->
     end),
 
     test_helper:step("Verify OOM-Kill", fun() ->
-        Info = erlkoenig_core:inspect(Pid),
+        Info = erlkoenig:inspect(Pid),
         io:format("    state=~p~n", [maps:get(state, Info)]),
         ok
     end),
@@ -33,7 +33,7 @@ main(_) ->
 
 wait_for_state(_Pid, 0) -> {error, timeout};
 wait_for_state(Pid, N) ->
-    try erlkoenig_core:inspect(Pid) of
+    try erlkoenig:inspect(Pid) of
         #{state := S} when S =:= stopped; S =:= failed ->
             io:format("    OOM-Kill erkannt~n"),
             ok;

@@ -1,0 +1,15 @@
+#{
+    config => "etc/firewall.term",
+    chain => <<"inbound">>,
+    policy => drop,
+    packets => [
+        #{name => <<"ssh_ok">>,
+          proto => tcp, saddr => {10,0,0,1}, dport => 22,
+          expect => accept},
+
+        %% Intentional FAIL: expect accept but will be dropped
+        #{name => <<"wrong_expect">>,
+          proto => udp, saddr => {10,0,0,1}, dport => 12345,
+          expect => accept}
+    ]
+}.

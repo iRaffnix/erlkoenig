@@ -71,11 +71,11 @@ main(_) ->
     end),
 
     Pid = test_helper:step("Container unter containers/", fun() ->
-        {ok, P} = erlkoenig_core:spawn(test_helper:demo("sleeper"),
+        {ok, P} = erlkoenig:spawn(test_helper:demo("sleeper"),
             #{ip => {10,0,0,19}, args => [<<"30">>],
               limits => #{memory => 64_000_000, pids => 64}}),
         timer:sleep(500),
-        Info = erlkoenig_core:inspect(P),
+        Info = erlkoenig:inspect(P),
         Id = maps:get(id, Info),
         {ok, CgroupPath} = erlkoenig_cgroup:path(Id),
         io:format("    id=~s cgroup=~s~n", [Id, CgroupPath]),
@@ -86,7 +86,7 @@ main(_) ->
     end),
 
     test_helper:step("path(Id) zeigt auf containers/", fun() ->
-        Info = erlkoenig_core:inspect(Pid),
+        Info = erlkoenig:inspect(Pid),
         Id = maps:get(id, Info),
         {ok, CgroupPath} = erlkoenig_cgroup:path(Id),
         io:format("    path=~s~n", [CgroupPath]),
@@ -105,7 +105,7 @@ main(_) ->
     end),
 
     %% Cleanup
-    catch erlkoenig_core:stop(Pid),
+    catch erlkoenig:stop(Pid),
     timer:sleep(300),
 
     io:format("~n=== Test 19 bestanden ===~n~n"),

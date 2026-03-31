@@ -82,7 +82,7 @@ main(_) ->
                catch error:_ -> []
                end,
         Running = lists:filter(fun(Pid) ->
-            try erlkoenig_core:inspect(Pid) of
+            try erlkoenig:inspect(Pid) of
                 #{state := running} -> true;
                 _ -> false
             catch _:_ -> false

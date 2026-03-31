@@ -31,7 +31,7 @@ main(_) ->
 
     %% --- Test 1: Spawn with volume, write, verify ---
     Pid1 = test_helper:step("Spawn container mit Volume", fun() ->
-        {ok, P} = erlkoenig_core:spawn(test_helper:demo("sleeper"),
+        {ok, P} = erlkoenig:spawn(test_helper:demo("sleeper"),
             #{ip => {10,0,0,10},
               args => [<<"60">>],
               name => <<"test-vol-ct">>,
@@ -51,7 +51,7 @@ main(_) ->
     end),
 
     test_helper:step("Verify Volume in inspect output", fun() ->
-        Info = erlkoenig_core:inspect(Pid1),
+        Info = erlkoenig:inspect(Pid1),
         Volumes = maps:get(volumes, Info, []),
         case length(Volumes) of
             3 -> ok;
@@ -60,7 +60,7 @@ main(_) ->
     end),
 
     test_helper:step("Write file into rw volume via /proc", fun() ->
-        Info = erlkoenig_core:inspect(Pid1),
+        Info = erlkoenig:inspect(Pid1),
         OsPid = maps:get(os_pid, Info),
         Path = lists:flatten(io_lib:format("/proc/~p/root/data/persist_test.txt", [OsPid])),
         ok = file:write_file(Path, <<"persistent-data-v1\n">>),
@@ -85,7 +85,7 @@ main(_) ->
     end),
 
     test_helper:step("Read-only volume: verify config readable", fun() ->
-        Info = erlkoenig_core:inspect(Pid1),
+        Info = erlkoenig:inspect(Pid1),
         OsPid = maps:get(os_pid, Info),
         Path = lists:flatten(io_lib:format("/proc/~p/root/etc/config/app.conf", [OsPid])),
         case file:read_file(Path) of
@@ -101,7 +101,7 @@ main(_) ->
 
     %% --- Test 2: Stop and restart — data persists ---
     test_helper:step("Stop container", fun() ->
-        ok = erlkoenig_core:stop(Pid1),
+        ok = erlkoenig:stop(Pid1),
         timer:sleep(1000),
         ok
     end),
@@ -122,7 +122,7 @@ main(_) ->
     end),
 
     Pid2 = test_helper:step("Restart container mit selben Volumes", fun() ->
-        {ok, P} = erlkoenig_core:spawn(test_helper:demo("sleeper"),
+        {ok, P} = erlkoenig:spawn(test_helper:demo("sleeper"),
             #{ip => {10,0,0,10},
               args => [<<"60">>],
               name => <<"test-vol-ct">>,
@@ -136,7 +136,7 @@ main(_) ->
     end),
 
     test_helper:step("Read persisted data in restarted container", fun() ->
-        Info = erlkoenig_core:inspect(Pid2),
+        Info = erlkoenig:inspect(Pid2),
         OsPid = maps:get(os_pid, Info),
         Path = lists:flatten(io_lib:format("/proc/~p/root/data/persist_test.txt", [OsPid])),
         case file:read_file(Path) of

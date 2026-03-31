@@ -10,7 +10,7 @@
 boot() ->
     code:add_pathsz(filelib:wildcard("_build/default/lib/*/ebin")),
     code:add_pathsz(filelib:wildcard("_build/default/checkouts/*/ebin")),
-    {ok, [AppEnvs]} = file:consult("apps/erlkoenig_core/config/sys.config"),
+    {ok, [AppEnvs]} = file:consult("apps/erlkoenig/config/sys.config"),
     lists:foreach(fun({App, Kvs}) ->
         ok = application:load(App),
         lists:foreach(fun({K, V}) ->
@@ -18,14 +18,14 @@ boot() ->
         end, Kvs)
     end, AppEnvs),
     logger:set_primary_config(level, none),
-    {ok, _} = application:ensure_all_started(erlkoenig_core),
+    {ok, _} = application:ensure_all_started(erlkoenig),
     ok.
 
-%% @doc Path to a demo binary (as binary for erlkoenig_core:spawn/2).
+%% @doc Path to a demo binary (as binary for erlkoenig:spawn/2).
 %%
 %% Search order:
 %%   1. $ERLKOENIG_DEMO_DIR environment variable
-%%   2. code:priv_dir(erlkoenig_core)/demo/
+%%   2. code:priv_dir(erlkoenig)/demo/
 %%   3. build/demo/  (project root)
 demo(Name) ->
     list_to_binary(demo_dir() ++ "/test-erlkoenig-" ++ Name).
@@ -37,7 +37,7 @@ demo_dir() ->
     end.
 
 demo_dir_priv() ->
-    try code:priv_dir(erlkoenig_core) of
+    try code:priv_dir(erlkoenig) of
         PrivDir ->
             D = filename:join(PrivDir, "demo"),
             case filelib:is_dir(D) of
@@ -107,6 +107,6 @@ echo_test(Ip, Port, Msg) ->
 %% @doc Stop all pids and exit cleanly.
 cleanup(Pids) ->
     lists:foreach(fun(Pid) ->
-        catch erlkoenig_core:stop(Pid)
+        catch erlkoenig:stop(Pid)
     end, Pids),
     timer:sleep(300).

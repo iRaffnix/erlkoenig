@@ -195,10 +195,10 @@ load_proto(ProjectDir) ->
     end.
 
 load_proto_search(ProjectDir) ->
-    %% OTP release: /opt/erlkoenig/lib/erlkoenig_core-*/ebin
-    ReleaseDirs = filelib:wildcard("/opt/erlkoenig/lib/erlkoenig_core-*/ebin"),
-    %% Local build: _build/default/lib/erlkoenig_core/ebin
-    BuildDir = filename:join(ProjectDir, "_build/default/lib/erlkoenig_core/ebin"),
+    %% OTP release: /opt/erlkoenig/lib/erlkoenig-*/ebin
+    ReleaseDirs = filelib:wildcard("/opt/erlkoenig/lib/erlkoenig-*/ebin"),
+    %% Local build: _build/default/lib/erlkoenig/ebin
+    BuildDir = filename:join(ProjectDir, "_build/default/lib/erlkoenig/ebin"),
     Candidates = ReleaseDirs ++ [BuildDir],
     case lists:filter(fun filelib:is_dir/1, Candidates) of
         [Dir | _] ->

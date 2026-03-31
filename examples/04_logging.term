@@ -1,0 +1,19 @@
+#{
+    table => <<"log_demo">>,
+    counters => [<<"ssh">>,<<"dropped">>],
+    chains => [
+        #{
+            name => <<"inbound">>,
+            type => filter,
+            hook => input,
+            priority => 0,
+            policy => drop,
+            rules => [
+                ct_established_accept,
+                {tcp_accept,22,<<"ssh">>},
+                icmp_accept,
+                {log_drop,<<"DENIED: ">>,<<"dropped">>}
+            ]
+        }
+    ]
+}.

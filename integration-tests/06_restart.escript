@@ -10,7 +10,7 @@ main(_) ->
     test_helper:boot(),
 
     Pid = test_helper:step("crasher mit restart=on_failure,3 spawnen", fun() ->
-        {ok, P} = erlkoenig_core:spawn(test_helper:demo("crasher"),
+        {ok, P} = erlkoenig:spawn(test_helper:demo("crasher"),
             #{ip => {10,0,0,10},
               args => [<<"1">>],             %% exits after 1 second
               restart => {on_failure, 3}}),   %% max 3 restarts
@@ -27,7 +27,7 @@ main(_) ->
     test_helper:step("Restart-Count pruefen", fun() ->
         case erlang:is_process_alive(Pid) of
             true ->
-                Info = erlkoenig_core:inspect(Pid),
+                Info = erlkoenig:inspect(Pid),
                 Count = maps:get(restart_count, Info, 0),
                 io:format("    restart_count=~p~n", [Count]),
                 case Count >= 1 of
@@ -49,7 +49,7 @@ main(_) ->
                 io:format("    Alle Restarts verbraucht~n"),
                 ok;
             true ->
-                erlkoenig_core:stop(Pid),
+                erlkoenig:stop(Pid),
                 io:format("    Manuell gestoppt (noch in Backoff)~n"),
                 ok
         end
@@ -63,7 +63,7 @@ watch_restarts(Pid, Last, N) ->
     case erlang:is_process_alive(Pid) of
         false -> ok;
         true ->
-            try erlkoenig_core:inspect(Pid) of
+            try erlkoenig:inspect(Pid) of
                 #{restart_count := Count} when Count > Last ->
                     io:format("    restart #~p~n", [Count]),
                     case Count >= 3 of

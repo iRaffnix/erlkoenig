@@ -11,7 +11,7 @@ main(_) ->
 
     Self = self(),
     Pid = test_helper:step("hello_output mit output=self() spawnen", fun() ->
-        {ok, P} = erlkoenig_core:spawn(test_helper:demo("hello_output"),
+        {ok, P} = erlkoenig:spawn(test_helper:demo("hello_output"),
             #{ip => {10,0,0,10}, output => Self}),
         io:format("    stdout/stderr -> Erlang process ~p~n", [Self]),
         {ok, P}
@@ -28,7 +28,7 @@ main(_) ->
         case erlang:is_process_alive(Pid) of
             false -> ok;
             true ->
-                erlkoenig_core:stop(Pid),
+                erlkoenig:stop(Pid),
                 ok
         end
     end),

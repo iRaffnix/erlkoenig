@@ -10,7 +10,7 @@ main(_) ->
     test_helper:boot(),
 
     Pid = test_helper:step("Echo-Server mit Port-Forwarding spawnen", fun() ->
-        {ok, P} = erlkoenig_core:spawn(test_helper:demo("echo_server"),
+        {ok, P} = erlkoenig:spawn(test_helper:demo("echo_server"),
             #{ip => {10,0,0,10}, args => [<<"7777">>],
               ports => [{9080, 7777}, {9081, 7777}]}),
         io:format("    Host:9080 -> 10.0.0.10:7777~n"),

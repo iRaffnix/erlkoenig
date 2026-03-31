@@ -1,0 +1,26 @@
+#{
+    config => "examples/04_logging.term",
+    chain => <<"inbound">>,
+    policy => drop,
+    packets => [
+        %% SSH: accepted, counter "ssh" incremented
+        #{name => <<"ssh_ok">>,
+          proto => tcp, saddr => {10,0,0,1}, dport => 22,
+          expect => accept},
+
+        %% ICMP: accepted by icmp_accept
+        #{name => <<"ping_ok">>,
+          proto => icmp, saddr => {10,0,0,1},
+          expect => accept},
+
+        %% HTTP: no rule, hits log_drop — logged then dropped
+        #{name => <<"http_logged_drop">>,
+          proto => tcp, saddr => {10,0,0,1}, dport => 80,
+          expect => drop},
+
+        %% UDP: same — hits log_drop
+        #{name => <<"udp_logged_drop">>,
+          proto => udp, saddr => {10,0,0,1}, dport => 53,
+          expect => drop}
+    ]
+}.

@@ -1,0 +1,35 @@
+#{
+    table => <<"multi_chain_demo">>,
+    chains => [
+        #{
+            name => <<"inbound">>,
+            type => filter,
+            hook => input,
+            priority => 0,
+            policy => drop,
+            rules => [
+                ct_established_accept,
+                {iifname_accept,<<"lo">>},
+                {iifname_jump,<<"eth0">>,<<"wan_rules">>},
+                {iifname_jump,<<"eth1">>,<<"lan_rules">>}
+            ]
+        },
+        #{
+            name => <<"wan_rules">>,
+            rules => [
+                {tcp_accept,22},
+                icmp_accept
+            ]
+        },
+        #{
+            name => <<"lan_rules">>,
+            rules => [
+                {tcp_accept,22},
+                {tcp_accept,80},
+                {tcp_accept,443},
+                {udp_accept,53},
+                icmp_accept
+            ]
+        }
+    ]
+}.

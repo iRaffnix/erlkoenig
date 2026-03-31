@@ -1,0 +1,27 @@
+#{
+    config => "examples/02_conntrack.term",
+    chain => <<"inbound">>,
+    policy => drop,
+    packets => [
+        %% Established connection: accepted by ct rule (rule 1)
+        #{name => <<"established_tcp">>,
+          proto => tcp, saddr => {10,0,0,1}, dport => 9999,
+          ct_state => established,
+          expect => accept},
+
+        %% New SSH: skips ct rule, accepted by tcp_accept (rule 2)
+        #{name => <<"new_ssh">>,
+          proto => tcp, saddr => {10,0,0,1}, dport => 22,
+          expect => accept},
+
+        %% ICMP ping: skips ct and tcp rules, accepted by icmp (rule 3)
+        #{name => <<"ping">>,
+          proto => icmp, saddr => {10,0,0,1},
+          expect => accept},
+
+        %% New TCP on random port: no rule matches, default drop
+        #{name => <<"random_port">>,
+          proto => tcp, saddr => {10,0,0,1}, dport => 12345,
+          expect => drop}
+    ]
+}.

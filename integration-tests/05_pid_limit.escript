@@ -10,7 +10,7 @@ main(_) ->
     test_helper:boot(),
 
     Pid = test_helper:step("syscall_fork mit PID-Limit=5 spawnen", fun() ->
-        {ok, P} = erlkoenig_core:spawn(test_helper:demo("syscall_fork"),
+        {ok, P} = erlkoenig:spawn(test_helper:demo("syscall_fork"),
             #{ip => {10,0,0,10},
               limits => #{pids => 5}}),
         io:format("    fork() should fail when limit reached~n"),
@@ -23,7 +23,7 @@ main(_) ->
     end),
 
     test_helper:step("Container beendet (fork limitiert)", fun() ->
-        Info = erlkoenig_core:inspect(Pid),
+        Info = erlkoenig:inspect(Pid),
         io:format("    state=~p, PID-Limit hat fork() gestoppt~n", [maps:get(state, Info)]),
         ok
     end),
@@ -33,7 +33,7 @@ main(_) ->
 
 wait_for_state(_Pid, 0) -> {error, timeout};
 wait_for_state(Pid, N) ->
-    try erlkoenig_core:inspect(Pid) of
+    try erlkoenig:inspect(Pid) of
         #{state := S} when S =:= stopped; S =:= failed ->
             ok;
         _ ->

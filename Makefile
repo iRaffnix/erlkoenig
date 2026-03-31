@@ -156,7 +156,7 @@ test-dsl:
 
 # ── Release ──────────────────────────────────────────────
 #
-# OTP Release: BEAM + ERTS + erlkoenig_core + erlkoenig_nft
+# OTP Release: BEAM + ERTS + erlkoenig + erlkoenig_nft
 # Kein Erlang auf dem Zielserver noetig.
 # C-Runtime ist NICHT enthalten — wird separat via install.sh installiert.
 # Discovery: {rt_path, auto} findet /opt/erlkoenig/rt/erlkoenig_rt
@@ -262,7 +262,7 @@ endif
 
 # ── Version Tag ─────────────────────────────────────────
 CURRENT_VERSION = $(shell grep -oP '(?<=\{release, \{erlkoenig, ")[^"]+' rebar.config)
-VERSION_FILES = rebar.config apps/erlkoenig_core/src/erlkoenig_core.app.src dsl/mix.exs install.sh
+VERSION_FILES = rebar.config apps/erlkoenig/src/erlkoenig.app.src dsl/mix.exs install.sh
 
 tag:
 ifndef VERSION
@@ -285,7 +285,7 @@ endif
 	fi
 	@echo "Bumping version: $(CURRENT_VERSION) -> $(VERSION)"
 	sed -i 's/{release, {erlkoenig, "[^"]*"}/{release, {erlkoenig, "$(VERSION)"}/' rebar.config
-	sed -i 's/{vsn, "[^"]*"}/{vsn, "$(VERSION)"}/' apps/erlkoenig_core/src/erlkoenig_core.app.src
+	sed -i 's/{vsn, "[^"]*"}/{vsn, "$(VERSION)"}/' apps/erlkoenig/src/erlkoenig.app.src
 	sed -i 's/version: "[^"]*"/version: "$(VERSION)"/' dsl/mix.exs
 	sed -i 's/--version v[0-9]*\.[0-9]*\.[0-9]*/--version v$(VERSION)/' install.sh
 	git add $(VERSION_FILES)

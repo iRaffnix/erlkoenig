@@ -1,0 +1,22 @@
+#{
+    table => <<"protocol_demo">>,
+    chains => [
+        #{
+            name => <<"inbound">>,
+            type => filter,
+            hook => input,
+            priority => 0,
+            policy => drop,
+            rules => [
+                ct_established_accept,
+                {tcp_accept,22},
+                {tcp_accept,80},
+                {tcp_accept,443},
+                {udp_accept,53},
+                {udp_accept,123},
+                icmp_accept,
+                {protocol_accept,icmpv6}
+            ]
+        }
+    ]
+}.

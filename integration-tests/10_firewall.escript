@@ -11,7 +11,7 @@ main(_) ->
 
     {P1, P2} = test_helper:step("2 Container mit unterschiedlichen Firewall-Regeln", fun() ->
         %% Container A: strict firewall, only port 7001 allowed
-        {ok, A} = erlkoenig_core:spawn(test_helper:demo("echo_server"),
+        {ok, A} = erlkoenig:spawn(test_helper:demo("echo_server"),
             #{ip => {10,0,0,10}, args => [<<"7001">>],
               firewall => #{chains => [#{
                   name => <<"inbound">>, priority => 0,
@@ -20,7 +20,7 @@ main(_) ->
                             {tcp_accept, 7001}]
               }]}}),
         %% Container B: open firewall (default rules allow everything)
-        {ok, B} = erlkoenig_core:spawn(test_helper:demo("echo_server"),
+        {ok, B} = erlkoenig:spawn(test_helper:demo("echo_server"),
             #{ip => {10,0,0,20}, args => [<<"7002">>]}),
         io:format("    A: strict (nur Port 7001)  B: open~n"),
         timer:sleep(1000),

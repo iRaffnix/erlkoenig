@@ -10,7 +10,7 @@ main(_) ->
     test_helper:boot(),
 
     Pid = test_helper:step("Container mit injected files spawnen", fun() ->
-        {ok, P} = erlkoenig_core:spawn(test_helper:demo("sleeper"),
+        {ok, P} = erlkoenig:spawn(test_helper:demo("sleeper"),
             #{ip => {10,0,0,10},
               args => [<<"30">>],
               files => #{
@@ -25,7 +25,7 @@ main(_) ->
 
     %% Verify files via /proc/<pid>/root (no cat needed)
     test_helper:step("Verify /etc/hostname", fun() ->
-        Info = erlkoenig_core:inspect(Pid),
+        Info = erlkoenig:inspect(Pid),
         OsPid = maps:get(os_pid, Info),
         Path = lists:flatten(io_lib:format("/proc/~p/root/etc/hostname", [OsPid])),
         {ok, Content} = file:read_file(Path),
@@ -38,7 +38,7 @@ main(_) ->
     end),
 
     test_helper:step("Verify /etc/config.json", fun() ->
-        Info = erlkoenig_core:inspect(Pid),
+        Info = erlkoenig:inspect(Pid),
         OsPid = maps:get(os_pid, Info),
         Path = lists:flatten(io_lib:format("/proc/~p/root/etc/config.json", [OsPid])),
         {ok, Content} = file:read_file(Path),

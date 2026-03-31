@@ -11,7 +11,7 @@ main(_) ->
 
     %% fork() should be blocked by strict seccomp
     test_helper:step("fork() mit seccomp=strict -> SIGSYS", fun() ->
-        {ok, P} = erlkoenig_core:spawn(test_helper:demo("syscall_fork"),
+        {ok, P} = erlkoenig:spawn(test_helper:demo("syscall_fork"),
             #{ip => {10,0,0,10}, seccomp => strict}),
         wait_for_stopped(P, 10),
         io:format("    fork() blocked by seccomp~n"),
@@ -20,7 +20,7 @@ main(_) ->
 
     %% mount() should be blocked
     test_helper:step("mount() mit seccomp=default -> SIGSYS", fun() ->
-        {ok, P2} = erlkoenig_core:spawn(test_helper:demo("syscall_mount"),
+        {ok, P2} = erlkoenig:spawn(test_helper:demo("syscall_mount"),
             #{ip => {10,0,0,11}, seccomp => default}),
         wait_for_stopped(P2, 10),
         io:format("    mount() blocked by seccomp~n"),
@@ -29,11 +29,11 @@ main(_) ->
 
     %% echo_server should work fine with default seccomp
     test_helper:step("echo_server mit seccomp=default -> funktioniert", fun() ->
-        {ok, P3} = erlkoenig_core:spawn(test_helper:demo("echo_server"),
+        {ok, P3} = erlkoenig:spawn(test_helper:demo("echo_server"),
             #{ip => {10,0,0,12}, args => [<<"7777">>], seccomp => default}),
         timer:sleep(1000),
         Result = test_helper:echo_test({10,0,0,12}, 7777, <<"Seccomp OK!">>),
-        erlkoenig_core:stop(P3),
+        erlkoenig:stop(P3),
         timer:sleep(300),
         Result
     end),
@@ -43,7 +43,7 @@ main(_) ->
 
 wait_for_stopped(_Pid, 0) -> {error, timeout};
 wait_for_stopped(Pid, N) ->
-    try erlkoenig_core:inspect(Pid) of
+    try erlkoenig:inspect(Pid) of
         #{state := S} when S =:= stopped; S =:= failed -> ok;
         _ -> timer:sleep(500), wait_for_stopped(Pid, N - 1)
     catch _:_ -> timer:sleep(500), wait_for_stopped(Pid, N - 1)

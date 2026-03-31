@@ -11,9 +11,9 @@ main(_) ->
 
     %% Spawn two echo servers
     {P1, P2} = test_helper:step("2 Echo-Server spawnen", fun() ->
-        {ok, A} = erlkoenig_core:spawn(test_helper:demo("echo_server"),
+        {ok, A} = erlkoenig:spawn(test_helper:demo("echo_server"),
             #{ip => {10,0,0,10}, args => [<<"7001">>]}),
-        {ok, B} = erlkoenig_core:spawn(test_helper:demo("echo_server"),
+        {ok, B} = erlkoenig:spawn(test_helper:demo("echo_server"),
             #{ip => {10,0,0,20}, args => [<<"7002">>]}),
         io:format("    A=10.0.0.10:7001  B=10.0.0.20:7002~n"),
         timer:sleep(1000),

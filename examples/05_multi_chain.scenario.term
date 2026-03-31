@@ -1,0 +1,30 @@
+#{
+    config => "examples/05_multi_chain.term",
+    chain => <<"inbound">>,
+    policy => drop,
+    packets => [
+        %% WAN SSH: hits iifname_jump -> wan_rules chain
+        #{name => <<"wan_ssh">>,
+          proto => tcp, saddr => {203,0,113,1}, dport => 22,
+          iifname => <<"eth0">>,
+          expect => jump},
+
+        %% LAN HTTP: hits iifname_jump -> lan_rules chain
+        #{name => <<"lan_http">>,
+          proto => tcp, saddr => {192,168,1,10}, dport => 80,
+          iifname => <<"eth1">>,
+          expect => jump},
+
+        %% Loopback: accepted by iifname_accept
+        #{name => <<"loopback">>,
+          proto => tcp, saddr => {127,0,0,1}, dport => 9999,
+          iifname => <<"lo">>,
+          expect => accept},
+
+        %% Unknown interface: no jump matches, default drop
+        #{name => <<"unknown_iface">>,
+          proto => tcp, saddr => {10,0,0,1}, dport => 22,
+          iifname => <<"wg0">>,
+          expect => drop}
+    ]
+}.

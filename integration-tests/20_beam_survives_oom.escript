@@ -10,7 +10,7 @@ main(_) ->
     test_helper:boot(),
 
     Pid1 = test_helper:step("Container mit 16MB Limit spawnen", fun() ->
-        {ok, P} = erlkoenig_core:spawn(test_helper:demo("mem_eater"),
+        {ok, P} = erlkoenig:spawn(test_helper:demo("mem_eater"),
             #{ip => {10,0,0,20},
               limits => #{memory => 16_000_000}}),
         io:format("    mem_eater mit 16MB Limit gestartet~n"),
@@ -22,7 +22,7 @@ main(_) ->
     end),
 
     test_helper:step("inspect auf toten Container", fun() ->
-        Info = erlkoenig_core:inspect(Pid1),
+        Info = erlkoenig:inspect(Pid1),
         State = maps:get(state, Info),
         Id = maps:get(id, Info),
         io:format("    id=~s state=~p~n", [Id, State]),
@@ -33,7 +33,7 @@ main(_) ->
     end),
 
     test_helper:step("list zeigt korrekten Zustand", fun() ->
-        List = erlkoenig_core:list(),
+        List = erlkoenig:list(),
         io:format("    list hat ~b Eintraege~n", [length(List)]),
         %% Find our dead container in the list
         Found = lists:any(fun(Entry) ->
@@ -54,11 +54,11 @@ main(_) ->
     end),
 
     Pid2 = test_helper:step("Zweiter Container spawnen", fun() ->
-        {ok, P} = erlkoenig_core:spawn(test_helper:demo("sleeper"),
+        {ok, P} = erlkoenig:spawn(test_helper:demo("sleeper"),
             #{ip => {10,0,0,21}, args => [<<"30">>],
               limits => #{memory => 32_000_000, pids => 64}}),
         timer:sleep(500),
-        Info = erlkoenig_core:inspect(P),
+        Info = erlkoenig:inspect(P),
         State = maps:get(state, Info),
         io:format("    state=~p~n", [State]),
         case State of
@@ -68,9 +68,9 @@ main(_) ->
     end),
 
     test_helper:step("Zweiten Container stoppen", fun() ->
-        ok = erlkoenig_core:stop(Pid2),
+        ok = erlkoenig:stop(Pid2),
         timer:sleep(500),
-        Info = erlkoenig_core:inspect(Pid2),
+        Info = erlkoenig:inspect(Pid2),
         State = maps:get(state, Info),
         io:format("    state=~p~n", [State]),
         case State of
@@ -84,7 +84,7 @@ main(_) ->
 
 wait_for_oom(_Pid, 0) -> {error, timeout};
 wait_for_oom(Pid, N) ->
-    try erlkoenig_core:inspect(Pid) of
+    try erlkoenig:inspect(Pid) of
         #{state := S} when S =:= stopped; S =:= failed ->
             io:format("    OOM-Kill erkannt (state=~p)~n", [S]),
             ok;

@@ -60,34 +60,31 @@ validate(TermFile) ->
             Err
     end.
 
--doc "Load a config file and spawn all containers.".
+-doc """
+Load a config file. Idempotent: reconciles running state against config.
+- Containers in config but not running → start
+- Containers running but not in config → stop
+- Containers in both → keep (unless config changed)
+Can be called multiple times with the same or different files.
+""".
 -spec load(file:filename()) -> {ok, [{binary(), pid()}]} | {error, term()}.
 load(TermFile) ->
     maybe
         {ok, Config} ?= parse(TermFile),
         ok ?= validate_config(Config),
         _ = ensure_config_tab(),
-        Result = apply_config(Config),
+        OldConfig = get_stored_config(TermFile),
+        Result = apply_config_with_reconciliation(OldConfig, Config),
         store_config(TermFile, Config),
         Result
     else
         {error, _} = Err -> Err
     end.
 
--doc "Reload a config file. Stops removed containers, starts new ones.".
+-doc "Reload a config file. Alias for load/1 (both are idempotent).".
 -spec reload(file:filename()) -> {ok, [{binary(), pid()}]} | {error, term()}.
 reload(TermFile) ->
-    maybe
-        {ok, NewConfig} ?= parse(TermFile),
-        ok ?= validate_config(NewConfig),
-        _ = ensure_config_tab(),
-        OldConfig = get_stored_config(TermFile),
-        apply_delta(OldConfig, NewConfig),
-        store_config(TermFile, NewConfig),
-        {ok, []}
-    else
-        {error, _} = Err -> Err
-    end.
+    load(TermFile).
 
 %%====================================================================
 %% Internal -- Validation
@@ -142,8 +139,9 @@ validate_containers([Bad | _]) ->
 %% Internal -- Apply
 %%====================================================================
 
--spec apply_config(map()) -> {ok, [{binary(), pid()}]}.
-apply_config(Config) ->
+-spec apply_config_with_reconciliation(map() | undefined, map()) ->
+    {ok, [{binary(), pid()}]}.
+apply_config_with_reconciliation(OldConfig, Config) ->
     Report = #{},
 
     %% 1. Validate images
@@ -168,17 +166,46 @@ apply_config(Config) ->
                 end,
     lists:foreach(fun start_watch/1, WatchList),
 
-    %% 6. Reconcile containers
+    %% 6. Reconcile containers (delta)
     AllContainers = flatten_containers(Config),
-    Results = lists:filtermap(fun spawn_container/1, AllContainers),
+    DeclaredNames = [iolist_to_binary(maps:get(name, C)) || C <- AllContainers],
+    RunningNames = container_names_from_old(OldConfig),
+
+    %% Stop removed containers
+    ToStop = RunningNames -- DeclaredNames,
+    lists:foreach(fun(Name) ->
+        logger:info("erlkoenig_config: stopping removed container ~s", [Name]),
+        stop_by_name(Name)
+    end, ToStop),
+
+    %% Start new containers (not already running)
+    ToStart = DeclaredNames -- RunningNames,
+    Results = lists:filtermap(fun(Ct) ->
+        Name = iolist_to_binary(maps:get(name, Ct)),
+        case lists:member(Name, ToStart) of
+            true -> spawn_container(Ct);
+            false ->
+                logger:debug("erlkoenig_config: ~s already running, keeping", [Name]),
+                false
+        end
+    end, AllContainers),
 
     %% 7. Apply steering
     Report4 = maybe_apply_steering(Config, AllContainers, Report3),
 
     %% 8. Log report
-    log_deploy_report(Report4, length(Results), length(AllContainers)),
+    Started = length(Results),
+    Stopped = length(ToStop),
+    Kept = length(DeclaredNames) - Started,
+    logger:info("erlkoenig_config: reconciled — ~p started, ~p stopped, ~p kept",
+                [Started, Stopped, Kept]),
+    log_deploy_report(Report4, Started, length(AllContainers)),
 
     {ok, Results}.
+
+-spec container_names_from_old(map() | undefined) -> [binary()].
+container_names_from_old(undefined) -> [];
+container_names_from_old(Config) -> container_names(Config).
 
 %% Flatten containers from zones or legacy format
 -spec flatten_containers(map()) -> [map()].
@@ -481,33 +508,6 @@ copy_if(Key, From, To) ->
 %%====================================================================
 %% Internal -- Delta / Reload
 %%====================================================================
-
--spec apply_delta(map() | undefined, map()) -> ok.
-apply_delta(undefined, NewConfig) ->
-    _ = apply_config(NewConfig),
-    ok;
-apply_delta(OldConfig, NewConfig) ->
-    OldNames = container_names(OldConfig),
-    NewNames = container_names(NewConfig),
-
-    %% Stop removed containers
-    Removed = OldNames -- NewNames,
-    lists:foreach(fun(Name) ->
-        stop_by_name(Name)
-    end, Removed),
-
-    %% Start added containers
-    Added = NewNames -- OldNames,
-    NewContainers = maps:get(containers, NewConfig, []),
-    lists:foreach(fun(Ct) ->
-        Name = iolist_to_binary(maps:get(name, Ct)),
-        case lists:member(Name, Added) of
-            true -> spawn_container(Ct);
-            false -> ok
-        end
-    end, NewContainers),
-
-    ok.
 
 -spec container_names(map()) -> [binary()].
 container_names(Config) ->

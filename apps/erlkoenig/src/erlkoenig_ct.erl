@@ -86,8 +86,8 @@ States:
     gid           = 0  :: non_neg_integer(),
     ip            :: inet:ip4_address() | undefined,
     zone          = default :: atom(),
-    port          :: port() | undefined,
-    comm_mode     = port :: port | socket,
+    %% port field removed — socket mode only (no open_port)
+    comm_mode     = socket :: socket,
     sock          :: gen_tcp:socket() | undefined,
     socket_path   :: binary() | undefined,
     os_pid        :: non_neg_integer() | undefined,
@@ -230,8 +230,7 @@ init({recover, ContainerId, #{socket_path := SocketPath, os_pid := OsPid} = Info
 init({BinaryPath, Opts}) when is_binary(BinaryPath), is_map(Opts) ->
     init({normal, BinaryPath, Opts}).
 
-terminate(_Reason, _State, #ct_data{port = Port, sock = Sock, socket_path = SockPath}) ->
-    safe_port_close(Port),
+terminate(_Reason, _State, #ct_data{sock = Sock, socket_path = SockPath}) ->
     safe_sock_close(Sock),
     cleanup_socket_file(SockPath),
     ok.
@@ -251,16 +250,16 @@ creating(info, do_spawn, Data) ->
     creating_do_spawn(Data2);
 
 %% Port mode: data from port
-creating(info, {Port, {data, Reply}}, #ct_data{port = Port, comm_mode = port,
+creating(info, {_Port, {data, Reply}}, #ct_data{comm_mode = socket,
                                                 handshake = HS} = Data) ->
     creating_handle_rt_data(Reply, HS, Data);
 creating(info, {tcp, Sock, Reply}, #ct_data{sock = Sock, comm_mode = socket,
                                              handshake = HS} = Data) ->
     creating_handle_rt_data(Reply, HS, Data);
 
-creating(info, {Port, {exit_status, Status}}, #ct_data{port = Port} = Data) ->
+creating(info, {_Port, {exit_status, Status}}, #ct_data{} = Data) ->
     {next_state, failed,
-     Data#ct_data{port = undefined, error_reason = {port_died, Status}}};
+     Data#ct_data{error_reason = {port_died, Status}}};
 
 creating(info, {tcp_closed, Sock}, #ct_data{sock = Sock} = Data) ->
     {next_state, failed,
@@ -282,7 +281,7 @@ creating_do_spawn(#ct_data{comm_mode = port} = Data) ->
                      [{packet, 4}, binary, exit_status, use_stdio]),
     %% Protocol handshake
     port_command(Port, erlkoenig_proto:encode_handshake()),
-    {keep_state, Data#ct_data{port = Port},
+    {keep_state, Data#ct_data{},
      [{state_timeout, ?SPAWN_TIMEOUT, spawn_timeout}]};
 creating_do_spawn(#ct_data{comm_mode = socket, id = ContainerId} = Data) ->
     SocketPath = make_socket_path(ContainerId),
@@ -385,7 +384,7 @@ namespace_ready(enter, _OldState, _Data) ->
 namespace_ready(info, do_container_setup, Data) ->
     do_container_setup(Data);
 
-namespace_ready(info, {Port, {data, Reply}}, #ct_data{port = Port, comm_mode = port} = Data) ->
+namespace_ready(info, {_Port, {data, Reply}}, #ct_data{ comm_mode = port} = Data) ->
     namespace_ready_handle_data(Reply, Data);
 namespace_ready(info, {tcp, Sock, Reply}, #ct_data{sock = Sock, comm_mode = socket} = Data) ->
     namespace_ready_handle_data(Reply, Data);
@@ -400,9 +399,9 @@ namespace_ready({call, _From}, stop_container, _Data) ->
 namespace_ready({call, From}, get_info, Data) ->
     {keep_state_and_data, [{reply, From, build_info(namespace_ready, Data)}]};
 
-namespace_ready(info, {Port, {exit_status, Status}}, #ct_data{port = Port} = Data) ->
+namespace_ready(info, {_Port, {exit_status, Status}}, #ct_data{} = Data) ->
     {next_state, failed,
-     Data#ct_data{port = undefined, error_reason = {port_died, Status}}};
+     Data#ct_data{error_reason = {port_died, Status}}};
 
 namespace_ready(info, {tcp_closed, Sock}, #ct_data{sock = Sock} = Data) ->
     {next_state, failed,
@@ -427,15 +426,15 @@ namespace_ready_handle_data(Reply, Data) ->
 starting(enter, _OldState, _Data) ->
     {keep_state_and_data, [{state_timeout, ?GO_TIMEOUT, go_timeout}]};
 
-starting(info, {Port, {data, Reply}}, #ct_data{port = Port, comm_mode = port} = Data) ->
+starting(info, {_Port, {data, Reply}}, #ct_data{ comm_mode = port} = Data) ->
     starting_handle_data(Reply, Data);
 starting(info, {tcp, Sock, Reply}, #ct_data{sock = Sock, comm_mode = socket} = Data) ->
     starting_handle_data(Reply, Data);
 
-starting(info, {Port, {exit_status, Status}}, #ct_data{port = Port} = Data) ->
+starting(info, {_Port, {exit_status, Status}}, #ct_data{} = Data) ->
     Data2 = maybe_reply_go_error(Data, {port_died, Status}),
     {next_state, failed,
-     Data2#ct_data{port = undefined, error_reason = {port_died, Status}}};
+     Data2#ct_data{error_reason = {port_died, Status}}};
 
 starting(info, {tcp_closed, Sock}, #ct_data{sock = Sock} = Data) ->
     Data2 = maybe_reply_go_error(Data, socket_closed),
@@ -466,13 +465,13 @@ running(enter, _OldState, Data) ->
     audit_volumes_mounted(Data),
     {keep_state, Data#ct_data{started_at = erlang:monotonic_time(millisecond)}};
 
-running(info, {Port, {data, Reply}}, #ct_data{port = Port, comm_mode = port} = Data) ->
+running(info, {_Port, {data, Reply}}, #ct_data{ comm_mode = port} = Data) ->
     running_handle_data(Reply, Data);
 running(info, {tcp, Sock, Reply}, #ct_data{sock = Sock, comm_mode = socket} = Data) ->
     running_handle_data(Reply, Data);
 
-running(info, {Port, {exit_status, _Status}}, #ct_data{port = Port} = Data) ->
-    {next_state, stopped, Data#ct_data{port = undefined}};
+running(info, {_Port, {exit_status, _Status}}, #ct_data{} = Data) ->
+    {next_state, stopped, Data};
 
 running(info, {tcp_closed, Sock}, #ct_data{sock = Sock, comm_mode = socket} = Data) ->
     %% Socket lost but container may still be alive (C runtime survives)
@@ -518,14 +517,14 @@ running(cast, {send_input, InputData}, Data) ->
 stopping(enter, _OldState, _Data) ->
     {keep_state_and_data, [{state_timeout, ?STOP_TIMEOUT, force_kill}]};
 
-stopping(info, {Port, {data, Reply}}, #ct_data{port = Port, comm_mode = port} = Data) ->
+stopping(info, {_Port, {data, Reply}}, #ct_data{ comm_mode = port} = Data) ->
     stopping_handle_data(Reply, Data);
 stopping(info, {tcp, Sock, Reply}, #ct_data{sock = Sock, comm_mode = socket} = Data) ->
     stopping_handle_data(Reply, Data);
 
-stopping(info, {Port, {exit_status, _Status}}, #ct_data{port = Port} = Data) ->
+stopping(info, {_Port, {exit_status, _Status}}, #ct_data{} = Data) ->
     Data2 = maybe_reply_stop(Data, ok),
-    {next_state, stopped, Data2#ct_data{port = undefined}};
+    {next_state, stopped, Data2};
 
 stopping(info, {tcp_closed, Sock}, #ct_data{sock = Sock} = Data) ->
     Data2 = maybe_reply_stop(Data, ok),
@@ -535,8 +534,7 @@ stopping(info, {tcp_error, Sock, _Reason}, #ct_data{sock = Sock} = Data) ->
     Data2 = maybe_reply_stop(Data, ok),
     {next_state, stopped, Data2#ct_data{sock = undefined}};
 
-stopping(state_timeout, force_kill, Data) when Data#ct_data.port =/= undefined;
-                                                Data#ct_data.sock =/= undefined ->
+stopping(state_timeout, force_kill, Data) when Data#ct_data.sock =/= undefined ->
     send_to_rt(erlkoenig_proto:encode_cmd_kill(9), Data),
     {keep_state_and_data, [{state_timeout, ?STOP_TIMEOUT, give_up}]};
 
@@ -615,7 +613,7 @@ stopped(enter, _OldState, Data) ->
     pg:leave(erlkoenig_pg, erlkoenig_cts, self()),
     firewall_remove(Data#ct_data.id),
     cleanup_fuse(Data),
-    safe_port_close(Data#ct_data.port),
+    
     safe_sock_close(Data#ct_data.sock),
     cleanup_socket_file(Data#ct_data.socket_path),
     dns_unregister(Data),
@@ -623,7 +621,7 @@ stopped(enter, _OldState, Data) ->
     audit_volumes_released(Data),
     notify_stopped(Data),
     self() ! check_restart,
-    {keep_state, Data#ct_data{port = undefined, sock = undefined,
+    {keep_state, Data#ct_data{sock = undefined,
                               fuse_mount = undefined}};
 
 stopped(info, check_restart, Data) ->
@@ -688,7 +686,7 @@ failed(enter, _OldState, Data) ->
     pg:leave(erlkoenig_pg, erlkoenig_cts, self()),
     firewall_remove(Data#ct_data.id),
     cleanup_fuse(Data),
-    safe_port_close(Data#ct_data.port),
+    
     safe_sock_close(Data#ct_data.sock),
     cleanup_socket_file(Data#ct_data.socket_path),
     dns_unregister(Data),
@@ -698,7 +696,7 @@ failed(enter, _OldState, Data) ->
     logger:error("container ~s failed: ~p",
                  [Data#ct_data.id, Data#ct_data.error_reason]),
     self() ! check_restart,
-    {keep_state, Data#ct_data{port = undefined, sock = undefined,
+    {keep_state, Data#ct_data{sock = undefined,
                               fuse_mount = undefined}};
 
 failed(info, check_restart, Data) ->
@@ -809,11 +807,11 @@ disconnected(state_timeout, try_reconnect, Data) ->
             {keep_state, Data, [{state_timeout, 1000, try_reconnect}]}
     end;
 
-disconnected(info, {Port, {exit_status, Status}}, #ct_data{port = Port} = Data) ->
+disconnected(info, {_Port, {exit_status, Status}}, #ct_data{} = Data) ->
     %% C runtime process died while disconnected
     logger:info("container ~s: C runtime died while disconnected (status ~p)",
                 [Data#ct_data.id, Status]),
-    {next_state, stopped, Data#ct_data{port = undefined}};
+    {next_state, stopped, Data};
 
 disconnected({call, From}, stop_container, Data) ->
     %% Can't send SIGTERM via socket, use kill directly
@@ -1143,15 +1141,7 @@ cgroup_path_for_id(Id) ->
         <<>>
     end.
 
-%% -- Port cleanup -------------------------------------------------
-
--spec safe_port_close(port() | undefined) -> ok.
-safe_port_close(Port) when is_port(Port) ->
-    try port_close(Port)
-    catch error:badarg -> ok
-    end;
-safe_port_close(_) ->
-    ok.
+%% -- Socket cleanup -----------------------------------------------
 
 -spec safe_sock_close(gen_tcp:socket() | undefined) -> ok.
 safe_sock_close(undefined) -> ok;
@@ -1167,23 +1157,18 @@ cleanup_socket_file(Path) ->
 
 %% -- Communication abstraction ------------------------------------
 
--doc "Send data to C runtime (works for both port and socket mode).".
--spec send_to_rt(iodata(), #ct_data{}) -> ok | true.
-send_to_rt(Bin, #ct_data{comm_mode = port, port = Port}) when is_port(Port) ->
-    port_command(Port, Bin);
-send_to_rt(Bin, #ct_data{comm_mode = socket, sock = Sock}) when Sock =/= undefined ->
+-doc "Send data to C runtime via socket.".
+-spec send_to_rt(iodata(), #ct_data{}) -> ok.
+send_to_rt(Bin, #ct_data{sock = Sock}) when Sock =/= undefined ->
     ok = gen_tcp:send(Sock, Bin),
     ok;
 send_to_rt(_Bin, _Data) ->
     ok.
 
 -doc "Return the I/O handle for external modules (e.g. erlkoenig_net).".
-%% In port mode: the port. In socket mode: {socket, Sock} tuple.
--spec rt_io_handle(#ct_data{}) -> port() | {socket, gen_tcp:socket()} | undefined.
-rt_io_handle(#ct_data{comm_mode = socket, sock = Sock}) when Sock =/= undefined ->
+-spec rt_io_handle(#ct_data{}) -> {socket, gen_tcp:socket()} | undefined.
+rt_io_handle(#ct_data{sock = Sock}) when Sock =/= undefined ->
     {socket, Sock};
-rt_io_handle(#ct_data{comm_mode = port, port = Port}) ->
-    Port;
 rt_io_handle(_) ->
     undefined.
 
@@ -1460,13 +1445,7 @@ setup_metrics(Data, Id) ->
 -doc "Send a command and synchronously wait for the reply.".
 -spec sync_rt_command(#ct_data{}, iodata(), non_neg_integer()) ->
     {ok, binary()} | timeout.
-sync_rt_command(#ct_data{comm_mode = port, port = Port}, Cmd, Timeout) ->
-    port_command(Port, Cmd),
-    receive
-        {Port, {data, Reply}} -> {ok, Reply}
-    after Timeout -> timeout
-    end;
-sync_rt_command(#ct_data{comm_mode = socket, sock = Sock}, Cmd, Timeout) ->
+sync_rt_command(#ct_data{sock = Sock}, Cmd, Timeout) when Sock =/= undefined ->
     ok = inet:setopts(Sock, [{active, false}]),
     ok = gen_tcp:send(Sock, Cmd),
     Result = case gen_tcp:recv(Sock, 0, Timeout) of

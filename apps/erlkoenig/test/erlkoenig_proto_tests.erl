@@ -27,14 +27,19 @@ decode_reply_ok_legacy_test() ->
 
 decode_reply_error_test() ->
     Msg = <<"ENOENT">>,
-    %% Tag + Version + Code:32 + MsgLen:16 + Msg
-    Bin = <<16#02, 1, (-2):32/big-signed, 6:16/big, Msg/binary>>,
+    %% Tag + Version + TLV(type=1, errno) + TLV(type=2, message)
+    Bin = <<16#02, 1,
+            1:16/big, 4:16/big, (-2):32/big-signed,
+            2:16/big, (byte_size(Msg)):16/big, Msg/binary>>,
     ?assertMatch({ok, reply_error, #{code := -2, message := Msg}},
                  erlkoenig_proto:decode(Bin)).
 
 decode_reply_container_pid_test() ->
     Ns = <<"/proc/42/ns/net">>,
-    Bin = <<16#03, 1, 42:32/big, (byte_size(Ns)):16/big, Ns/binary>>,
+    %% Tag + Version + TLV(type=1, pid) + TLV(type=2, netns)
+    Bin = <<16#03, 1,
+            1:16/big, 4:16/big, 42:32/big,
+            2:16/big, (byte_size(Ns)):16/big, Ns/binary>>,
     ?assertMatch({ok, reply_container_pid, #{child_pid := 42, netns_path := Ns}},
                  erlkoenig_proto:decode(Bin)).
 
@@ -42,12 +47,17 @@ decode_reply_ready_test() ->
     ?assertEqual({ok, reply_ready, #{}}, erlkoenig_proto:decode(<<16#04, 1>>)).
 
 decode_reply_exited_test() ->
-    Bin = <<16#05, 1, 0:32/big-signed, 0:8>>,
+    %% Tag + Version + TLV(type=1, exit_code) + TLV(type=2, signal)
+    Bin = <<16#05, 1,
+            1:16/big, 4:16/big, 0:32/big-signed,
+            2:16/big, 1:16/big, 0:8>>,
     ?assertEqual({ok, reply_exited, #{exit_code => 0, term_signal => 0}},
                  erlkoenig_proto:decode(Bin)).
 
 decode_reply_exited_signal_test() ->
-    Bin = <<16#05, 1, 139:32/big-signed, 11:8>>,
+    Bin = <<16#05, 1,
+            1:16/big, 4:16/big, 139:32/big-signed,
+            2:16/big, 1:16/big, 11:8>>,
     ?assertEqual({ok, reply_exited, #{exit_code => 139, term_signal => 11}},
                  erlkoenig_proto:decode(Bin)).
 

@@ -31,7 +31,8 @@ batches.
 
 -export([setup_table/0, setup_table/1, teardown_table/0,
          add_container/3, add_container/4, add_container/5,
-         remove_container/1]).
+         remove_container/1,
+         apply_zone_allows/2]).
 
 %% NFPROTO_INET = 1
 -define(FAMILY, 1).
@@ -523,3 +524,108 @@ ensure_ets() ->
         _Tid ->
             ok
     end.
+
+%%====================================================================
+%% Zone allow directives → nftables rules
+%%====================================================================
+
+-doc """
+Apply zone-level network policy to the erlkoenig_ct forward chain.
+
+Translates allow directives into nftables rules:
+  dns              → allow UDP/TCP port 53 to gateway IP
+  gateway          → allow all traffic to gateway IP
+  {gateway, Ports} → allow specific TCP ports to gateway IP
+  {internet, Via}  → masquerade via interface + allow forwarding
+  {zone, Name}     → allow inter-zone forwarding (not yet implemented)
+
+Rules are added to the forward chain after ct_established_accept.
+""".
+-spec apply_zone_allows(map(), binary()) -> ok | {error, term()}.
+apply_zone_allows(#{allows := Allows, gateway := Gateway}, BridgeBin)
+  when is_list(Allows) ->
+    GwIp = ip_to_binary(Gateway),
+    Rules = lists:flatmap(fun(Allow) ->
+        allow_to_rules(Allow, GwIp, BridgeBin)
+    end, Allows),
+    case Rules of
+        [] ->
+            logger:info("[firewall] zone ~s: no allows, fully isolated", [BridgeBin]),
+            ok;
+        _ ->
+            RuleFuns = [nft_encode:rule_fun(inet, ?TABLE, ?FORWARD_CHAIN, R) || R <- Rules],
+            case nfnl_server:apply_msgs(?SERVER, RuleFuns) of
+                ok ->
+                    logger:info("[firewall] zone ~s: ~p allow rules applied",
+                               [BridgeBin, length(Rules)]),
+                    ok;
+                {error, Reason} ->
+                    logger:warning("[firewall] zone ~s: allow rules failed: ~p",
+                                  [BridgeBin, Reason]),
+                    {error, Reason}
+            end
+    end;
+apply_zone_allows(_, _) ->
+    ok.
+
+%% Translate a single allow directive into nftables rule expressions.
+-spec allow_to_rules(atom() | tuple(), binary(), binary()) -> [list()].
+allow_to_rules(dns, GwIp, _Bridge) ->
+    %% Allow UDP+TCP port 53 to gateway (DNS)
+    [
+        %% UDP DNS
+        [nft_expr_ir:meta(nfproto, 1),
+         nft_expr_ir:cmp(eq, 1, <<2>>),
+         nft_expr_ir:ip_daddr(1),
+         nft_expr_ir:cmp(eq, 1, GwIp),
+         nft_expr_ir:meta(l4proto, 1),
+         nft_expr_ir:cmp(eq, 1, <<17>>),
+         nft_expr_ir:payload(transport, 2, 2, 1),
+         nft_expr_ir:cmp(eq, 1, <<53:16/big>>),
+         nft_expr_ir:accept()],
+        %% TCP DNS
+        [nft_expr_ir:meta(nfproto, 1),
+         nft_expr_ir:cmp(eq, 1, <<2>>),
+         nft_expr_ir:ip_daddr(1),
+         nft_expr_ir:cmp(eq, 1, GwIp),
+         nft_expr_ir:meta(l4proto, 1),
+         nft_expr_ir:cmp(eq, 1, <<6>>),
+         nft_expr_ir:payload(transport, 2, 2, 1),
+         nft_expr_ir:cmp(eq, 1, <<53:16/big>>),
+         nft_expr_ir:accept()]
+    ];
+allow_to_rules(gateway, GwIp, _Bridge) ->
+    %% Allow all traffic to gateway IP
+    [[nft_expr_ir:meta(nfproto, 1),
+      nft_expr_ir:cmp(eq, 1, <<2>>),
+      nft_expr_ir:ip_daddr(1),
+      nft_expr_ir:cmp(eq, 1, GwIp),
+      nft_expr_ir:accept()]];
+allow_to_rules({gateway, Ports}, GwIp, _Bridge) when is_list(Ports) ->
+    %% Allow specific TCP ports to gateway IP
+    lists:map(fun(Port) ->
+        [nft_expr_ir:meta(nfproto, 1),
+         nft_expr_ir:cmp(eq, 1, <<2>>),
+         nft_expr_ir:ip_daddr(1),
+         nft_expr_ir:cmp(eq, 1, GwIp),
+         nft_expr_ir:meta(l4proto, 1),
+         nft_expr_ir:cmp(eq, 1, <<6>>),
+         nft_expr_ir:payload(transport, 2, 2, 1),
+         nft_expr_ir:cmp(eq, 1, <<Port:16/big>>),
+         nft_expr_ir:accept()]
+    end, Ports);
+allow_to_rules({internet, Via}, _GwIp, _Bridge) ->
+    %% Allow forwarding to external interface (masquerade handled separately)
+    ViaB = iolist_to_binary(Via),
+    [[nft_expr_ir:meta(oifname, 1),
+      nft_expr_ir:cmp(eq, 1, pad_ifname(ViaB)),
+      nft_expr_ir:accept()]];
+allow_to_rules({zone, _TargetZone}, _GwIp, _Bridge) ->
+    %% Inter-zone forwarding — TODO
+    logger:warning("[firewall] allow :zone not yet implemented"),
+    [];
+allow_to_rules(Unknown, _GwIp, _Bridge) ->
+    logger:warning("[firewall] unknown allow directive: ~p", [Unknown]),
+    [].
+
+%% pad_ifname/1 defined above (shared with zone masq rules).

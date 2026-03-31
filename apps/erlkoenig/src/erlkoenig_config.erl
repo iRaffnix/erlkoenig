@@ -152,6 +152,13 @@ apply_config_with_reconciliation(OldConfig, Config) ->
     Zones = maps:get(zones, Config, []),
     Report2 = ensure_zones(Zones, Report1),
 
+    %% 2b. Apply zone network policy (allow directives → nftables)
+    lists:foreach(fun(#{allows := _, bridge := Bridge} = Zone) ->
+        BridgeBin = iolist_to_binary(Bridge),
+        erlkoenig_firewall_nft:apply_zone_allows(Zone, BridgeBin);
+       (_) -> ok
+    end, Zones),
+
     %% 3. Apply host firewall
     Report3 = maybe_apply_firewall(Config, Report2),
 

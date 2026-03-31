@@ -130,7 +130,24 @@ defmodule ErlkoenigNft.Firewall do
     end
   end
 
-  # --- Rule macros ---
+  # --- Generic rule macro ---
+
+  @doc """
+  Generic rule builder. All firewall rules go through this macro.
+
+      rule :accept, tcp: 22, limit: {25, burst: 5}, counter: :ssh
+      rule :accept, ct: :established
+      rule :drop, set: "blocklist", counter: :banned
+      rule :masquerade, oif_neq: "bridge0"
+  """
+  defmacro rule(verdict, opts \\ []) do
+    quote do
+      @fw_builder Builder.push_rule(@fw_builder,
+        Builder.build_rule(unquote(verdict), unquote(opts)))
+    end
+  end
+
+  # --- Legacy rule macros (kept for backward compatibility) ---
 
   defmacro accept(:established) do
     quote do: @fw_builder Builder.push_rule(@fw_builder, Builder.ct_established_accept())

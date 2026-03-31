@@ -786,6 +786,11 @@ build_chain_rules(Table, ChainConfig, Config) ->
 
 -spec build_rule(binary(), binary(), term(), map()) -> fun() | [fun()].
 
+%% Generic rule from DSL
+build_rule(Table, Chain, {rule, Verdict, Opts}, _Config) ->
+    Exprs = erlkoenig_firewall_nft:compile_generic_rule(Verdict, Opts),
+    encode_rule(Table, Chain, Exprs);
+
 %% Simple rules → single term list → single msg_fun
 build_rule(Table, Chain, ct_established_accept, _Config) ->
     encode_rule(Table, Chain, nft_rules:ct_established_accept());

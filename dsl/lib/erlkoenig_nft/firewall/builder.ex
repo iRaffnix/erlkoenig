@@ -265,6 +265,53 @@ defmodule ErlkoenigNft.Firewall.Builder do
     update_in(state, [:zone_masquerades], &(&1 ++ [{from, to}]))
   end
 
+  # --- Generic rule builder ---
+
+  @doc """
+  Build a generic rule from a verdict and keyword options.
+
+  Options:
+    ct: :established         — match conntrack state
+    iif: "name"              — match input interface (wildcard ok)
+    oif: "name"              — match output interface (wildcard ok)
+    oif_neq: "name"          — match output interface NOT equal
+    icmp: true               — match ICMP protocol
+    tcp: port                — match TCP destination port
+    udp: port                — match UDP destination port
+    saddr: {a,b,c,d,prefix}  — match source IP/subnet
+    daddr: {a,b,c,d,prefix}  — match destination IP/subnet
+    set: "name"              — match against named set (ip saddr @name)
+    log: "prefix"            — log with prefix before verdict
+    limit: {rate, burst: n}  — rate limit
+    counter: :name           — count packets/bytes
+
+  Returns an Erlang term tuple understood by erlkoenig_firewall_nft:compile_rule/1.
+  """
+  def build_rule(verdict, opts) when is_atom(verdict) and is_list(opts) do
+    {:rule, verdict, Map.new(opts, fn
+      {k, v} when is_atom(k) -> {k, normalize_rule_opt(k, v)}
+    end)}
+  end
+
+  defp normalize_rule_opt(:counter, v) when is_atom(v), do: to_string(v)
+  defp normalize_rule_opt(:counter, v) when is_binary(v), do: v
+  defp normalize_rule_opt(:iif, v), do: to_string(v)
+  defp normalize_rule_opt(:oif, v), do: to_string(v)
+  defp normalize_rule_opt(:oif_neq, v), do: to_string(v)
+  defp normalize_rule_opt(:set, v), do: to_string(v)
+  defp normalize_rule_opt(:log, v), do: to_string(v)
+  defp normalize_rule_opt(:saddr, {a, b, c, d, prefix}), do: {a, b, c, d, prefix}
+  defp normalize_rule_opt(:saddr, {a, b, c, d}), do: {a, b, c, d, 32}
+  defp normalize_rule_opt(:daddr, {a, b, c, d, prefix}), do: {a, b, c, d, prefix}
+  defp normalize_rule_opt(:daddr, {a, b, c, d}), do: {a, b, c, d, 32}
+  defp normalize_rule_opt(:limit, {rate, burst_opts}) when is_list(burst_opts) do
+    %{rate: rate, burst: Keyword.fetch!(burst_opts, :burst)}
+  end
+  defp normalize_rule_opt(:limit, {rate, burst}) when is_integer(burst) do
+    %{rate: rate, burst: burst}
+  end
+  defp normalize_rule_opt(_, v), do: v
+
   # --- Rule accumulator (used by chain macro) ---
 
   def push_rule(state, rule) do

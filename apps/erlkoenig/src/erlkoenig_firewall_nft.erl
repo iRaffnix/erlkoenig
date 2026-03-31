@@ -32,7 +32,8 @@ batches.
 -export([setup_table/0, setup_table/1, teardown_table/0,
          add_container/3, add_container/4, add_container/5,
          remove_container/1,
-         apply_zone_allows/2]).
+         apply_zone_allows/2,
+         compile_generic_rule/2]).
 
 %% NFPROTO_INET = 1
 -define(FAMILY, 1).
@@ -446,6 +447,11 @@ counters_from_term(_) ->
 
 -doc "Convert a single DSL rule atom/tuple to nft_rules expression list.".
 -spec compile_rule(atom() | tuple()) -> list().
+
+%% Generic rule: {rule, Verdict, #{opt => val, ...}}
+compile_rule({rule, Verdict, Opts}) when is_map(Opts) ->
+    compile_generic_rule(Verdict, Opts);
+
 compile_rule(ct_established_accept) ->
     nft_rules:ct_established_accept();
 compile_rule(icmp_accept) ->
@@ -629,3 +635,176 @@ allow_to_rules(Unknown, _GwIp, _Bridge) ->
     [].
 
 %% pad_ifname/1 defined above (shared with zone masq rules).
+
+%%====================================================================
+%% Generic rule compiler
+%%====================================================================
+
+-doc """
+Compile a generic rule {rule, Verdict, Opts} into nft_expr_ir expressions.
+
+Opts is a map with match conditions and modifiers. The compiler builds
+expressions in order: matches first, then modifiers, then verdict.
+""".
+-spec compile_generic_rule(atom(), map()) -> list().
+compile_generic_rule(Verdict, Opts) ->
+    Exprs = [],
+
+    %% Conntrack state
+    Exprs1 = case maps:find(ct, Opts) of
+        {ok, established} ->
+            Exprs ++ nft_rules:ct_established_accept();
+        _ -> Exprs
+    end,
+
+    %% ICMP
+    Exprs2 = case maps:find(icmp, Opts) of
+        {ok, true} ->
+            Exprs1 ++ nft_rules:icmp_accept();
+        _ -> Exprs1
+    end,
+
+    %% If ct or icmp matched, they already include the verdict — return early
+    case {maps:is_key(ct, Opts), maps:is_key(icmp, Opts)} of
+        {true, _} -> Exprs1;
+        {_, true} -> Exprs2;
+        _ ->
+            %% Build match expressions
+            Matches = compile_generic_matches(Opts),
+
+            %% Modifiers (counter, limit, log)
+            Mods = compile_generic_modifiers(Opts),
+
+            %% Verdict
+            V = compile_generic_verdict(Verdict, Opts),
+
+            Matches ++ Mods ++ V
+    end.
+
+-spec compile_generic_matches(map()) -> list().
+compile_generic_matches(Opts) ->
+    lists:flatten(lists:filtermap(fun(Match) -> Match end, [
+        compile_match_iif(Opts),
+        compile_match_oif(Opts),
+        compile_match_oif_neq(Opts),
+        compile_match_saddr(Opts),
+        compile_match_daddr(Opts),
+        compile_match_tcp(Opts),
+        compile_match_udp(Opts),
+        compile_match_set(Opts)
+    ])).
+
+compile_match_iif(#{iif := Name}) ->
+    NameBin = iolist_to_binary(Name),
+    {true, [nft_expr_ir:meta(iifname, 1),
+            nft_expr_ir:cmp(eq, 1, pad_ifname(NameBin))]};
+compile_match_iif(_) -> false.
+
+compile_match_oif(#{oif := Name}) ->
+    NameBin = iolist_to_binary(Name),
+    {true, [nft_expr_ir:meta(oifname, 1),
+            nft_expr_ir:cmp(eq, 1, pad_ifname(NameBin))]};
+compile_match_oif(_) -> false.
+
+compile_match_oif_neq(#{oif_neq := Name}) ->
+    NameBin = iolist_to_binary(Name),
+    {true, [nft_expr_ir:meta(oifname, 1),
+            nft_expr_ir:cmp(neq, 1, pad_ifname(NameBin))]};
+compile_match_oif_neq(_) -> false.
+
+compile_match_saddr(#{saddr := {A, B, C, D, Prefix}}) ->
+    Ip = <<A, B, C, D>>,
+    case Prefix of
+        32 ->
+            {true, [nft_expr_ir:meta(nfproto, 1),
+                    nft_expr_ir:cmp(eq, 1, <<2>>),
+                    nft_expr_ir:ip_saddr(1),
+                    nft_expr_ir:cmp(eq, 1, Ip)]};
+        _ ->
+            Mask = subnet_mask(Prefix),
+            MaskedNet = apply_mask(Ip, Mask),
+            {true, [nft_expr_ir:meta(nfproto, 1),
+                    nft_expr_ir:cmp(eq, 1, <<2>>),
+                    nft_expr_ir:ip_saddr(1),
+                    nft_expr_ir:bitwise(1, 1, Mask, <<0, 0, 0, 0>>),
+                    nft_expr_ir:cmp(eq, 1, MaskedNet)]}
+    end;
+compile_match_saddr(_) -> false.
+
+compile_match_daddr(#{daddr := {A, B, C, D, Prefix}}) ->
+    Ip = <<A, B, C, D>>,
+    case Prefix of
+        32 ->
+            {true, [nft_expr_ir:meta(nfproto, 1),
+                    nft_expr_ir:cmp(eq, 1, <<2>>),
+                    nft_expr_ir:ip_daddr(1),
+                    nft_expr_ir:cmp(eq, 1, Ip)]};
+        _ ->
+            Mask = subnet_mask(Prefix),
+            MaskedNet = apply_mask(Ip, Mask),
+            {true, [nft_expr_ir:meta(nfproto, 1),
+                    nft_expr_ir:cmp(eq, 1, <<2>>),
+                    nft_expr_ir:ip_daddr(1),
+                    nft_expr_ir:bitwise(1, 1, Mask, <<0, 0, 0, 0>>),
+                    nft_expr_ir:cmp(eq, 1, MaskedNet)]}
+    end;
+compile_match_daddr(_) -> false.
+
+compile_match_tcp(#{tcp := Port}) when is_integer(Port) ->
+    {true, [nft_expr_ir:meta(l4proto, 1),
+            nft_expr_ir:cmp(eq, 1, <<6>>),
+            nft_expr_ir:payload(transport, 2, 2, 1),
+            nft_expr_ir:cmp(eq, 1, <<Port:16/big>>)]};
+compile_match_tcp(_) -> false.
+
+compile_match_udp(#{udp := Port}) when is_integer(Port) ->
+    {true, [nft_expr_ir:meta(l4proto, 1),
+            nft_expr_ir:cmp(eq, 1, <<17>>),
+            nft_expr_ir:payload(transport, 2, 2, 1),
+            nft_expr_ir:cmp(eq, 1, <<Port:16/big>>)]};
+compile_match_udp(_) -> false.
+
+compile_match_set(#{set := SetName}) ->
+    SetBin = iolist_to_binary(SetName),
+    {true, [nft_expr_ir:ip_saddr(1),
+            nft_expr_ir:lookup(1, SetBin)]};
+compile_match_set(_) -> false.
+
+-spec compile_generic_modifiers(map()) -> list().
+compile_generic_modifiers(Opts) ->
+    Mods = [],
+    Mods1 = case maps:find(counter, Opts) of
+        {ok, Name} -> Mods ++ [nft_expr_ir:objref_counter(iolist_to_binary(Name))];
+        _ -> Mods
+    end,
+    Mods2 = case maps:find(limit, Opts) of
+        {ok, #{rate := Rate, burst := Burst}} ->
+            Mods1 ++ [nft_expr_ir:limit(Rate, Burst)];
+        _ -> Mods1
+    end,
+    Mods3 = case maps:find(log, Opts) of
+        {ok, Prefix} -> Mods2 ++ [nft_expr_ir:log(#{prefix => iolist_to_binary(Prefix)})];
+        _ -> Mods2
+    end,
+    Mods3.
+
+-spec compile_generic_verdict(atom(), map()) -> list().
+compile_generic_verdict(accept, _Opts) -> [nft_expr_ir:accept()];
+compile_generic_verdict(drop, _Opts) -> [nft_expr_ir:drop()];
+compile_generic_verdict(reject, _Opts) -> [nft_expr_ir:reject()];
+compile_generic_verdict(masquerade, _Opts) -> [nft_expr_ir:masq()];
+compile_generic_verdict(return, _Opts) -> [nft_expr_ir:return()];
+compile_generic_verdict(jump, #{chain := Chain}) ->
+    [nft_expr_ir:jump(iolist_to_binary(Chain))];
+compile_generic_verdict(_, _) -> [nft_expr_ir:accept()].
+
+%% Helper: build a /prefix subnet mask as 4-byte binary
+-spec subnet_mask(0..32) -> binary().
+subnet_mask(Prefix) ->
+    M = (16#FFFFFFFF bsl (32 - Prefix)) band 16#FFFFFFFF,
+    <<M:32/big>>.
+
+%% Helper: apply mask to IP
+-spec apply_mask(binary(), binary()) -> binary().
+apply_mask(<<A:32/big>>, <<M:32/big>>) ->
+    <<(A band M):32/big>>.

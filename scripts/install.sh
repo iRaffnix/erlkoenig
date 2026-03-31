@@ -171,8 +171,11 @@ LimitMEMLOCK=infinity
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE CAP_SYS_ADMIN CAP_SYS_CHROOT CAP_SETUID CAP_SETGID CAP_DAC_OVERRIDE
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE CAP_SYS_ADMIN CAP_SYS_CHROOT CAP_SETUID CAP_SETGID CAP_DAC_OVERRIDE CAP_KILL
 
-ProtectHome=yes
-PrivateTmp=yes
+# NOT set: ProtectHome, PrivateTmp, ProtectClock, etc.
+# These install seccomp filters and mount namespaces that prevent
+# the C runtime from creating container namespaces (clone, mount,
+# pivot_root). The runtime applies its OWN security hardening
+# after CMD_GO (seccomp, landlock, cap-drop).
 
 [Install]
 WantedBy=multi-user.target

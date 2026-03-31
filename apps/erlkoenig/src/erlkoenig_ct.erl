@@ -241,19 +241,12 @@ terminate(_Reason, _State, #ct_data{port = Port, sock = Sock, socket_path = Sock
 %% =================================================================
 
 creating(enter, _OldState, Data) ->
-    BaseOpts = #{
-        binary_path => Data#ct_data.binary_path,
-        args        => Data#ct_data.args,
-        env         => Data#ct_data.env,
-        uid         => Data#ct_data.uid,
-        gid         => Data#ct_data.gid,
-        ip          => Data#ct_data.ip,
-        limits      => Data#ct_data.limits,
-        seccomp     => Data#ct_data.seccomp,
-        name        => Data#ct_data.name
-    },
-    _SpawnOpts = maps:merge(BaseOpts, Data#ct_data.extra_opts),
-    %% Resolve DSL volumes to runtime volumes with host paths
+    %% state_enter cannot return {next_state, ...}.
+    %% Send ourselves a message to trigger spawn asynchronously.
+    self() ! do_spawn,
+    {keep_state, Data};
+
+creating(info, do_spawn, Data) ->
     Data2 = resolve_volumes(Data),
     creating_do_spawn(Data2);
 
@@ -295,13 +288,16 @@ creating_do_spawn(#ct_data{comm_mode = socket, id = ContainerId} = Data) ->
     RtBin = rt_path(),
     SocketPath = make_socket_path(ContainerId),
     ok = filelib:ensure_dir(binary_to_list(SocketPath)),
-    %% Start C runtime with --socket flag. Use nouse_stdio since
-    %% communication goes via Unix socket, not pipes. We keep the
-    %% port only for exit_status monitoring.
-    RtArgs = ["--socket", binary_to_list(SocketPath)],
-    MonitorPort = open_port({spawn_executable, RtBin},
-                            [exit_status, nouse_stdio, {args, RtArgs}]),
-    OsPid = get_port_os_pid(MonitorPort),
+    %% Start C runtime via setsid so it runs in its own session.
+    %% This decouples it from the BEAM's process group, allowing
+    %% clone(CLONE_NEWPID|...) to work even when the BEAM runs
+    %% under systemd with security restrictions.
+    %% Monitoring happens via the TCP socket (tcp_closed = runtime dead).
+    SockStr = binary_to_list(SocketPath),
+    ShCmd = lists:flatten(io_lib:format(
+        "setsid ~s --socket ~s --id ~s </dev/null >/dev/null 2>/dev/null &",
+        [RtBin, SockStr, binary_to_list(ContainerId)])),
+    [] = os:cmd(ShCmd),
     %% Wait for C runtime to bind the socket, then connect
     case wait_and_connect(SocketPath, 5000) of
         {ok, Sock} ->
@@ -309,13 +305,10 @@ creating_do_spawn(#ct_data{comm_mode = socket, id = ContainerId} = Data) ->
             %% Protocol handshake via socket
             ok = gen_tcp:send(Sock, erlkoenig_proto:encode_handshake()),
             {keep_state, Data#ct_data{
-                port = MonitorPort,
                 sock = Sock,
-                socket_path = SocketPath,
-                os_pid = OsPid
+                socket_path = SocketPath
             }, [{state_timeout, ?SPAWN_TIMEOUT, spawn_timeout}]};
         {error, Reason} ->
-            safe_port_close(MonitorPort),
             {next_state, failed,
              Data#ct_data{error_reason = {socket_connect_failed, Reason}}}
     end.
@@ -330,18 +323,22 @@ creating_send_spawn(Data) ->
     WireVolumes = [#{host => H, container => C,
                      opts => erlkoenig_proto:volume_opts(V)}
                    || #{host := H, container := C} = V <- Data#ct_data.volumes],
-    Cmd = erlkoenig_proto:encode_cmd_spawn(
-            Data#ct_data.binary_path,
-            Data#ct_data.args,
-            Data#ct_data.env,
-            Data#ct_data.uid,
-            Data#ct_data.gid,
-            Data#ct_data.seccomp,
-            DiskMB,
-            Data#ct_data.caps_keep,
-            DnsIp,
-            Flags,
-            WireVolumes),
+    ExtraOpts = Data#ct_data.extra_opts,
+    SpawnOpts = #{
+        path       => Data#ct_data.binary_path,
+        args       => Data#ct_data.args,
+        env        => Data#ct_data.env,
+        uid        => Data#ct_data.uid,
+        gid        => Data#ct_data.gid,
+        seccomp    => Data#ct_data.seccomp,
+        rootfs_mb  => DiskMB,
+        caps_keep  => Data#ct_data.caps_keep,
+        dns_ip     => DnsIp,
+        flags      => Flags,
+        volumes    => WireVolumes,
+        image_path => maps:get(image_path, ExtraOpts, <<>>)
+    },
+    Cmd = erlkoenig_proto:encode_cmd_spawn(SpawnOpts),
     send_to_rt(Cmd, Data).
 
 creating_handle_rt_data(Reply, false = _Handshake, Data) ->
@@ -1258,14 +1255,6 @@ connect_to_runtime(#ct_data{socket_path = SocketPath}) ->
                          [binary, {packet, 4}, {active, true}], 3000) of
         {ok, Sock} -> {ok, Sock};
         {error, _} = Err -> Err
-    end.
-
--doc "Get the OS PID of a port's external process.".
--spec get_port_os_pid(port()) -> non_neg_integer() | undefined.
-get_port_os_pid(Port) ->
-    case erlang:port_info(Port, os_pid) of
-        {os_pid, Pid} -> Pid;
-        undefined -> undefined
     end.
 
 -doc "Kill a process by OS PID (used when socket is unavailable).".

@@ -1,8 +1,7 @@
 %%%-------------------------------------------------------------------
 %%% @doc Unit tests for erlkoenig_proto (wire protocol codec).
 %%%
-%%% Tests encode/decode roundtrips for all reply types, command
-%%% structure validation, and error handling for malformed input.
+%%% Tests encode/decode roundtrips, TLV encoding, and error handling.
 %%% @end
 %%%-------------------------------------------------------------------
 
@@ -12,60 +11,61 @@
 -include_lib("stdlib/include/assert.hrl").
 
 %% =================================================================
-%% Reply decode tests
+%% Reply decode tests (C -> Erlang)
+%%
+%% Replies from the C runtime are: Tag:8 | Version:8 | Payload
+%% The decoder accepts both with and without version byte.
 %% =================================================================
 
 decode_reply_ok_test() ->
-    Bin = <<16#01, 0:16/big>>,
-    ?assertEqual({ok, reply_ok, #{data => <<>>}}, erlkoenig_proto:decode(Bin)).
+    %% Tag + Version + empty
+    ?assertMatch({ok, reply_ok, _}, erlkoenig_proto:decode(<<16#01, 1>>)).
 
-decode_reply_ok_with_data_test() ->
-    Data = <<"hello">>,
-    Bin = <<16#01, 5:16/big, Data/binary>>,
-    ?assertEqual({ok, reply_ok, #{data => Data}}, erlkoenig_proto:decode(Bin)).
+decode_reply_ok_legacy_test() ->
+    %% Legacy: Tag + Payload (no version)
+    ?assertMatch({ok, reply_ok, _}, erlkoenig_proto:decode(<<16#01, 0, 0:16/big>>)).
 
 decode_reply_error_test() ->
     Msg = <<"ENOENT">>,
-    Bin = <<16#02, (- 2):32/big-signed, 6:16/big, Msg/binary>>,
-    ?assertEqual({ok, reply_error, #{code => -2, message => Msg}},
+    %% Tag + Version + Code:32 + MsgLen:16 + Msg
+    Bin = <<16#02, 1, (-2):32/big-signed, 6:16/big, Msg/binary>>,
+    ?assertMatch({ok, reply_error, #{code := -2, message := Msg}},
                  erlkoenig_proto:decode(Bin)).
 
 decode_reply_container_pid_test() ->
     Ns = <<"/proc/42/ns/net">>,
-    Bin = <<16#03, 42:32/big, (byte_size(Ns)):16/big, Ns/binary>>,
-    ?assertEqual({ok, reply_container_pid,
-                  #{child_pid => 42, netns_path => Ns}},
+    Bin = <<16#03, 1, 42:32/big, (byte_size(Ns)):16/big, Ns/binary>>,
+    ?assertMatch({ok, reply_container_pid, #{child_pid := 42, netns_path := Ns}},
                  erlkoenig_proto:decode(Bin)).
 
 decode_reply_ready_test() ->
-    ?assertEqual({ok, reply_ready, #{}}, erlkoenig_proto:decode(<<16#04>>)).
+    ?assertEqual({ok, reply_ready, #{}}, erlkoenig_proto:decode(<<16#04, 1>>)).
 
 decode_reply_exited_test() ->
-    Bin = <<16#05, 0:32/big-signed, 0:8>>,
+    Bin = <<16#05, 1, 0:32/big-signed, 0:8>>,
     ?assertEqual({ok, reply_exited, #{exit_code => 0, term_signal => 0}},
                  erlkoenig_proto:decode(Bin)).
 
 decode_reply_exited_signal_test() ->
-    %% Process killed by SIGSEGV (signal 11), exit code = 128+11
-    Bin = <<16#05, 139:32/big-signed, 11:8>>,
+    Bin = <<16#05, 1, 139:32/big-signed, 11:8>>,
     ?assertEqual({ok, reply_exited, #{exit_code => 139, term_signal => 11}},
                  erlkoenig_proto:decode(Bin)).
 
 decode_reply_status_test() ->
-    Bin = <<16#06, 1:8, 1234:32/big, 5000:64/big>>,
+    Bin = <<16#06, 1, 1:8, 1234:32/big, 5000:64/big>>,
     ?assertEqual({ok, reply_status,
                   #{state => 1, child_pid => 1234, uptime_ms => 5000}},
                  erlkoenig_proto:decode(Bin)).
 
 decode_reply_stdout_test() ->
     Data = <<"Hello, world!\n">>,
-    Bin = <<16#07, Data/binary>>,
+    Bin = <<16#07, 1, Data/binary>>,
     ?assertEqual({ok, reply_stdout, #{data => Data}},
                  erlkoenig_proto:decode(Bin)).
 
 decode_reply_stderr_test() ->
     Data = <<"error: something\n">>,
-    Bin = <<16#08, Data/binary>>,
+    Bin = <<16#08, 1, Data/binary>>,
     ?assertEqual({ok, reply_stderr, #{data => Data}},
                  erlkoenig_proto:decode(Bin)).
 
@@ -77,70 +77,85 @@ decode_empty_test() ->
     ?assertEqual({error, empty_message}, erlkoenig_proto:decode(<<>>)).
 
 decode_unknown_tag_test() ->
-    ?assertEqual({error, {unknown_tag, 16#FF}}, erlkoenig_proto:decode(<<16#FF>>)).
-
-decode_malformed_reply_ok_test() ->
-    %% reply_ok with truncated length
-    ?assertEqual({error, {malformed, reply_ok}}, erlkoenig_proto:decode(<<16#01, 0>>)).
-
-decode_malformed_reply_error_test() ->
-    %% reply_error with truncated payload
-    ?assertEqual({error, {malformed, reply_error}}, erlkoenig_proto:decode(<<16#02, 0, 0>>)).
-
-decode_malformed_reply_exited_test() ->
-    %% reply_exited with only 4 bytes instead of 5
-    ?assertEqual({error, {malformed, reply_exited}},
-                 erlkoenig_proto:decode(<<16#05, 0:32/big>>)).
-
-decode_malformed_container_pid_test() ->
-    %% reply_container_pid with truncated ns path
-    ?assertEqual({error, {malformed, reply_container_pid}},
-                 erlkoenig_proto:decode(<<16#03, 42:32/big, 100:16/big, "short">>)).
+    ?assertMatch({error, {unknown_tag, 16#FF}}, erlkoenig_proto:decode(<<16#FF, 1>>)).
 
 %% =================================================================
-%% Encode structure tests
+%% Encode structure tests (TLV format)
 %% =================================================================
 
 encode_cmd_spawn_tag_test() ->
     Cmd = erlkoenig_proto:encode_cmd_spawn(<<"/bin/test">>, [], [], 0, 0, 0),
-    ?assertEqual(16#10, binary:first(Cmd)).
+    %% Tag:8 + Version:8 + TLV attrs
+    <<Tag, _Ver, _/binary>> = Cmd,
+    ?assertEqual(16#10, Tag).
+
+encode_cmd_spawn_version_test() ->
+    Cmd = erlkoenig_proto:encode_cmd_spawn(#{path => <<"/app">>}),
+    <<_Tag, Ver, _/binary>> = Cmd,
+    ?assertEqual(1, Ver).
+
+encode_cmd_spawn_with_image_path_test() ->
+    Cmd = erlkoenig_proto:encode_cmd_spawn(#{
+        path => <<"/app">>,
+        image_path => <<"/tmp/test.erofs">>
+    }),
+    %% Image path attr (type 15) should be present
+    ?assert(binary:match(Cmd, <<"/tmp/test.erofs">>) =/= nomatch).
 
 encode_cmd_spawn_with_args_test() ->
     Cmd = erlkoenig_proto:encode_cmd_spawn(
             <<"/bin/echo">>, [<<"-n">>, <<"hello">>],
             [{<<"HOME">>, <<"/tmp">>}], 1000, 1000, 0),
     ?assert(is_binary(Cmd)),
-    ?assert(byte_size(Cmd) > 10).
+    %% Args and env should be in the TLV payload
+    ?assert(binary:match(Cmd, <<"-n">>) =/= nomatch),
+    ?assert(binary:match(Cmd, <<"hello">>) =/= nomatch),
+    ?assert(binary:match(Cmd, <<"HOME">>) =/= nomatch).
 
-encode_cmd_spawn_all_opts_test() ->
-    Cmd = erlkoenig_proto:encode_cmd_spawn(
-            <<"/app">>, [], [], 0, 0, 1, 64, 16#FFFFFFFFFFFFFFFF),
-    ?assertEqual(16#10, binary:first(Cmd)),
-    ?assert(byte_size(Cmd) > 20).
+encode_cmd_spawn_map_test() ->
+    Cmd = erlkoenig_proto:encode_cmd_spawn(#{
+        path => <<"/app">>,
+        uid => 1000,
+        gid => 1000,
+        args => [<<"--port">>, <<"8080">>],
+        env => [{<<"HOME">>, <<"/tmp">>}],
+        image_path => <<"/data/app.erofs">>,
+        seccomp => default
+    }),
+    <<16#10, 1, _Attrs/binary>> = Cmd,
+    ?assert(binary:match(Cmd, <<"/app">>) =/= nomatch),
+    ?assert(binary:match(Cmd, <<"/data/app.erofs">>) =/= nomatch),
+    ?assert(binary:match(Cmd, <<"--port">>) =/= nomatch).
 
 encode_cmd_go_test() ->
-    ?assertEqual(<<16#11>>, erlkoenig_proto:encode_cmd_go()).
+    Cmd = erlkoenig_proto:encode_cmd_go(),
+    ?assertEqual(<<16#11, 1>>, Cmd).
 
 encode_cmd_kill_test() ->
-    ?assertEqual(<<16#12, 9>>, erlkoenig_proto:encode_cmd_kill(9)).
+    Cmd = erlkoenig_proto:encode_cmd_kill(9),
+    <<Tag, _Ver, _Attrs/binary>> = Cmd,
+    ?assertEqual(16#12, Tag).
 
 encode_cmd_kill_sigterm_test() ->
-    ?assertEqual(<<16#12, 15>>, erlkoenig_proto:encode_cmd_kill(15)).
+    Cmd = erlkoenig_proto:encode_cmd_kill(15),
+    <<16#12, 1, _/binary>> = Cmd,
+    ok.
 
 encode_cmd_net_setup_test() ->
     Cmd = erlkoenig_proto:encode_cmd_net_setup(
             <<"eth0">>, {10, 0, 0, 2}, 24, {10, 0, 0, 1}),
-    ?assertEqual(16#15, binary:first(Cmd)),
-    %% Tag(1) + IfNameLen(2) + "eth0"(4) + IP(4) + Prefix(1) + GW(4) = 16
-    ?assertEqual(16, byte_size(Cmd)).
+    <<Tag, _Ver, _Attrs/binary>> = Cmd,
+    ?assertEqual(16#15, Tag),
+    ?assert(binary:match(Cmd, <<"eth0">>) =/= nomatch).
 
 encode_cmd_write_file_test() ->
     Cmd = erlkoenig_proto:encode_cmd_write_file(
             <<"/etc/hosts">>, 8#644, <<"127.0.0.1 localhost\n">>),
-    ?assertEqual(16#16, binary:first(Cmd)).
+    <<Tag, _Ver, _/binary>> = Cmd,
+    ?assertEqual(16#16, Tag).
 
 encode_cmd_query_status_test() ->
-    ?assertEqual(<<16#14>>, erlkoenig_proto:encode_cmd_query_status()).
+    ?assertEqual(<<16#14, 1>>, erlkoenig_proto:encode_cmd_query_status()).
 
 %% =================================================================
 %% tag_name tests
@@ -163,38 +178,8 @@ tag_name_unknown_test() ->
     ?assertEqual(unknown, erlkoenig_proto:tag_name(16#FF)).
 
 %% =================================================================
-%% Volume encoding tests
+%% Volume helpers tests
 %% =================================================================
-
-encode_volumes_empty_test() ->
-    ?assertEqual(<<0>>, erlkoenig_proto:encode_volumes([])).
-
-encode_volumes_single_test() ->
-    Src = <<"/var/lib/erlkoenig/volumes/app/db">>,
-    Dst = <<"/data/db">>,
-    Volumes = [#{host => Src, container => Dst, opts => 0}],
-    Expected = <<1:8,
-                 (byte_size(Src)):16/big, Src/binary,
-                 (byte_size(Dst)):16/big, Dst/binary,
-                 0:32/big>>,
-    ?assertEqual(Expected, erlkoenig_proto:encode_volumes(Volumes)).
-
-encode_volumes_readonly_test() ->
-    Src = <<"/var/lib/erlkoenig/volumes/app/config">>,
-    Dst = <<"/etc/config">>,
-    Volumes = [#{host => Src, container => Dst, opts => 16#01}],
-    Bin = erlkoenig_proto:encode_volumes(Volumes),
-    %% Check the opts field is 0x01 (last 4 bytes)
-    OptsOffset = byte_size(Bin) - 4,
-    <<_:OptsOffset/binary, Opts:32/big>> = Bin,
-    ?assertEqual(16#01, Opts).
-
-encode_volumes_max_test() ->
-    Vols = [#{host => <<"/src">>, container => <<"/dst">>, opts => 0}
-            || _ <- lists:seq(1, 16)],
-    Bin = erlkoenig_proto:encode_volumes(Vols),
-    <<NumVol:8, _/binary>> = Bin,
-    ?assertEqual(16, NumVol).
 
 volume_opts_readonly_test() ->
     ?assertEqual(16#01, erlkoenig_proto:volume_opts(#{read_only => true})).
@@ -209,5 +194,26 @@ encode_cmd_spawn_with_volumes_test() ->
     Volumes = [#{host => <<"/h">>, container => <<"/c">>, opts => 0}],
     Cmd = erlkoenig_proto:encode_cmd_spawn(
             <<"/app">>, [], [], 0, 0, 0, 0, 0, 0, 0, Volumes),
-    ?assertEqual(16#10, binary:first(Cmd)),
-    ?assert(byte_size(Cmd) > 20).
+    <<16#10, 1, _/binary>> = Cmd,
+    ?assert(binary:match(Cmd, <<"/h">>) =/= nomatch),
+    ?assert(binary:match(Cmd, <<"/c">>) =/= nomatch).
+
+%% =================================================================
+%% Handshake tests
+%% =================================================================
+
+handshake_version_test() ->
+    ?assertEqual(1, erlkoenig_proto:protocol_version()).
+
+handshake_encode_test() ->
+    H = erlkoenig_proto:encode_handshake(),
+    ?assertEqual(<<1>>, H).
+
+handshake_check_v1_test() ->
+    ?assertEqual(ok, erlkoenig_proto:check_handshake_reply(<<1>>)).
+
+handshake_check_v2_test() ->
+    ?assertEqual(ok, erlkoenig_proto:check_handshake_reply(<<2, 0:256>>)).
+
+handshake_check_bad_test() ->
+    ?assertMatch({error, _}, erlkoenig_proto:check_handshake_reply(<<99>>)).

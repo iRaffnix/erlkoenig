@@ -414,7 +414,7 @@ defmodule Erlkoenig.CLI do
   defp check_container_fields(%{name: name} = ct) do
     errs = []
     errs = if ct[:binary] == nil, do: errs ++ ["#{name}: missing binary path"], else: errs
-    errs = if ct[:ip] == nil, do: errs ++ ["#{name}: missing IP address"], else: errs
+    # IP is optional — auto-allocated from zone pool if omitted
     errs
   end
 

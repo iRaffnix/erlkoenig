@@ -173,6 +173,13 @@ defmodule Erlkoenig.Stack do
     end
   end
 
+  defmacro allow(target, opts \\ []) do
+    quote do
+      var!(ek_zone_builder) = Erlkoenig.Zone.Builder.add_allow(
+        var!(ek_zone_builder), unquote(target), unquote(opts))
+    end
+  end
+
   defmacro container(name, opts) do
     quote do
       var!(ek_zone_builder) = Erlkoenig.Zone.Builder.begin_container(

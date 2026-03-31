@@ -3,28 +3,90 @@ defmodule Erlkoenig.Zone.Builder do
   Accumulates zone definitions with their containers.
 
   A zone groups containers that share a network segment (bridge, subnet,
-  gateway). Containers reference globally declared images by name.
+  IP pool, gateway). Network access is deny-by-default — every allowed
+  path must be declared explicitly via `allow`.
+
+  ## Network Policy
+
+  Without `allow` directives, the zone is fully isolated. No traffic
+  leaves the bridge — not even DNS, not even to the host.
+
+      allow :dns                        # container → bridge DNS (port 53)
+      allow :gateway, ports: [5432]     # container → host service
+      allow :gateway                    # container → host, all ports
+      allow :internet, via: "eth0"      # container → internet (masquerade)
+      allow :zone, "other_zone"         # container → other zone's bridge
+
+  ## IP Pool
+
+  The pool defines which IPs are auto-allocated to containers.
+  Gateway and other infrastructure IPs stay outside the pool.
+
+      zone "apps",
+        subnet: {10, 0, 0, 0},
+        pool: {10, 0, 0, 10}..{10, 0, 0, 250} do
   """
 
   defstruct name: nil,
             subnet: {10, 0, 0, 0},
-            gateway: {10, 0, 0, 1},
+            gateway: nil,
             netmask: 24,
             bridge: nil,
-            policy: :allow_outbound,
+            pool_start: nil,
+            pool_end: nil,
+            interface: nil,
+            allows: [],
             containers: [],
-            # Transient: current container being built
             current_ct: nil
 
   def new(name, opts) do
+    subnet = Keyword.get(opts, :subnet, {10, 0, 0, 0})
+    {sa, sb, sc, _} = subnet
+
+    {pool_start, pool_end} = case Keyword.get(opts, :pool) do
+      {first, last} when is_tuple(first) and is_tuple(last) -> {first, last}
+      nil -> {{sa, sb, sc, 2}, {sa, sb, sc, 254}}
+    end
+
     %__MODULE__{
       name: to_string(name),
-      subnet: Keyword.get(opts, :subnet, {10, 0, 0, 0}),
-      gateway: Keyword.get(opts, :gateway, {10, 0, 0, 1}),
+      subnet: subnet,
+      gateway: Keyword.get(opts, :gateway, {sa, sb, sc, 1}),
       netmask: Keyword.get(opts, :netmask, 24),
-      bridge: Keyword.get(opts, :bridge, "ek_br_#{name}"),
-      policy: Keyword.get(opts, :policy, :allow_outbound)
+      bridge: Keyword.get(opts, :bridge) && to_string(Keyword.get(opts, :bridge))
+              || "ek_br_#{name}",
+      pool_start: pool_start,
+      pool_end: pool_end,
+      interface: Keyword.get(opts, :interface) && to_string(Keyword.get(opts, :interface))
     }
+  end
+
+  # --- Network policy (allow directives) ---
+
+  def add_allow(%__MODULE__{allows: allows} = z, :dns, _opts) do
+    %{z | allows: allows ++ [:dns]}
+  end
+
+  def add_allow(%__MODULE__{allows: allows} = z, :gateway, opts) do
+    entry = case Keyword.get(opts, :ports) do
+      nil -> :gateway
+      ports when is_list(ports) -> {:gateway, ports}
+    end
+    %{z | allows: allows ++ [entry]}
+  end
+
+  def add_allow(%__MODULE__{allows: allows} = z, :internet, opts) do
+    via = Keyword.fetch!(opts, :via)
+    %{z | allows: allows ++ [{:internet, to_string(via)}]}
+  end
+
+  def add_allow(%__MODULE__{allows: allows} = z, :zone, opts) do
+    target = case opts do
+      [name] when is_binary(name) -> {:zone, name}
+      [{:name, name}] -> {:zone, to_string(name)}
+      name when is_binary(name) -> {:zone, name}
+    end
+    %{z | allows: allows ++ [target]}
   end
 
   # --- Container lifecycle ---
@@ -118,6 +180,12 @@ defmodule Erlkoenig.Zone.Builder do
         description: "duplicate container names in zone #{inspect(z.name)}: #{inspect(dupes)}"
     end
 
+    # Validate allow :internet requires interface
+    Enum.each(z.allows, fn
+      {:internet, _via} -> :ok
+      _ -> :ok
+    end)
+
     :ok
   end
 
@@ -153,7 +221,6 @@ defmodule Erlkoenig.Zone.Builder do
           volumes: ct.volumes
         }
 
-        # Resolve image name → path
         ct_term = if ct.image do
           case Erlkoenig.Images.Builder.resolve_path(images_builder, ct.image) do
             {:ok, path} ->
@@ -165,24 +232,30 @@ defmodule Erlkoenig.Zone.Builder do
           ct_term
         end
 
-        # Optional fields
         ct_term = if ct.health_check, do: Map.put(ct_term, :health_check, ct.health_check), else: ct_term
         ct_term = if ct.firewall, do: Map.put(ct_term, :firewall, ct.firewall), else: ct_term
 
-        # Strip nil/empty
         ct_term
         |> Enum.reject(fn {_k, v} -> v == nil or v == [] or v == %{} end)
         |> Map.new()
       end)
 
-    %{
+    zone_term = %{
       name: z.name,
       subnet: z.subnet,
       gateway: z.gateway,
       netmask: z.netmask,
       bridge: z.bridge,
-      policy: z.policy,
+      pool: %{start: z.pool_start, stop: z.pool_end},
+      allows: z.allows,
       containers: containers
     }
+
+    # Optional: interface
+    zone_term = if z.interface,
+      do: Map.put(zone_term, :interface, z.interface),
+      else: zone_term
+
+    zone_term
   end
 end

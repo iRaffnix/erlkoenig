@@ -286,19 +286,21 @@ creating_do_spawn(#ct_data{comm_mode = port} = Data) ->
 creating_do_spawn(#ct_data{comm_mode = socket, id = ContainerId} = Data) ->
     SocketPath = make_socket_path(ContainerId),
     ok = filelib:ensure_dir(binary_to_list(SocketPath)),
-    %% Start C runtime via systemd template unit.
-    %% This is the only reliable way to get full capabilities:
-    %% the BEAM's os:cmd/spawn inherits a reduced cap set that
-    %% cannot be elevated by file capabilities (kernel security).
-    %% The template unit erlkoenig-rt@.service runs as root with
-    %% full caps in its own cgroup/session.
+    %% Start C runtime via setsid in a background Erlang process.
+    %% setsid gives the runtime its own session so it survives
+    %% independently. File capabilities (setcap all=eip) on the
+    %% binary provide full root caps after execve.
+    %% The Erlang process blocks in os:cmd until the runtime exits.
     %% Monitoring: TCP socket (tcp_closed = runtime dead).
+    RtBin = rt_path(),
+    SockStr = binary_to_list(SocketPath),
     IdStr = binary_to_list(ContainerId),
     ShCmd = lists:flatten(io_lib:format(
-        "systemctl start erlkoenig-rt@~s 2>/dev/null", [IdStr])),
-    os:cmd(ShCmd),
+        "exec setsid ~s --socket ~s --id ~s </dev/null 2>/dev/null",
+        [RtBin, SockStr, IdStr])),
+    erlang:spawn(fun() -> os:cmd(ShCmd) end),
     %% Wait for C runtime to bind the socket, then connect
-    case wait_and_connect(SocketPath, 15000) of
+    case wait_and_connect(SocketPath, 10000) of
         {ok, Sock} ->
             ok = inet:setopts(Sock, [binary, {packet, 4}, {active, true}]),
             %% Protocol handshake via socket

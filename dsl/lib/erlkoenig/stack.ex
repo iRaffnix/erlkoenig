@@ -1,65 +1,50 @@
-#
-# Copyright 2026 Erlkoenig Contributors
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
-
 defmodule Erlkoenig.Stack do
   @moduledoc """
   Unified DSL for the erlkoenig ecosystem.
 
-  One file defines everything: host firewall, pods, zones,
-  BPF steering, threat detection, and counter monitoring.
-
-  ## Architecture Principle
-
-  Four subsystems, cleanly separated:
-
-    1. `firewall` / zone `chain`/`rule` — nft kernel objects
-    2. `pod` / `deploy` — compiler expansion (template)
-    3. `guard` / `watch` — Erlang runtime processes
-    4. `steer` — eBPF map state (erlkoenig_ebpfd)
-
-  ## Syntax
+  Topology and policy in one file, readable by network engineers.
 
       defmodule MyInfra do
         use Erlkoenig.Stack
 
-        firewall "host" do ... end
-        pod "webstack" do ... end
-        zone "production" do ... end
-        guard do ... end
-        watch :metrics do ... end
+        host do
+          interface "eth0", zone: :wan
+          bridge "br0", subnet: {10, 0, 0, 0, 24}, uplink: "eth0"
+          chain "input", hook: :input, policy: :drop do ... end
+          chain "forward", hook: :forward, policy: :drop do ... end
+        end
+
+        pod "web" do
+          container "frontend", binary: "/opt/frontend" do
+            chain "inbound", policy: :drop do ... end
+          end
+        end
+
+        attach "web", to: "br0", replicas: 3
       end
 
-  ## References
+  ## Naming in rules
 
-  `@name` inside pod/zone `iif:`/`oif:` is a compile-time reference
-  to a container name. Resolved to veth names at deploy time.
-  `"string"` is a raw nft interface name, passed 1:1 to the kernel.
+  Interface names used in `iif:`/`oif:` rules reference:
+  - Host interfaces: `"eth0"`, `"lo"`
+  - Bridges: `"br0"`
+  - Pod containers: `"web.frontend"` (= all replicas of frontend in pod web)
+
+  The compiler resolves pod-qualified names to per-replica IP rules
+  at deploy time.
   """
 
   defmacro __using__(_opts) do
     quote do
       import Erlkoenig.Stack
 
+      Module.register_attribute(__MODULE__, :stack_host, accumulate: false)
       Module.register_attribute(__MODULE__, :stack_pods, accumulate: true)
-      Module.register_attribute(__MODULE__, :stack_zones, accumulate: true)
-      Module.register_attribute(__MODULE__, :stack_firewall, accumulate: false)
+      Module.register_attribute(__MODULE__, :stack_attachments, accumulate: true)
       Module.register_attribute(__MODULE__, :stack_guard, accumulate: false)
       Module.register_attribute(__MODULE__, :stack_watches, accumulate: true)
 
-      Module.put_attribute(__MODULE__, :stack_firewall, nil)
+      Module.put_attribute(__MODULE__, :stack_host, nil)
       Module.put_attribute(__MODULE__, :stack_guard, nil)
 
       @before_compile Erlkoenig.Stack
@@ -67,16 +52,15 @@ defmodule Erlkoenig.Stack do
   end
 
   defmacro __before_compile__(env) do
+    host = Module.get_attribute(env.module, :stack_host)
     pods = Module.get_attribute(env.module, :stack_pods) |> Enum.reverse()
-    zones = Module.get_attribute(env.module, :stack_zones) |> Enum.reverse()
-    fw_config = Module.get_attribute(env.module, :stack_firewall)
+    attachments = Module.get_attribute(env.module, :stack_attachments) |> Enum.reverse()
     guard_config = Module.get_attribute(env.module, :stack_guard)
     watches = Module.get_attribute(env.module, :stack_watches) |> Enum.reverse()
 
     # Validate pods
     Enum.each(pods, &Erlkoenig.Pod.Builder.validate!/1)
 
-    # Validate pod name uniqueness
     pod_names = Enum.map(pods, & &1.name)
     dupes = pod_names -- Enum.uniq(pod_names)
     if dupes != [] do
@@ -84,40 +68,44 @@ defmodule Erlkoenig.Stack do
         description: "duplicate pod names: #{inspect(Enum.uniq(dupes))}"
     end
 
-    # Validate zones reference existing pods
-    Enum.each(zones, fn zone ->
-      Enum.each(zone.deployments, fn {pod_name, _replicas} ->
-        unless pod_name in pod_names do
-          raise CompileError,
-            description: "zone #{inspect(zone.name)}: deploy references unknown pod #{inspect(pod_name)}. " <>
-              "Known pods: #{inspect(pod_names)}"
-        end
+    # Build list of all container names (pod-qualified)
+    all_container_names = Enum.flat_map(pods, fn pod ->
+      Enum.map(pod.containers, fn ct ->
+        "#{pod.name}.#{ct.name}"
       end)
     end)
 
-    # Validate watch counters against firewall counters
-    if fw_config && watches != [] do
-      fw_counters = Map.get(fw_config, :counters, []) |> Enum.map(&to_string/1)
-      Enum.each(watches, fn w ->
-        Enum.each(Map.get(w, :counters, []), fn c ->
-          cname = to_string(c)
-          if cname not in fw_counters do
-            raise CompileError,
-              description: "watch references undeclared counter #{inspect(c)}. " <>
-                "Declare it in the firewall counters list."
-          end
-        end)
-      end)
+    # Validate host
+    if host do
+      Erlkoenig.Host.Builder.validate!(host, pod_names, all_container_names)
     end
 
+    # Validate attachments reference existing pods and bridges
+    bridge_names = if host, do: Enum.map(host.bridges, & &1.name), else: []
+    Enum.each(attachments, fn {pod_name, bridge_name, _replicas} ->
+      unless pod_name in pod_names do
+        raise CompileError,
+          description: "attach references unknown pod #{inspect(pod_name)}. " <>
+            "Known: #{inspect(pod_names)}"
+      end
+      unless bridge_name in bridge_names do
+        raise CompileError,
+          description: "attach references unknown bridge #{inspect(bridge_name)}. " <>
+            "Known: #{inspect(bridge_names)}"
+      end
+    end)
+
     # Build term
+    host_term = if host, do: Erlkoenig.Host.Builder.to_term(host)
     pods_term = Enum.map(pods, &Erlkoenig.Pod.Builder.to_term/1)
-    zones_term = Enum.map(zones, &Erlkoenig.Zone.Builder.to_term/1)
+    attachments_term = Enum.map(attachments, fn {pod, bridge, replicas} ->
+      %{pod: pod, bridge: bridge, replicas: replicas}
+    end)
 
     term = %{}
-    term = if fw_config, do: Map.put(term, :firewall, fw_config), else: term
+    term = if host_term, do: Map.put(term, :host, host_term), else: term
     term = if pods_term != [], do: Map.put(term, :pods, pods_term), else: term
-    term = if zones_term != [], do: Map.put(term, :zones, zones_term), else: term
+    term = if attachments_term != [], do: Map.put(term, :attachments, attachments_term), else: term
     term = if guard_config, do: Map.put(term, :ct_guard, guard_config), else: term
     term = if watches != [], do: Map.put(term, :watch, hd(watches)), else: term
 
@@ -132,23 +120,36 @@ defmodule Erlkoenig.Stack do
   end
 
   # ═══════════════════════════════════════════════════════════
-  # firewall block — delegates to ErlkoenigNft.Firewall
+  # host — the machine, its interfaces, bridges, firewall
   # ═══════════════════════════════════════════════════════════
 
-  defmacro firewall(name, opts \\ [], do: block) do
+  defmacro host(do: block) do
     Module.register_attribute(__CALLER__.module, :__ek_context__, accumulate: false)
-    Module.put_attribute(__CALLER__.module, :__ek_context__, :firewall)
+    Module.put_attribute(__CALLER__.module, :__ek_context__, :host)
 
     quote do
-      Module.register_attribute(__MODULE__, :fw_builder, accumulate: false)
-      @fw_builder ErlkoenigNft.Firewall.Builder.new(unquote(name), unquote(opts))
+      var!(ek_host_builder) = Erlkoenig.Host.Builder.new()
       unquote(block)
-      @stack_firewall ErlkoenigNft.Firewall.Builder.to_term(@fw_builder)
+      @stack_host var!(ek_host_builder)
+    end
+  end
+
+  defmacro interface(name, opts \\ []) do
+    quote do
+      var!(ek_host_builder) = Erlkoenig.Host.Builder.add_interface(
+        var!(ek_host_builder), unquote(name), unquote(opts))
+    end
+  end
+
+  defmacro bridge(name, opts) do
+    quote do
+      var!(ek_host_builder) = Erlkoenig.Host.Builder.add_bridge(
+        var!(ek_host_builder), unquote(name), unquote(opts))
     end
   end
 
   # ═══════════════════════════════════════════════════════════
-  # pod block — template definition
+  # pod — container group template
   # ═══════════════════════════════════════════════════════════
 
   defmacro pod(name, do: block) do
@@ -161,10 +162,6 @@ defmodule Erlkoenig.Stack do
       @stack_pods var!(ek_pod_builder)
     end
   end
-
-  # container inside pod — always dispatched from pod context
-  # The pod macro sets var!(ek_pod_builder), so container is always
-  # called from within a pod or zone block.
 
   defmacro container(name, opts) when is_list(opts) do
     quote do
@@ -186,27 +183,31 @@ defmodule Erlkoenig.Stack do
   end
 
   # ═══════════════════════════════════════════════════════════
-  # chain / rule — same syntax everywhere
+  # attach — connect pod to bridge
   # ═══════════════════════════════════════════════════════════
 
-  # chain and rule dispatch at macro-expansion time using the caller's
-  # __ek_context__ module attribute. This avoids expanding var!(ek_pod_builder)
-  # in a firewall context (which would cause undefined variable errors).
+  defmacro attach(pod_name, opts) do
+    bridge = Keyword.fetch!(opts, :to)
+    replicas = Keyword.get(opts, :replicas, 1)
+    quote do
+      @stack_attachments {unquote(pod_name), unquote(bridge), unquote(replicas)}
+    end
+  end
 
-  @doc """
-  Define a chain. Works in firewall, pod, container, and zone contexts.
-  Same syntax everywhere.
-  """
+  # ═══════════════════════════════════════════════════════════
+  # chain / rule — same syntax in host and pod
+  # ═══════════════════════════════════════════════════════════
+
   defmacro chain(name, opts \\ [], do: block) do
     ctx = Module.get_attribute(__CALLER__.module, :__ek_context__)
     case ctx do
-      :firewall ->
+      :host ->
         quote do
-          @fw_builder %{@fw_builder | rules_acc: []}
+          var!(ek_host_builder) = Erlkoenig.Host.Builder.begin_chain(
+            var!(ek_host_builder), unquote(name), unquote(opts))
           unquote(block)
-          {rules, builder} = ErlkoenigNft.Firewall.Builder.take_rules(@fw_builder)
-          @fw_builder ErlkoenigNft.Firewall.Builder.add_chain(
-            builder, unquote(name), unquote(opts), rules)
+          var!(ek_host_builder) = Erlkoenig.Host.Builder.end_chain(
+            var!(ek_host_builder), unquote(name), unquote(opts))
         end
 
       :pod ->
@@ -217,28 +218,16 @@ defmodule Erlkoenig.Stack do
           var!(ek_pod_builder) = Erlkoenig.Pod.Builder.end_chain(
             var!(ek_pod_builder), unquote(name), unquote(opts))
         end
-
-      :zone ->
-        quote do
-          var!(ek_zone_builder) = Erlkoenig.Zone.Builder.begin_chain(
-            var!(ek_zone_builder), unquote(name), unquote(opts))
-          unquote(block)
-          var!(ek_zone_builder) = Erlkoenig.Zone.Builder.end_chain(
-            var!(ek_zone_builder), unquote(name), unquote(opts))
-        end
     end
   end
 
-  @doc """
-  Define a rule. Same syntax in all contexts.
-  """
   defmacro rule(verdict, opts \\ []) do
     ctx = Module.get_attribute(__CALLER__.module, :__ek_context__)
     case ctx do
-      :firewall ->
+      :host ->
         quote do
-          @fw_builder ErlkoenigNft.Firewall.Builder.push_rule(
-            @fw_builder,
+          var!(ek_host_builder) = Erlkoenig.Host.Builder.push_rule(
+            var!(ek_host_builder),
             ErlkoenigNft.Firewall.Builder.build_rule(unquote(verdict), unquote(opts)))
         end
 
@@ -253,96 +242,28 @@ defmodule Erlkoenig.Stack do
             Erlkoenig.Pod.Builder.push_rule_to_pod(pod, rule_term)
           end
         end
-
-      :zone ->
-        quote do
-          var!(ek_zone_builder) = Erlkoenig.Zone.Builder.push_rule(
-            var!(ek_zone_builder),
-            ErlkoenigNft.Firewall.Builder.build_rule(unquote(verdict), unquote(opts)))
-        end
     end
   end
 
   # ═══════════════════════════════════════════════════════════
-  # zone block
+  # nft objects — inside host block
   # ═══════════════════════════════════════════════════════════
-
-  defmacro zone(name, opts \\ [], do: block) do
-    Module.register_attribute(__CALLER__.module, :__ek_context__, accumulate: false)
-    Module.put_attribute(__CALLER__.module, :__ek_context__, :zone)
-
-    quote do
-      var!(ek_zone_builder) = Erlkoenig.Zone.Builder.new(
-        unquote(name), unquote(opts))
-      unquote(block)
-      @stack_zones var!(ek_zone_builder)
-    end
-  end
-
-  defmacro deploy(pod_name, opts) do
-    replicas = Keyword.fetch!(opts, :replicas)
-    quote do
-      var!(ek_zone_builder) = Erlkoenig.Zone.Builder.add_deployment(
-        var!(ek_zone_builder), unquote(pod_name), unquote(replicas))
-    end
-  end
-
-  defmacro steer(vip, opts) do
-    quote do
-      var!(ek_zone_builder) = Erlkoenig.Zone.Builder.add_steer(
-        var!(ek_zone_builder), unquote(vip), unquote(opts))
-    end
-  end
-
-  # ═══════════════════════════════════════════════════════════
-  # nft object declarations (work in firewall and zone)
-  # ═══════════════════════════════════════════════════════════
-
-  defmacro set(name, type) do
-    quote do
-      @fw_builder ErlkoenigNft.Firewall.Builder.add_set(@fw_builder, unquote(name), unquote(type))
-    end
-  end
-
-  defmacro set(name, type, opts) do
-    quote do
-      @fw_builder ErlkoenigNft.Firewall.Builder.add_set(@fw_builder, unquote(name), unquote(type), unquote(opts))
-    end
-  end
 
   defmacro counters(names) do
+    # TODO: store in host builder
     quote do
-      @fw_builder ErlkoenigNft.Firewall.Builder.add_counters(@fw_builder, unquote(names))
+      _ = unquote(names)
     end
   end
 
-  defmacro vmap(name, type, opts) do
+  defmacro set(name, type, opts \\ []) do
     quote do
-      @fw_builder ErlkoenigNft.Firewall.Builder.add_vmap(@fw_builder, unquote(name), unquote(type), unquote(opts))
-    end
-  end
-
-  defmacro flowtable(name, opts) do
-    quote do
-      @fw_builder ErlkoenigNft.Firewall.Builder.add_flowtable(@fw_builder, unquote(name), unquote(opts))
-    end
-  end
-
-  defmacro quota(name, opts) do
-    bytes = Keyword.fetch!(opts, :bytes)
-    quote do
-      @fw_builder ErlkoenigNft.Firewall.Builder.add_quota(@fw_builder, unquote(name), unquote(bytes), unquote(opts))
-    end
-  end
-
-  defmacro meter(name, opts) do
-    quote do
-      @fw_builder ErlkoenigNft.Firewall.Builder.add_meter(@fw_builder, unquote(name), unquote(opts))
+      _ = {unquote(name), unquote(type), unquote(opts)}
     end
   end
 
   # ═══════════════════════════════════════════════════════════
-  # guard block — Erlang runtime (erlkoenig_nft_ct_guard)
+  # guard / watch — Erlang runtime
   # ═══════════════════════════════════════════════════════════
 
   defmacro guard(do: block) do
@@ -375,17 +296,6 @@ defmodule Erlkoenig.Stack do
         var!(ek_guard_builder), unquote(ip))
     end
   end
-
-  defmacro watch_set(set_name) do
-    quote do
-      var!(ek_guard_builder) = ErlkoenigNft.Guard.Builder.set_target(
-        var!(ek_guard_builder), unquote(set_name))
-    end
-  end
-
-  # ═══════════════════════════════════════════════════════════
-  # watch block — Erlang runtime (erlkoenig_nft_watch)
-  # ═══════════════════════════════════════════════════════════
 
   defmacro watch(name, do: block) do
     quote do

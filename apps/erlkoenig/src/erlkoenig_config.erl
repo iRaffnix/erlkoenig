@@ -121,6 +121,12 @@ validate_zones([#{name := _, containers := Cts} | Rest]) when is_list(Cts) ->
         ok -> validate_zones(Rest);
         Err -> Err
     end;
+validate_zones([#{name := _, deployments := Deps} | Rest]) when is_list(Deps) ->
+    %% New format: zone with pod deployments (containers come from pods)
+    validate_zones(Rest);
+validate_zones([#{name := _} | Rest]) ->
+    %% Zone with no containers and no deployments (isolated or chains-only)
+    validate_zones(Rest);
 validate_zones([Bad | _]) ->
     {error, {invalid_zone, Bad}}.
 
@@ -152,10 +158,20 @@ apply_config_with_reconciliation(OldConfig, Config) ->
     Zones = maps:get(zones, Config, []),
     Report2 = ensure_zones(Zones, Report1),
 
-    %% 2b. Apply zone network policy (allow directives → nftables)
+    %% 2b. Apply zone network policy
+    %% Old format: allows directives → erlkoenig_firewall_nft:apply_zone_allows
+    %% New format: chains with explicit rules (applied via firewall reload)
     lists:foreach(fun(#{allows := _, bridge := Bridge} = Zone) ->
         BridgeBin = iolist_to_binary(Bridge),
         erlkoenig_firewall_nft:apply_zone_allows(Zone, BridgeBin);
+       (#{chains := Chains, bridge := Bridge} = _Zone) ->
+        %% New format: zone-level chains. These are nft regular chains
+        %% that will be compiled and added to the erlkoenig_ct table.
+        %% For now, log and skip — applied when firewall subsystem
+        %% learns to handle zone chains.
+        BridgeBin = iolist_to_binary(Bridge),
+        logger:info("erlkoenig_config: zone ~s has ~p chain(s), bridge=~s",
+                    [maps:get(name, _Zone, <<"?">>), length(Chains), BridgeBin]);
        (_) -> ok
     end, Zones),
 
@@ -214,18 +230,99 @@ apply_config_with_reconciliation(OldConfig, Config) ->
 container_names_from_old(undefined) -> [];
 container_names_from_old(Config) -> container_names(Config).
 
-%% Flatten containers from zones or legacy format
+%% Flatten containers from zones or legacy format.
+%% New format: zones may have `deployments` referencing pods.
+%% Pod expansion: each replica gets a unique name and auto-assigned IP.
 -spec flatten_containers(map()) -> [map()].
-flatten_containers(#{zones := Zones}) when is_list(Zones) ->
-    lists:flatmap(fun(#{containers := Cts} = Zone) ->
-        ZoneName = maps:get(name, Zone, <<"default">>),
-        [Ct#{zone => binary_to_atom(iolist_to_binary(ZoneName))} || Ct <- Cts];
-       (_) -> []
-    end, Zones);
-flatten_containers(#{containers := Containers}) ->
-    Containers;
-flatten_containers(_) ->
+flatten_containers(Config) ->
+    Pods = maps:get(pods, Config, []),
+    PodMap = maps:from_list([{iolist_to_binary(maps:get(name, P)), P} || P <- Pods]),
+    case maps:find(zones, Config) of
+        {ok, Zones} when is_list(Zones) ->
+            lists:flatmap(fun(Zone) ->
+                flatten_zone_containers(Zone, PodMap)
+            end, Zones);
+        _ ->
+            case maps:find(containers, Config) of
+                {ok, Containers} -> Containers;
+                _ -> []
+            end
+    end.
+
+%% Flatten containers from a single zone — handles both old (containers)
+%% and new (deployments) formats.
+-spec flatten_zone_containers(map(), map()) -> [map()].
+flatten_zone_containers(#{deployments := Deps} = Zone, PodMap) ->
+    ZoneName = iolist_to_binary(maps:get(name, Zone, <<"default">>)),
+    ZoneAtom = binary_to_atom(ZoneName),
+    Subnet = maps:get(subnet, Zone, {10, 0, 0, 0}),
+    {Sa, Sb, Sc, _} = Subnet,
+
+    %% Expand all deployments, tracking IP counter across pods
+    {AllContainers, _} = lists:foldl(fun(#{pod := PodName, replicas := Replicas}, {Acc, IpCounter}) ->
+        PodBin = iolist_to_binary(PodName),
+        case maps:find(PodBin, PodMap) of
+            {ok, Pod} ->
+                PodContainers = maps:get(containers, Pod, []),
+                {NewCts, NextIp} = expand_replicas(PodBin, PodContainers, Replicas,
+                                                    ZoneAtom, {Sa, Sb, Sc}, IpCounter, Pod),
+                {Acc ++ NewCts, NextIp};
+            error ->
+                logger:warning("erlkoenig_config: unknown pod ~s in zone ~s",
+                               [PodBin, ZoneName]),
+                {Acc, IpCounter}
+        end
+    end, {[], 2}, Deps),
+
+    %% Also include any standalone containers in the zone
+    Standalone = maps:get(containers, Zone, []),
+    StandaloneTagged = [Ct#{zone => ZoneAtom} || Ct <- Standalone],
+
+    AllContainers ++ StandaloneTagged;
+
+flatten_zone_containers(#{containers := Cts} = Zone, _PodMap) ->
+    ZoneName = maps:get(name, Zone, <<"default">>),
+    ZoneAtom = binary_to_atom(iolist_to_binary(ZoneName)),
+    [Ct#{zone => ZoneAtom} || Ct <- Cts];
+
+flatten_zone_containers(_, _) ->
     [].
+
+%% Expand N replicas of a pod into concrete containers with IPs.
+-spec expand_replicas(binary(), [map()], pos_integer(), atom(),
+                      {byte(), byte(), byte()}, pos_integer(), map()) ->
+    {[map()], pos_integer()}.
+expand_replicas(PodName, PodContainers, Replicas, ZoneAtom,
+                {Sa, Sb, Sc}, IpStart, Pod) ->
+    PodChains = maps:get(chains, Pod, []),
+    lists:foldl(fun(ReplicaIdx, {Acc, IpCounter}) ->
+        {Cts, NextIp} = lists:foldl(fun(Ct, {CtAcc, Ip}) ->
+            CtName = maps:get(name, Ct, <<"unnamed">>),
+            %% Name: podname-N-containername
+            FullName = iolist_to_binary([PodName, "-",
+                integer_to_binary(ReplicaIdx), "-",
+                iolist_to_binary(CtName)]),
+            CtIp = {Sa, Sb, Sc, Ip},
+            Expanded = Ct#{
+                name => FullName,
+                ip => CtIp,
+                zone => ZoneAtom,
+                pod => PodName,
+                pod_instance => ReplicaIdx
+            },
+            %% Attach per-container firewall if pod defines it
+            Expanded2 = case maps:find(firewall, Ct) of
+                {ok, _} -> Expanded;
+                error -> Expanded
+            end,
+            {CtAcc ++ [Expanded2], Ip + 1}
+        end, {[], IpCounter}, PodContainers),
+        %% TODO: pod-level chains (forward rules between containers)
+        %% will be applied via erlkoenig_firewall_nft when we implement
+        %% @ref resolution. For now, per-container chains work.
+        _ = PodChains,
+        {Acc ++ Cts, NextIp}
+    end, {[], IpStart}, lists:seq(0, Replicas - 1)).
 
 %% Validate image paths exist on disk
 -spec validate_images(map(), map()) -> map().

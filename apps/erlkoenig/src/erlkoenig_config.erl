@@ -619,8 +619,8 @@ apply_pod_chains_for_replicas(PodName, PodChains, ContainerNames, Replicas, Runn
         RefMap = lists:foldl(fun(CtName, Acc) ->
             FullName = <<PodName/binary, "-", IdxBin/binary, "-", CtName/binary>>,
             case maps:find(FullName, RunningMap) of
-                {ok, #{host_veth := Veth}} ->
-                    Acc#{CtName => Veth};
+                {ok, Info} when is_map(Info) ->
+                    Acc#{CtName => Info};
                 _ ->
                     logger:warning("erlkoenig_config: pod ~s ref ~s not found in running containers",
                                    [PodName, FullName]),
@@ -664,9 +664,6 @@ apply_pod_chains_for_replicas(PodName, PodChains, ContainerNames, Replicas, Runn
 -spec resolve_and_compile_rule(term(), map(), binary(), binary()) ->
     {true, fun()} | false.
 resolve_and_compile_rule({rule, Verdict, Opts}, RefMap, PodName, ChainName) when is_map(Opts) ->
-    %% For inter-container traffic on a bridge, iifname/oifname shows the
-    %% bridge name, not the container veth. So we resolve @ref to IP addresses
-    %% (saddr/daddr) instead, which works correctly with br_netfilter.
     Resolved = maps:fold(fun
         (iif, {ref, Name}, Acc) ->
             case resolve_ref_ip(Name, RefMap, PodName) of

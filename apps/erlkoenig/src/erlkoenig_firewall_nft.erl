@@ -34,7 +34,8 @@ batches.
          remove_container/1,
          apply_zone_allows/2,
          compile_rule/1,
-         compile_generic_rule/2]).
+         compile_generic_rule/2,
+         chain_name/1]).
 
 %% NFPROTO_INET = 1
 -define(FAMILY, 1).

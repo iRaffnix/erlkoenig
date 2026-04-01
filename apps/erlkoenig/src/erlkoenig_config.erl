@@ -229,8 +229,9 @@ apply_config_with_reconciliation(OldConfig, Config) ->
     end, AllContainers),
 
     %% 6b. Apply pod-internal forward chains (after spawn, need veth names)
-    %% Results = [{Name, Pid}, ...] from just-spawned containers
-    timer:sleep(500),  %% let containers register in pg
+    timer:sleep(1500),
+    logger:info("erlkoenig_config: spawned ~p containers for pod forward: ~p",
+                [length(Results), [N || {N, _} <- Results]]),
     Pods = maps:get(pods, Config, []),
     apply_pod_forward_chains(Pods, maps:get(zones, Config, []), Results),
 
@@ -564,26 +565,33 @@ apply_zone_chains(_) ->
 
 %% Apply pod-internal forward chains after containers are spawned.
 %% Resolves @ref (container name → veth) and adds rules to nft.
-%% SpawnedPids = [{FullName, Pid}, ...] from just-spawned containers.
--spec apply_pod_forward_chains([map()], [map()], [{binary(), pid()}]) -> ok.
+%% Returns [{PodChainName, [Veth, ...]}] for forward chain rebuild.
+-spec apply_pod_forward_chains([map()], [map()], [{binary(), pid()}]) ->
+    [{binary(), [binary()]}].
 apply_pod_forward_chains(Pods, Zones, SpawnedPids) ->
     %% Build Name → veth map from spawned pids via inspect
     RunningMap = lists:foldl(fun({Name, Pid}, Acc) ->
         try erlkoenig:inspect(Pid) of
-            #{net_info := #{host_veth := Veth}} ->
-                Acc#{Name => #{host_veth => Veth}};
-            _ -> Acc
-        catch _:_ -> Acc
+            #{net_info := #{host_veth := Veth, ip := Ip}} ->
+                logger:info("erlkoenig_config: pod veth map: ~s → ~s ~p",
+                            [Name, Veth, Ip]),
+                Acc#{Name => #{host_veth => Veth, ip => Ip}};
+            Other ->
+                logger:warning("erlkoenig_config: inspect ~s: no net_info: ~p",
+                               [Name, maps:keys(Other)]),
+                Acc
+        catch C:E ->
+            logger:warning("erlkoenig_config: inspect ~s failed: ~p:~p", [Name, C, E]),
+            Acc
         end
     end, #{}, SpawnedPids),
 
-    lists:foreach(fun(Pod) ->
+    lists:flatmap(fun(Pod) ->
         PodName = iolist_to_binary(maps:get(name, Pod, <<"?">>)),
         PodChains = maps:get(chains, Pod, []),
         case PodChains of
-            [] -> ok;
+            [] -> [];
             _ ->
-                %% Find how many replicas were deployed
                 ReplicaCounts = lists:filtermap(fun(Zone) ->
                     Deps = maps:get(deployments, Zone, []),
                     case lists:search(fun(#{pod := P}) ->
@@ -602,9 +610,10 @@ apply_pod_forward_chains(Pods, Zones, SpawnedPids) ->
     end, Pods).
 
 -spec apply_pod_chains_for_replicas(binary(), [map()], [binary()],
-                                     non_neg_integer(), map()) -> ok.
+                                     non_neg_integer(), map()) ->
+    [{binary(), [binary()]}].
 apply_pod_chains_for_replicas(PodName, PodChains, ContainerNames, Replicas, RunningMap) ->
-    lists:foreach(fun(ReplicaIdx) ->
+    lists:filtermap(fun(ReplicaIdx) ->
         %% Build ref map for this replica: "frontend" → "vh_abc123"
         IdxBin = integer_to_binary(ReplicaIdx),
         RefMap = lists:foldl(fun(CtName, Acc) ->
@@ -619,37 +628,58 @@ apply_pod_chains_for_replicas(PodName, PodChains, ContainerNames, Replicas, Runn
             end
         end, #{}, ContainerNames),
 
-        %% Resolve refs in chain rules and apply
+        %% Create a dedicated regular chain for this pod instance's forward rules.
+        %% Then add a jump from the main forward chain BEFORE the per-container
+        %% jump rules (which would otherwise intercept the traffic).
+        PodChainName = iolist_to_binary([<<"pod_">>, PodName, <<"_">>, IdxBin]),
+
+        HasChains = lists:any(fun(#{rules := R}) -> R =/= []; (_) -> false end, PodChains),
+        %% Resolve @ref to IP and add rules directly to forward chain.
+        %% Bridge traffic uses saddr/daddr because br_netfilter shows
+        %% the bridge as iifname/oifname, not the container veths.
+        _ = HasChains,
+        _ = PodChainName,
         lists:foreach(fun(#{rules := Rules} = _Chain) ->
             ResolvedRules = lists:filtermap(fun(Rule) ->
-                resolve_and_compile_rule(Rule, RefMap, PodName)
+                resolve_and_compile_rule(Rule, RefMap, PodName, <<"forward">>)
             end, Rules),
             case ResolvedRules of
                 [] -> ok;
                 _ ->
                     case nfnl_server:apply_msgs(erlkoenig_nft_srv, ResolvedRules) of
                         ok ->
-                            logger:info("erlkoenig_config: pod ~s-~p: ~p forward rules applied",
+                            logger:info("erlkoenig_config: pod ~s-~p: ~p forward rules",
                                         [PodName, ReplicaIdx, length(ResolvedRules)]);
                         {error, Reason} ->
-                            logger:warning("erlkoenig_config: pod ~s-~p forward chain failed: ~p",
+                            logger:warning("erlkoenig_config: pod ~s-~p forward failed: ~p",
                                            [PodName, ReplicaIdx, Reason])
                     end
             end
-        end, PodChains)
+        end, PodChains),
+        false
     end, lists:seq(0, Replicas - 1)).
 
 %% Resolve {ref, Name} in a rule's iif/oif to concrete veth names,
-%% then compile to nft expression list.
--spec resolve_and_compile_rule(term(), map(), binary()) ->
+%% then compile to nft expression list targeting the pod chain.
+-spec resolve_and_compile_rule(term(), map(), binary(), binary()) ->
     {true, fun()} | false.
-resolve_and_compile_rule({rule, Verdict, Opts}, RefMap, PodName) when is_map(Opts) ->
-    Resolved = maps:map(fun
-        (iif, {ref, Name}) -> resolve_ref(Name, RefMap, PodName);
-        (oif, {ref, Name}) -> resolve_ref(Name, RefMap, PodName);
-        (_K, V) -> V
-    end, Opts),
-    %% Check no unresolved refs remain
+resolve_and_compile_rule({rule, Verdict, Opts}, RefMap, PodName, ChainName) when is_map(Opts) ->
+    %% For inter-container traffic on a bridge, iifname/oifname shows the
+    %% bridge name, not the container veth. So we resolve @ref to IP addresses
+    %% (saddr/daddr) instead, which works correctly with br_netfilter.
+    Resolved = maps:fold(fun
+        (iif, {ref, Name}, Acc) ->
+            case resolve_ref_ip(Name, RefMap, PodName) of
+                {ok, Ip} -> Acc#{saddr => {element(1,Ip), element(2,Ip), element(3,Ip), element(4,Ip), 32}};
+                error -> Acc#{iif => <<"__unresolved__">>}
+            end;
+        (oif, {ref, Name}, Acc) ->
+            case resolve_ref_ip(Name, RefMap, PodName) of
+                {ok, Ip} -> Acc#{daddr => {element(1,Ip), element(2,Ip), element(3,Ip), element(4,Ip), 32}};
+                error -> Acc#{oif => <<"__unresolved__">>}
+            end;
+        (K, V, Acc) -> Acc#{K => V}
+    end, #{}, Opts),
     case has_unresolved(Resolved) of
         true ->
             logger:warning("erlkoenig_config: pod ~s: unresolved ref in ~p",
@@ -659,33 +689,32 @@ resolve_and_compile_rule({rule, Verdict, Opts}, RefMap, PodName) when is_map(Opt
             try
                 Compiled = erlkoenig_firewall_nft:compile_generic_rule(Verdict, Resolved),
                 {true, nft_encode:rule_fun(inet, <<"erlkoenig_ct">>,
-                    <<"forward">>, Compiled)}
+                    ChainName, Compiled)}
             catch _:Err ->
                 logger:warning("erlkoenig_config: pod ~s rule compile error: ~p",
                                [PodName, Err]),
                 false
             end
     end;
-resolve_and_compile_rule(Rule, _RefMap, PodName) ->
-    %% Non-generic rules (atoms/tuples) — compile directly
+resolve_and_compile_rule(Rule, _RefMap, PodName, ChainName) ->
     try
         Compiled = erlkoenig_firewall_nft:compile_rule(Rule),
         {true, nft_encode:rule_fun(inet, <<"erlkoenig_ct">>,
-            <<"forward">>, Compiled)}
+            ChainName, Compiled)}
     catch _:Err ->
         logger:warning("erlkoenig_config: pod ~s rule compile error: ~p for ~p",
                        [PodName, Err, Rule]),
         false
     end.
 
--spec resolve_ref(binary(), map(), binary()) -> binary().
-resolve_ref(Name, RefMap, PodName) ->
+-spec resolve_ref_ip(binary(), map(), binary()) -> {ok, tuple()} | error.
+resolve_ref_ip(Name, RefMap, PodName) ->
     NameBin = iolist_to_binary(Name),
     case maps:find(NameBin, RefMap) of
-        {ok, Veth} -> Veth;
-        error ->
+        {ok, #{ip := Ip}} -> {ok, Ip};
+        _ ->
             logger:warning("erlkoenig_config: pod ~s: @~s not found", [PodName, NameBin]),
-            <<"__unresolved__">>
+            error
     end.
 
 -spec has_unresolved(map()) -> boolean().

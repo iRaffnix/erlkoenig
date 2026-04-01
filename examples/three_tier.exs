@@ -41,7 +41,9 @@ defmodule ThreeTier do
       ek-stop proxy && ek-stop api && ek-stop worker && ek-stop cache
       ek-net rm dmz && ek-net rm app && ek-net rm data
   """
-  use Erlkoenig.DSL
+  use Erlkoenig.Stack
+
+  # TODO: migrate observe/policy when supported
 
   # === DMZ: public-facing reverse proxy ===
   #
@@ -49,88 +51,57 @@ defmodule ThreeTier do
   # eBPF observe detects any attempt (even if the kernel blocks it)
   # and kills the container — something tried to escape.
 
-  container :proxy do
-    binary "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server"
-    zone :dmz
-    ip {10, 0, 1, 10}
-    args ["8080"]
-    ports [{8080, 8080}]
-    limits cpu: 2, memory: "256M", pids: 2
-    restart :always
-    health_check port: 8080, interval: 5000, retries: 3
+  pod "proxy" do
+    container "proxy",
+      binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
+      args: ["8080"],
+      ports: [{8080, 8080}],
+      limits: %{memory: "256M", pids: 2},
+      restart: :always,
+      health_check: [port: 8080, interval: 5000, retries: 3] do
 
-    observe :all
-
-    policy do
-      max_forks 1, per: :minute
-      on_fork_flood :kill
-      on_oom :restart
-      allowed_comms ["app"]
-      on_unexpected_exec :kill
-    end
-
-    firewall do
-      accept :established
-      accept :icmp
-      accept_tcp 8080
-      log_and_drop "DROP: "
+      chain "inbound", policy: :drop do
+        rule :accept, ct: :established
+        rule :accept, icmp: true
+        rule :accept, tcp: 8080
+        rule :drop, log: "DROP: "
+      end
     end
   end
 
   # === App: internal application tier ===
   #
   # API server: single-process, no forking needed.
-
-  container :api do
-    binary "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server"
-    zone :app
-    ip {10, 0, 2, 10}
-    args ["4000"]
-    limits cpu: 4, memory: "512M", pids: 2
-    restart {:on_failure, 5}
-    health_check port: 4000, interval: 10_000, retries: 3
-
-    observe :all
-
-    policy do
-      max_forks 1, per: :minute
-      on_fork_flood :kill
-      on_oom :restart
-    end
-
-    firewall do
-      accept :established
-      accept :icmp
-      accept_tcp 4000
-      log_and_drop "DROP: "
-    end
-  end
-
   # Worker: the only container that legitimately forks.
-  # Gets a higher pid limit and a generous fork budget.
-  # Fork flood still kills — 200/min is way beyond normal.
 
-  container :worker do
-    binary "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server"
-    zone :app
-    ip {10, 0, 2, 20}
-    args ["5000"]
-    limits cpu: 2, memory: "256M", pids: 50
-    restart :on_failure
+  pod "app" do
+    container "api",
+      binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
+      args: ["4000"],
+      limits: %{memory: "512M", pids: 2},
+      restart: {:on_failure, 5},
+      health_check: [port: 4000, interval: 10_000, retries: 3] do
 
-    observe :forks, :exits, :oom
-
-    policy do
-      max_forks 200, per: :minute
-      on_fork_flood :kill
-      on_oom :restart
+      chain "inbound", policy: :drop do
+        rule :accept, ct: :established
+        rule :accept, icmp: true
+        rule :accept, tcp: 4000
+        rule :drop, log: "DROP: "
+      end
     end
 
-    firewall do
-      accept :established
-      accept :icmp
-      accept_udp 53
-      accept :all
+    container "worker",
+      binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
+      args: ["5000"],
+      limits: %{memory: "256M", pids: 50},
+      restart: :on_failure do
+
+      chain "inbound", policy: :drop do
+        rule :accept, ct: :established
+        rule :accept, icmp: true
+        rule :accept, udp: 53
+        rule :accept
+      end
     end
   end
 
@@ -138,29 +109,47 @@ defmodule ThreeTier do
   #
   # Cache: single-process, any fork is an anomaly.
 
-  container :cache do
-    binary "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server"
-    zone :data
-    ip {10, 0, 3, 10}
-    args ["6379"]
-    limits cpu: 1, memory: "128M", pids: 2
-    restart :always
-    health_check port: 6379, interval: 5000, retries: 5
+  pod "cache" do
+    container "cache",
+      binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
+      args: ["6379"],
+      limits: %{memory: "128M", pids: 2},
+      restart: :always,
+      health_check: [port: 6379, interval: 5000, retries: 5] do
 
-    observe :forks, :oom
-
-    policy do
-      max_forks 1, per: :minute
-      on_fork_flood :kill
-      on_oom :alert
-    end
-
-    firewall do
-      accept :established
-      accept :icmp
-      accept_tcp 6379
-      log_and_drop "DROP: "
+      chain "inbound", policy: :drop do
+        rule :accept, ct: :established
+        rule :accept, icmp: true
+        rule :accept, tcp: 6379
+        rule :drop, log: "DROP: "
+      end
     end
   end
 
+  zone "dmz", subnet: {10, 0, 1, 0} do
+    chain "forward", policy: :drop do
+      rule :accept, ct: :established
+      rule :drop
+    end
+
+    deploy "proxy", replicas: 1
+  end
+
+  zone "app", subnet: {10, 0, 2, 0} do
+    chain "forward", policy: :drop do
+      rule :accept, ct: :established
+      rule :drop
+    end
+
+    deploy "app", replicas: 1
+  end
+
+  zone "data", subnet: {10, 0, 3, 0} do
+    chain "forward", policy: :drop do
+      rule :accept, ct: :established
+      rule :drop
+    end
+
+    deploy "cache", replicas: 1
+  end
 end

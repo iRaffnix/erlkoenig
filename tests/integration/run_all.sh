@@ -1,12 +1,12 @@
 #!/bin/bash
 # Run all Erlkoenig integration tests
-# Usage: sudo -E ./integration-tests/run_all.sh
+# Usage: sudo -E ./tests/integration/run_all.sh
 set -e
 
 cd "$(dirname "$0")/.."
 
 # Compile test helper
-erlc -o integration-tests integration-tests/test_helper.erl
+erlc -o tests/integration tests/integration/test_helper.erl
 
 GREEN='\033[32m'
 RED='\033[31m'
@@ -52,7 +52,7 @@ for entry in "${TESTS[@]}"; do
 
     echo -e "${BOLD}>>> ${DESC} (${SCRIPT})${RESET}"
 
-    if escript "integration-tests/${SCRIPT}" 2>&1; then
+    if escript "tests/integration/${SCRIPT}" 2>&1; then
         PASSED=$((PASSED + 1))
     else
         FAILED=$((FAILED + 1))

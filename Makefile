@@ -41,7 +41,7 @@ BUILD_DIR       := build/release
 BUILD_SAN       := build/san
 RT_BIN          := $(BUILD_DIR)/erlkoenig_rt
 RT_BIN_SAN      := $(BUILD_SAN)/erlkoenig_rt
-INT_TESTS       := integration-tests
+INT_TESTS       := tests/integration
 
 # ── Hauptziel ─────────────────────────────────────────────
 

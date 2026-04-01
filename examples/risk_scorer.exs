@@ -27,23 +27,23 @@ defmodule RiskScorer do
     set "blocklist6", :ipv6_addr, timeout: 3_600_000
 
     chain "inbound", hook: :input, policy: :drop do
-      accept :established
-      accept :loopback
-      accept :icmp
-      accept_tcp 22, counter: :ssh, limit: {25, burst: 5}
-      accept_tcp 8080, counter: :http
-      drop_if_in_set "blocklist", counter: :banned
-      log_and_drop "HOST_DROP: ", counter: :dropped
+      rule :accept, ct: :established
+      rule :accept, iif: "lo"
+      rule :accept, icmp: true
+      rule :accept, tcp: 22, counter: :ssh, limit: {25, burst: 5}
+      rule :accept, tcp: 8080, counter: :http
+      rule :drop, set: "blocklist", counter: :banned
+      rule :drop, log: "HOST_DROP: ", counter: :dropped
     end
 
     chain "forward", hook: :forward, priority: -10, policy: :drop do
-      accept :established
-      accept_on_interface "vh_*"
-      accept_output_interface "vh_*"
+      rule :accept, ct: :established
+      rule :accept, iif: "vh_*"
+      rule :accept, oif: "vh_*"
     end
 
     chain "postrouting", hook: :postrouting, type: :nat, policy: :accept do
-      masquerade_not_via "erlkoenig_br0"
+      rule :masquerade, oif_neq: "erlkoenig_br0"
     end
   end
 

@@ -20,14 +20,19 @@ Formatter: `erlfmt` (runs via rebar3 plugin). Warnings are errors (`warnings_as_
 ## Project Structure
 
 ```
-apps/
-  erlkoenig_core/       # sole OTP app (v0.3.0, 33+ modules + C runtime)
-    src/                 # erlang modules
-    c-runtime/           # C container spawner (musl-static)
-    config/              # sys.config
+apps/erlkoenig/         # sole OTP app (124+ modules, merged nft)
+  src/                   # erlang modules
+  test/                  # eunit + common_test (rebar3)
+  config/                # sys.config
+c-runtime/               # C container spawner (musl-static)
+dsl/                     # Elixir DSL (Erlkoenig.Stack)
+  lib/                   # DSL modules
+  test/                  # ExUnit tests (mix test)
+examples/                # DSL examples (.exs) + nft scenarios (.term)
+  scenarios/             # serialized .term configs for nft VM tests
+tests/
+  integration/           # integration tests (escripts, needs sudo)
 ```
-
-Single-app umbrella. External dep: `erlkoenig_nft` (nftables firewall, AF_NETLINK).
 
 ## Key Entry Points
 

@@ -12,7 +12,7 @@ main(_) ->
     test_helper:boot(),
 
     Escript = filename:absname("dsl/erlkoenig-dsl"),
-    Example = filename:absname("dsl/examples/live_test.exs"),
+    Example = filename:absname("examples/live_test.exs"),
     TermFile = "/tmp/erlkoenig_integration_15.term",
     DemoBin = filename:absname("build/release/demo/test-erlkoenig-echo_server"),
 

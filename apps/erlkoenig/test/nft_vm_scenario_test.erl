@@ -4,13 +4,13 @@
 %% --- Scenario loading ---
 
 run_file_test() ->
-    {ok, Result} = nft_vm_scenario:run_file("examples/webserver.scenario.term"),
+    {ok, Result} = nft_vm_scenario:run_file("examples/scenarios/webserver.scenario.term"),
     ?assertEqual(6, maps:get(total, Result)),
     ?assertEqual(6, maps:get(passed, Result)),
     ?assertEqual(0, maps:get(failed, Result)).
 
 run_file_with_fail_test() ->
-    {ok, Result} = nft_vm_scenario:run_file("examples/webserver_fail.scenario.term"),
+    {ok, Result} = nft_vm_scenario:run_file("examples/scenarios/webserver_fail.scenario.term"),
     ?assertEqual(2, maps:get(total, Result)),
     ?assertEqual(1, maps:get(passed, Result)),
     ?assertEqual(1, maps:get(failed, Result)).
@@ -128,7 +128,7 @@ ct_state_test() ->
 %% --- Result structure ---
 
 result_structure_test() ->
-    {ok, Result} = nft_vm_scenario:run_file("examples/webserver.scenario.term"),
+    {ok, Result} = nft_vm_scenario:run_file("examples/scenarios/webserver.scenario.term"),
     ?assert(is_binary(maps:get(chain, Result))),
     ?assert(is_atom(maps:get(policy, Result))),
     Results = maps:get(results, Result),
@@ -143,7 +143,7 @@ result_structure_test() ->
 %% --- Rule index ---
 
 rule_index_test() ->
-    {ok, Result} = nft_vm_scenario:run_file("examples/webserver.scenario.term"),
+    {ok, Result} = nft_vm_scenario:run_file("examples/scenarios/webserver.scenario.term"),
     Results = maps:get(results, Result),
     %% established -> rule 1 (ct_established_accept)
     EstResult = lists:keyfind(<<"established">>, 1,
@@ -154,14 +154,14 @@ rule_index_test() ->
 %% --- Formatting ---
 
 format_results_test() ->
-    {ok, Result} = nft_vm_scenario:run_file("examples/webserver.scenario.term"),
+    {ok, Result} = nft_vm_scenario:run_file("examples/scenarios/webserver.scenario.term"),
     Output = iolist_to_binary(nft_vm_scenario:format_results(Result)),
     ?assertNotEqual(nomatch, binary:match(Output, <<"6 packets">>)),
     ?assertNotEqual(nomatch, binary:match(Output, <<"6 passed">>)),
     ?assertNotEqual(nomatch, binary:match(Output, <<"0 failed">>)).
 
 format_failure_shows_trace_test() ->
-    {ok, Result} = nft_vm_scenario:run_file("examples/webserver_fail.scenario.term"),
+    {ok, Result} = nft_vm_scenario:run_file("examples/scenarios/webserver_fail.scenario.term"),
     Output = iolist_to_binary(nft_vm_scenario:format_results(Result)),
     ?assertNotEqual(nomatch, binary:match(Output, <<"FAIL">>)),
     ?assertNotEqual(nomatch, binary:match(Output, <<"Trace:">>)).

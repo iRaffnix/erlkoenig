@@ -15,7 +15,7 @@ load_webserver_test() ->
     ?assertEqual(2, length(maps:get(<<"prerouting_ban">>, ChainMap))).
 
 load_anti_spoofing_test() ->
-    {ok, ChainMap} = nft_vm_config:load("examples/anti_spoofing.term"),
+    {ok, ChainMap} = nft_vm_config:load("examples/scenarios/anti_spoofing.term"),
     ?assert(maps:is_key(<<"inbound">>, ChainMap)),
     ?assert(maps:is_key(<<"ssh_chain">>, ChainMap)),
     ?assert(maps:is_key(<<"http_chain">>, ChainMap)),
@@ -143,7 +143,7 @@ eval_set_lookup_test() ->
     ?assertEqual(accept, V2).
 
 eval_vmap_dispatch_test() ->
-    {ok, [Config]} = file:consult("examples/anti_spoofing.term"),
+    {ok, [Config]} = file:consult("examples/scenarios/anti_spoofing.term"),
     ChainMap = nft_vm_config:load_term(Config),
     VmapMap = nft_vm_config:vmap_map(Config),
     Rules = maps:get(<<"inbound">>, ChainMap),
@@ -155,7 +155,7 @@ eval_vmap_dispatch_test() ->
 %% --- Vmap extraction ---
 
 vmap_map_test() ->
-    {ok, [Config]} = file:consult("examples/anti_spoofing.term"),
+    {ok, [Config]} = file:consult("examples/scenarios/anti_spoofing.term"),
     VmapMap = nft_vm_config:vmap_map(Config),
     ?assert(maps:is_key(<<"port_vmap">>, VmapMap)),
     Entries = maps:get(<<"port_vmap">>, VmapMap),

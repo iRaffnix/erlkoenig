@@ -29,7 +29,7 @@ defmodule ErlkoenigNft.Firewall.Builder do
   def new(name, opts) when is_binary(name) and is_list(opts) do
     owner = Keyword.get(opts, :owner, false)
     %{name: name, owner: owner, sets: [], vmaps: [], counters: [], quotas: [],
-      chains: [], flowtables: [], rules_acc: [],
+      chains: [], flowtables: [], meters: [], rules_acc: [],
       zones: [], zone_inputs: [], zone_forwards: [], zone_masquerades: []}
   end
 
@@ -113,14 +113,24 @@ defmodule ErlkoenigNft.Firewall.Builder do
   # --- Chains ---
 
   def add_chain(state, name, opts, rules) when is_binary(name) and is_list(rules) do
-    chain = %{
-      name: name,
-      hook: Keyword.fetch!(opts, :hook),
-      type: Keyword.get(opts, :type, :filter),
-      priority: Keyword.get(opts, :priority, 0),
-      policy: Keyword.fetch!(opts, :policy),
-      rules: rules
-    }
+    chain = case Keyword.get(opts, :hook) do
+      nil ->
+        # Regular chain (no hook) — used for jump targets
+        base = %{name: name, rules: rules}
+        if Keyword.has_key?(opts, :policy),
+          do: Map.put(base, :policy, Keyword.get(opts, :policy)),
+          else: base
+
+      hook ->
+        %{
+          name: name,
+          hook: hook,
+          type: Keyword.get(opts, :type, :filter),
+          priority: Keyword.get(opts, :priority, 0),
+          policy: Keyword.fetch!(opts, :policy),
+          rules: rules
+        }
+    end
 
     update_in(state, [:chains], &(&1 ++ [chain]))
   end
@@ -220,6 +230,28 @@ defmodule ErlkoenigNft.Firewall.Builder do
     {:vmap_dispatch, proto, vmap_name}
   end
 
+  # --- Meters (dynamic per-key rate limiting) ---
+
+  @doc """
+  Add a named meter (dynamic set with embedded limit).
+
+  In nft: `meter "name" { ip saddr limit rate 5/second burst 3 }`
+
+  Options:
+    key: :saddr           — per source IP (default)
+    limit: {rate, burst: N}
+  """
+  def add_meter(state, name, opts) when is_binary(name) and is_list(opts) do
+    key = Keyword.get(opts, :key, :saddr)
+    {rate, burst_opts} = Keyword.fetch!(opts, :limit)
+    burst = if is_list(burst_opts), do: Keyword.fetch!(burst_opts, :burst), else: burst_opts
+    meter = %{name: name, key: key, rate: rate, burst: burst}
+    update_in(state, [:meters], fn
+      nil -> [meter]
+      meters -> meters ++ [meter]
+    end)
+  end
+
   # --- Flowtables ---
 
   def add_flowtable(state, name, opts) when is_binary(name) and is_list(opts) do
@@ -293,23 +325,38 @@ defmodule ErlkoenigNft.Firewall.Builder do
     end)}
   end
 
-  defp normalize_rule_opt(:counter, v) when is_atom(v), do: to_string(v)
-  defp normalize_rule_opt(:counter, v) when is_binary(v), do: v
+  # -- Matches (read kernel state) --
+  defp normalize_rule_opt(:iif, {:ref, name}), do: {:ref, to_string(name)}
   defp normalize_rule_opt(:iif, v), do: to_string(v)
+  defp normalize_rule_opt(:oif, {:ref, name}), do: {:ref, to_string(name)}
   defp normalize_rule_opt(:oif, v), do: to_string(v)
   defp normalize_rule_opt(:oif_neq, v), do: to_string(v)
   defp normalize_rule_opt(:set, v), do: to_string(v)
-  defp normalize_rule_opt(:log, v), do: to_string(v)
   defp normalize_rule_opt(:saddr, {a, b, c, d, prefix}), do: {a, b, c, d, prefix}
   defp normalize_rule_opt(:saddr, {a, b, c, d}), do: {a, b, c, d, 32}
   defp normalize_rule_opt(:daddr, {a, b, c, d, prefix}), do: {a, b, c, d, prefix}
   defp normalize_rule_opt(:daddr, {a, b, c, d}), do: {a, b, c, d, 32}
+  defp normalize_rule_opt(:ct_mark, v) when is_integer(v), do: v
+  defp normalize_rule_opt(:fib, :rpf), do: :rpf
+  defp normalize_rule_opt(:vmap, v), do: to_string(v)
+  defp normalize_rule_opt(:quota, v), do: to_string(v)
+  defp normalize_rule_opt(:meter, v), do: to_string(v)
+
+  # -- Statements (write / side-effects) --
+  defp normalize_rule_opt(:counter, v) when is_atom(v), do: to_string(v)
+  defp normalize_rule_opt(:counter, v) when is_binary(v), do: v
+  defp normalize_rule_opt(:log, v), do: to_string(v)
+  defp normalize_rule_opt(:nflog, v) when is_integer(v), do: v
+  defp normalize_rule_opt(:ct_mark_set, v) when is_integer(v), do: v
   defp normalize_rule_opt(:limit, {rate, burst_opts}) when is_list(burst_opts) do
     %{rate: rate, burst: Keyword.fetch!(burst_opts, :burst)}
   end
   defp normalize_rule_opt(:limit, {rate, burst}) when is_integer(burst) do
     %{rate: rate, burst: burst}
   end
+  defp normalize_rule_opt(:flowtable, v), do: to_string(v)
+  defp normalize_rule_opt(:chain, v), do: to_string(v)
+
   defp normalize_rule_opt(_, v), do: v
 
   # --- Rule accumulator (used by chain macro) ---
@@ -353,6 +400,7 @@ defmodule ErlkoenigNft.Firewall.Builder do
     base = if state.counters != [], do: Map.put(base, :counters, state.counters), else: base
     base = if state.flowtables != [], do: Map.put(base, :flowtables, state.flowtables), else: base
     base = if state.quotas != [], do: Map.put(base, :quotas, state.quotas), else: base
+    base = if state.meters != [], do: Map.put(base, :meters, state.meters), else: base
     base
   end
 

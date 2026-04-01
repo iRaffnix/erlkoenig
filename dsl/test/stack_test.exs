@@ -1,208 +1,6 @@
 defmodule StackTest do
   use ExUnit.Case
 
-  test "minimal stack with zone + container compiles" do
-    [{mod, _}] = Code.compile_string(~S"""
-    defmodule TestStack.Minimal do
-      use Erlkoenig.Stack
-
-      images do
-        image "myapp", path: "/tmp/myapp.erofs"
-      end
-
-      zone "apps", subnet: {10, 0, 0, 0}, gateway: {10, 0, 0, 1} do
-        container "web",
-          image: "myapp",
-          binary: "/app",
-          ip: {10, 0, 0, 10},
-          restart: :always
-      end
-    end
-    """)
-
-    config = mod.config()
-
-    assert config.images == %{"myapp" => "/tmp/myapp.erofs"}
-    assert length(config.zones) == 1
-
-    zone = hd(config.zones)
-    assert zone.name == "apps"
-    assert zone.subnet == {10, 0, 0, 0}
-    assert length(zone.containers) == 1
-
-    ct = hd(zone.containers)
-    assert ct.name == "web"
-    assert ct.binary == "/app"
-    assert ct.image == "myapp"
-    assert ct.image_path == "/tmp/myapp.erofs"
-    assert ct.ip == {10, 0, 0, 10}
-    assert ct.restart == :always
-  end
-
-  test "container with block (env, file, health_check)" do
-    [{mod, _}] = Code.compile_string(~S"""
-    defmodule TestStack.WithBlock do
-      use Erlkoenig.Stack
-
-      images do
-        image "api", path: "/tmp/api.erofs"
-      end
-
-      zone "apps" do
-        container "api",
-          image: "api",
-          binary: "/app",
-          ip: {10, 0, 0, 20} do
-
-          env "DATABASE_URL", "postgres://10.0.0.1/db"
-          env "PORT", "8080"
-          file "/etc/config.yml", "key: value"
-          health_check :tcp, port: 8080, interval: 3000
-        end
-      end
-    end
-    """)
-
-    ct = mod.config().zones |> hd() |> Map.get(:containers) |> hd()
-    assert ct.env == [{"DATABASE_URL", "postgres://10.0.0.1/db"}, {"PORT", "8080"}]
-    assert ct.files == %{"/etc/config.yml" => "key: value"}
-    assert ct.health_check == %{type: :tcp, port: 8080, interval: 3000, retries: 3}
-  end
-
-  test "steering with service and route" do
-    [{mod, _}] = Code.compile_string(~S"""
-    defmodule TestStack.Steering do
-      use Erlkoenig.Stack
-
-      images do
-        image "web", path: "/tmp/web.erofs"
-      end
-
-      zone "apps" do
-        container "web-1", image: "web", binary: "/app", ip: {10, 0, 0, 10}
-        container "web-2", image: "web", binary: "/app", ip: {10, 0, 0, 11}
-        container "worker", image: "web", binary: "/worker", ip: {10, 0, 0, 20}
-      end
-
-      steering do
-        service :web_lb,
-          vip: {10, 0, 0, 100},
-          port: 80,
-          proto: :tcp,
-          backends: ["web-1", "web-2"]
-
-        route "worker"
-      end
-    end
-    """)
-
-    steering = mod.config().steering
-    assert length(steering.services) == 1
-    svc = hd(steering.services)
-    assert svc.name == :web_lb
-    assert svc.vip == {10, 0, 0, 100}
-    assert svc.backends == ["web-1", "web-2"]
-    assert steering.routes == ["worker"]
-  end
-
-  test "guard auto-whitelists zone gateways" do
-    [{mod, _}] = Code.compile_string(~S"""
-    defmodule TestStack.Guard do
-      use Erlkoenig.Stack
-
-      zone "apps", gateway: {10, 0, 0, 1} do
-        container "web", binary: "/app", ip: {10, 0, 0, 10}
-      end
-
-      guard do
-        detect :conn_flood, threshold: 100, window: 10
-        ban_duration 3600
-        whitelist {127, 0, 0, 1}
-      end
-    end
-    """)
-
-    guard = mod.config().ct_guard
-    assert {127, 0, 0, 1} in guard.whitelist
-    assert {10, 0, 0, 1} in guard.whitelist
-  end
-
-  test "duplicate image name raises" do
-    assert_raise CompileError, ~r/duplicate image/, fn ->
-      Code.compile_string(~S"""
-      defmodule TestStack.DupImage do
-        use Erlkoenig.Stack
-        images do
-          image "app", path: "/a.erofs"
-          image "app", path: "/b.erofs"
-        end
-      end
-      """)
-    end
-  end
-
-  test "undeclared image raises" do
-    assert_raise CompileError, ~r/undeclared image/, fn ->
-      Code.compile_string(~S"""
-      defmodule TestStack.BadImage do
-        use Erlkoenig.Stack
-        images do
-          image "real", path: "/a.erofs"
-        end
-        zone "apps" do
-          container "web", image: "fake", binary: "/app", ip: {10, 0, 0, 10}
-        end
-      end
-      """)
-    end
-  end
-
-  test "unknown steering backend raises" do
-    assert_raise CompileError, ~r/unknown backend/, fn ->
-      Code.compile_string(~S"""
-      defmodule TestStack.BadBackend do
-        use Erlkoenig.Stack
-        zone "apps" do
-          container "web", binary: "/app", ip: {10, 0, 0, 10}
-        end
-        steering do
-          service :lb, vip: {10, 0, 0, 100}, port: 80, proto: :tcp,
-            backends: ["nonexistent"]
-        end
-      end
-      """)
-    end
-  end
-
-  test "duplicate container names across zones raises" do
-    assert_raise CompileError, ~r/duplicate container/, fn ->
-      Code.compile_string(~S"""
-      defmodule TestStack.DupName do
-        use Erlkoenig.Stack
-        zone "a" do
-          container "web", binary: "/app", ip: {10, 0, 0, 10}
-        end
-        zone "b", subnet: {10, 0, 1, 0}, gateway: {10, 0, 1, 1} do
-          container "web", binary: "/app", ip: {10, 0, 1, 10}
-        end
-      end
-      """)
-    end
-  end
-
-  test "IP outside subnet raises" do
-    assert_raise CompileError, ~r/outside zone subnet/, fn ->
-      Code.compile_string(~S"""
-      defmodule TestStack.BadIp do
-        use Erlkoenig.Stack
-        zone "apps", subnet: {10, 0, 0, 0} do
-          container "web", binary: "/app", ip: {192, 168, 1, 10}
-        end
-      end
-      """)
-    end
-  end
-
   test "empty stack produces minimal config" do
     [{mod, _}] = Code.compile_string(~S"""
     defmodule TestStack.Empty do
@@ -213,26 +11,385 @@ defmodule StackTest do
     assert mod.config() == %{}
   end
 
-  test "multiple containers in one zone" do
+  test "host firewall only" do
     [{mod, _}] = Code.compile_string(~S"""
-    defmodule TestStack.Multi do
+    defmodule TestStack.HostOnly do
       use Erlkoenig.Stack
 
-      images do
-        image "app", path: "/tmp/app.erofs"
+      firewall "host" do
+        counters [:ssh, :dropped]
+        set "blocklist", :ipv4_addr
+
+        chain "input", hook: :input, policy: :drop do
+          rule :accept, ct: :established
+          rule :accept, iif: "lo"
+          rule :accept, tcp: 22, limit: {25, burst: 5}, counter: :ssh
+          rule :drop, set: "blocklist", counter: :dropped
+        end
+      end
+    end
+    """)
+
+    config = mod.config()
+    assert config.firewall.table == "host"
+    assert length(config.firewall.chains) == 1
+    assert config.firewall.counters == ["ssh", "dropped"]
+    assert length(config.firewall.sets) == 1
+
+    chain = hd(config.firewall.chains)
+    assert chain.name == "input"
+    assert chain.hook == :input
+    assert chain.policy == :drop
+    assert length(chain.rules) == 4
+  end
+
+  test "pod definition with containers and forward chain" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestStack.PodDef do
+      use Erlkoenig.Stack
+
+      pod "webstack" do
+        container "frontend", binary: "/opt/frontend" do
+          chain "inbound", policy: :drop do
+            rule :accept, ct: :established
+            rule :accept, tcp: 8080
+            rule :drop
+          end
+        end
+
+        container "api", binary: "/opt/api" do
+          chain "inbound", policy: :drop do
+            rule :accept, ct: :established
+            rule :accept, tcp: 4000
+            rule :drop
+          end
+        end
+
+        chain "forward", policy: :drop do
+          rule :accept, ct: :established
+          rule :drop, log: "POD_DROP: "
+        end
+      end
+    end
+    """)
+
+    config = mod.config()
+    assert length(config.pods) == 1
+
+    pod = hd(config.pods)
+    assert pod.name == "webstack"
+    assert length(pod.containers) == 2
+    assert length(pod.chains) == 1
+
+    [frontend, api] = pod.containers
+    assert frontend.name == "frontend"
+    assert frontend.binary == "/opt/frontend"
+    assert frontend.firewall.chains |> hd() |> Map.get(:name) == "inbound"
+    assert length(frontend.firewall.chains |> hd() |> Map.get(:rules)) == 3
+
+    assert api.name == "api"
+
+    fwd = hd(pod.chains)
+    assert fwd.name == "forward"
+    assert fwd.policy == :drop
+    assert length(fwd.rules) == 2
+  end
+
+  test "zone with chain, deploy and steer" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestStack.ZoneDeploy do
+      use Erlkoenig.Stack
+
+      pod "webstack" do
+        container "frontend", binary: "/opt/frontend"
+        container "api", binary: "/opt/api"
       end
 
-      zone "apps" do
-        container "web-1", image: "app", binary: "/app", ip: {10, 0, 0, 10}
-        container "web-2", image: "app", binary: "/app", ip: {10, 0, 0, 11}
-        container "web-3", image: "app", binary: "/app", ip: {10, 0, 0, 12}
+      zone "production", subnet: {10, 0, 0, 0} do
+        chain "forward", policy: :drop do
+          rule :accept, ct: :established
+          rule :accept, udp: 53, oif: "ek_br_production"
+          rule :masquerade, oif: "eth0"
+          rule :drop
+        end
+
+        deploy "webstack", replicas: 3
+
+        steer {178, 104, 16, 107}, port: 443, proto: :tcp,
+          backends: ["webstack.frontend"]
+      end
+    end
+    """)
+
+    config = mod.config()
+    zone = hd(config.zones)
+    assert zone.name == "production"
+    assert zone.subnet == {10, 0, 0, 0}
+
+    assert length(zone.chains) == 1
+    fwd = hd(zone.chains)
+    assert fwd.name == "forward"
+    assert length(fwd.rules) == 4
+
+    assert zone.deployments == [%{pod: "webstack", replicas: 3}]
+
+    assert length(zone.steers) == 1
+    steer = hd(zone.steers)
+    assert steer.vip == {178, 104, 16, 107}
+    assert steer.port == 443
+    assert steer.proto == :tcp
+  end
+
+  test "guard compiles with watch_set" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestStack.GuardNew do
+      use Erlkoenig.Stack
+
+      guard do
+        detect :conn_flood, threshold: 50, window: 10
+        detect :port_scan, threshold: 20, window: 60
+        ban_duration 3600
+        whitelist {127, 0, 0, 1}
+      end
+    end
+    """)
+
+    guard = mod.config().ct_guard
+    assert guard.conn_flood == {50, 10}
+    assert guard.port_scan == {20, 60}
+    assert guard.ban_duration == 3600
+    assert {127, 0, 0, 1} in guard.whitelist
+  end
+
+  test "ct_mark match vs ct_mark_set statement" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestStack.CtMark do
+      use Erlkoenig.Stack
+
+      firewall "test" do
+        chain "input", hook: :input, policy: :drop do
+          rule :accept, ct_mark: 0x42
+          rule :accept, tcp: 22, ct_mark_set: 0x42
+        end
+      end
+    end
+    """)
+
+    chain = hd(mod.config().firewall.chains)
+    [match_rule, set_rule] = chain.rules
+
+    # ct_mark is a match
+    assert {:rule, :accept, %{ct_mark: 0x42}} = match_rule
+    # ct_mark_set is a statement (separate key)
+    assert {:rule, :accept, %{ct_mark_set: 0x42, tcp: 22}} = set_rule
+  end
+
+  test "advanced nft objects: meter, quota, flowtable, vmap" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestStack.AdvancedNft do
+      use Erlkoenig.Stack
+
+      firewall "host" do
+        counters [:ssh, :dropped]
+        set "blocklist", :ipv4_addr
+        vmap "port_dispatch", :inet_service, entries: [
+          {22, jump: "ssh_chain"},
+          {80, :accept}
+        ]
+        flowtable "ft0", devices: ["eth0"], priority: -100
+        quota "daily", bytes: 10_000_000_000, mode: :over
+        meter "ssh_limit", key: :saddr, limit: {5, burst: 3}
+
+        chain "input", hook: :input, policy: :drop do
+          rule :accept, ct: :established
+          rule :accept, vmap: "port_dispatch"
+          rule :drop, set: "blocklist"
+        end
+
+        chain "ssh_chain" do
+          rule :accept, tcp: 22, meter: "ssh_limit", counter: :ssh
+          rule :drop
+        end
+      end
+    end
+    """)
+
+    fw = mod.config().firewall
+    assert fw.table == "host"
+
+    # vmap
+    assert length(fw.vmaps) == 1
+    vmap = hd(fw.vmaps)
+    assert vmap.name == "port_dispatch"
+    assert {22, {:jump, "ssh_chain"}} in vmap.entries
+
+    # flowtable
+    assert length(fw.flowtables) == 1
+    ft = hd(fw.flowtables)
+    assert ft.name == "ft0"
+    assert ft.devices == ["eth0"]
+
+    # quota
+    assert length(fw.quotas) == 1
+    q = hd(fw.quotas)
+    assert q.name == "daily"
+    assert q.bytes == 10_000_000_000
+
+    # meter
+    assert length(fw.meters) == 1
+    m = hd(fw.meters)
+    assert m.name == "ssh_limit"
+    assert m.key == :saddr
+    assert m.rate == 5
+    assert m.burst == 3
+  end
+
+  test "zone without rules is isolated" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestStack.Isolated do
+      use Erlkoenig.Stack
+
+      pod "app" do
+        container "web", binary: "/opt/web"
+      end
+
+      zone "dmz", subnet: {10, 0, 0, 0} do
+        deploy "app", replicas: 1
       end
     end
     """)
 
     zone = hd(mod.config().zones)
-    assert length(zone.containers) == 3
-    names = Enum.map(zone.containers, & &1.name)
-    assert names == ["web-1", "web-2", "web-3"]
+    assert zone.name == "dmz"
+    # No chains = no network access
+    refute Map.has_key?(zone, :chains)
+    assert zone.deployments == [%{pod: "app", replicas: 1}]
+  end
+
+  test "deploy references unknown pod raises" do
+    assert_raise CompileError, ~r/unknown pod/, fn ->
+      Code.compile_string(~S"""
+      defmodule TestStack.BadDeploy do
+        use Erlkoenig.Stack
+        zone "apps" do
+          deploy "nonexistent", replicas: 1
+        end
+      end
+      """)
+    end
+  end
+
+  test "pod with duplicate container names raises" do
+    assert_raise CompileError, ~r/duplicate container/, fn ->
+      Code.compile_string(~S"""
+      defmodule TestStack.DupCt do
+        use Erlkoenig.Stack
+        pod "bad" do
+          container "web", binary: "/a"
+          container "web", binary: "/b"
+        end
+      end
+      """)
+    end
+  end
+
+  test "pod without containers raises" do
+    assert_raise CompileError, ~r/at least one container/, fn ->
+      Code.compile_string(~S"""
+      defmodule TestStack.EmptyPod do
+        use Erlkoenig.Stack
+        pod "empty" do
+        end
+      end
+      """)
+    end
+  end
+
+  test "pod container without binary raises" do
+    assert_raise CompileError, ~r/missing binary/, fn ->
+      Code.compile_string(~S"""
+      defmodule TestStack.NoBin do
+        use Erlkoenig.Stack
+        pod "bad" do
+          container "web", image: "foo"
+        end
+      end
+      """)
+    end
+  end
+
+  test "full stack: firewall + pod + zone + guard + watch" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestStack.Full do
+      use Erlkoenig.Stack
+
+      firewall "host" do
+        counters [:ssh, :dropped]
+        set "blocklist", :ipv4_addr
+
+        chain "input", hook: :input, policy: :drop do
+          rule :accept, ct: :established
+          rule :accept, tcp: 22, counter: :ssh
+          rule :drop, set: "blocklist", counter: :dropped
+        end
+      end
+
+      pod "webstack" do
+        container "frontend", binary: "/opt/frontend" do
+          chain "inbound", policy: :drop do
+            rule :accept, ct: :established
+            rule :accept, tcp: 8080
+            rule :drop
+          end
+        end
+
+        container "api", binary: "/opt/api" do
+          chain "inbound", policy: :drop do
+            rule :accept, ct: :established
+            rule :accept, tcp: 4000
+            rule :drop
+          end
+        end
+
+        chain "forward", policy: :drop do
+          rule :accept, ct: :established
+          rule :drop
+        end
+      end
+
+      zone "production", subnet: {10, 0, 0, 0} do
+        chain "forward", policy: :drop do
+          rule :accept, ct: :established
+          rule :accept, udp: 53, oif: "ek_br_production"
+          rule :masquerade, oif: "eth0"
+          rule :drop
+        end
+
+        deploy "webstack", replicas: 5
+      end
+
+      guard do
+        detect :conn_flood, threshold: 50, window: 10
+        ban_duration 3600
+        whitelist {127, 0, 0, 1}
+      end
+
+      watch :metrics do
+      end
+    end
+    """)
+
+    config = mod.config()
+    assert Map.has_key?(config, :firewall)
+    assert Map.has_key?(config, :pods)
+    assert Map.has_key?(config, :zones)
+    assert Map.has_key?(config, :ct_guard)
+
+    assert config.firewall.table == "host"
+    assert length(config.pods) == 1
+    assert hd(config.pods).name == "webstack"
+    assert length(config.zones) == 1
+    zone = hd(config.zones)
+    assert zone.deployments == [%{pod: "webstack", replicas: 5}]
   end
 end

@@ -158,20 +158,35 @@ apply_config_with_reconciliation(OldConfig, Config) ->
     Zones = maps:get(zones, Config, []),
     Report2 = ensure_zones(Zones, Report1),
 
-    %% 2b. Apply zone network policy
-    %% Old format: allows directives → erlkoenig_firewall_nft:apply_zone_allows
-    %% New format: chains with explicit rules (applied via firewall reload)
+    %% 2b. Rebuild nft table with zone-aware bridges
+    %% This ensures masquerade rules reference the correct zone bridges
+    %% instead of the default erlkoenig_br0.
+    ZoneNftConfigs = [begin
+        ZName = iolist_to_binary(maps:get(name, Z, <<"default">>)),
+        Bridge = iolist_to_binary(maps:get(bridge, Z,
+                    <<"ek_br_", ZName/binary>>)),
+        #{bridge => Bridge,
+          subnet => maps:get(subnet, Z, {10, 0, 0, 0}),
+          netmask => maps:get(netmask, Z, 24),
+          policy => allow_outbound}
+    end || Z <- Zones],
+    case ZoneNftConfigs of
+        [] -> ok;
+        _ ->
+            erlkoenig_firewall_nft:setup_table(ZoneNftConfigs),
+            %% Remove stale default bridge if zone bridges are used.
+            %% The default erlkoenig_br0 may conflict (same subnet).
+            _ = os:cmd("ip link delete erlkoenig_br0 2>/dev/null"),
+            ok
+    end,
+
+    %% 2c. Apply zone network policy
     lists:foreach(fun(#{allows := _, bridge := Bridge} = Zone) ->
         BridgeBin = iolist_to_binary(Bridge),
         erlkoenig_firewall_nft:apply_zone_allows(Zone, BridgeBin);
-       (#{chains := Chains, bridge := Bridge} = _Zone) ->
-        %% New format: zone-level chains. These are nft regular chains
-        %% that will be compiled and added to the erlkoenig_ct table.
-        %% For now, log and skip — applied when firewall subsystem
-        %% learns to handle zone chains.
-        BridgeBin = iolist_to_binary(Bridge),
-        logger:info("erlkoenig_config: zone ~s has ~p chain(s), bridge=~s",
-                    [maps:get(name, _Zone, <<"?">>), length(Chains), BridgeBin]);
+       (#{chains := Chains} = Zone) when is_list(Chains), Chains =/= [] ->
+        %% New format: compile zone chains to nft forward rules
+        apply_zone_chains(Zone);
        (_) -> ok
     end, Zones),
 
@@ -496,6 +511,45 @@ maybe_add_health_check(Pid, #{health_check := Opts}) when is_map(Opts) ->
     _ = timer:apply_after(2000, erlkoenig_health, add, [Pid, Opts]),
     ok;
 maybe_add_health_check(_Pid, _Ct) ->
+    ok.
+
+%%====================================================================
+%% Internal -- Zone Chains
+%%====================================================================
+
+%% Apply zone-level chains as nft rules in the erlkoenig_ct forward chain.
+%% Zone chains contain explicit rule terms ({rule, Verdict, Opts}) that get
+%% compiled via erlkoenig_firewall_nft:compile_generic_rule and added to
+%% the forward chain.
+-spec apply_zone_chains(map()) -> ok.
+apply_zone_chains(#{chains := Chains} = Zone) ->
+    ZoneName = maps:get(name, Zone, <<"?">>),
+    lists:foreach(fun(#{name := _ChainName, rules := Rules}) ->
+        RuleMsgs = lists:filtermap(fun(Rule) ->
+            try
+                Compiled = erlkoenig_firewall_nft:compile_rule(Rule),
+                {true, nft_encode:rule_fun(inet, <<"erlkoenig_ct">>,
+                    <<"forward">>, Compiled)}
+            catch _:Err ->
+                logger:warning("erlkoenig_config: zone ~s rule compile error: ~p for ~p",
+                               [ZoneName, Err, Rule]),
+                false
+            end
+        end, Rules),
+        case RuleMsgs of
+            [] -> ok;
+            _ ->
+                case nfnl_server:apply_msgs(erlkoenig_nft_srv, RuleMsgs) of
+                    ok ->
+                        logger:info("erlkoenig_config: zone ~s: ~p forward rules applied",
+                                    [ZoneName, length(RuleMsgs)]);
+                    {error, Reason} ->
+                        logger:warning("erlkoenig_config: zone ~s chain apply failed: ~p",
+                                       [ZoneName, Reason])
+                end
+        end
+    end, Chains);
+apply_zone_chains(_) ->
     ok.
 
 %%====================================================================

@@ -33,6 +33,7 @@ batches.
          add_container/3, add_container/4, add_container/5,
          remove_container/1,
          apply_zone_allows/2,
+         compile_rule/1,
          compile_generic_rule/2]).
 
 %% NFPROTO_INET = 1

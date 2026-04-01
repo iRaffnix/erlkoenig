@@ -95,17 +95,63 @@ defmodule Erlkoenig.Stack do
       end
     end)
 
-    # Build term
-    host_term = if host, do: Erlkoenig.Host.Builder.to_term(host)
+    # Build term — translate host/attach into zones/firewall format
+    # that erlkoenig_config understands.
     pods_term = Enum.map(pods, &Erlkoenig.Pod.Builder.to_term/1)
-    attachments_term = Enum.map(attachments, fn {pod, bridge, replicas} ->
-      %{pod: pod, bridge: bridge, replicas: replicas}
-    end)
+
+    # Each bridge becomes a zone, each attach becomes a deployment in that zone
+    zones_term = if host do
+      Enum.map(host.bridges, fn br ->
+        deps = attachments
+          |> Enum.filter(fn {_pod, bridge, _r} -> bridge == br.name end)
+          |> Enum.map(fn {pod, _bridge, replicas} ->
+            %{pod: pod, replicas: replicas}
+          end)
+
+        zone = %{
+          name: br.name,
+          subnet: br.subnet,
+          gateway: br.gateway,
+          netmask: br.netmask,
+          bridge: br.name,
+          pool: %{start: put_elem(br.subnet, 3, 2),
+                  stop: put_elem(br.subnet, 3, 254)}
+        }
+        zone = if deps != [], do: Map.put(zone, :deployments, deps), else: zone
+        zone
+      end)
+    else
+      []
+    end
+
+    # Host chains → firewall term (for host-level nft table)
+    # Forward/postrouting chains → zone chains (for erlkoenig_ct table)
+    {host_chains, zone_chains} = if host do
+      Enum.split_with(host.chains, fn chain ->
+        Map.get(chain, :hook) == :input
+      end)
+    else
+      {[], []}
+    end
+
+    firewall_term = if host_chains != [] do
+      %{table: "host", chains: host_chains}
+    end
+
+    # Attach zone-level chains (forward, postrouting, etc.) to zones
+    zones_term = if zone_chains != [] and zones_term != [] do
+      # Zone chains apply to the first zone (primary bridge)
+      [first | rest] = zones_term
+      [Map.put(first, :chains, zone_chains) | rest]
+    else
+      zones_term
+    end
 
     term = %{}
-    term = if host_term, do: Map.put(term, :host, host_term), else: term
+    term = if host, do: Map.put(term, :host, Erlkoenig.Host.Builder.to_term(host)), else: term
+    term = if firewall_term, do: Map.put(term, :firewall, firewall_term), else: term
     term = if pods_term != [], do: Map.put(term, :pods, pods_term), else: term
-    term = if attachments_term != [], do: Map.put(term, :attachments, attachments_term), else: term
+    term = if zones_term != [], do: Map.put(term, :zones, zones_term), else: term
     term = if guard_config, do: Map.put(term, :ct_guard, guard_config), else: term
     term = if watches != [], do: Map.put(term, :watch, hd(watches)), else: term
 

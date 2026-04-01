@@ -180,13 +180,10 @@ apply_config_with_reconciliation(OldConfig, Config) ->
             ok
     end,
 
-    %% 2c. Apply zone network policy
+    %% 2c. Apply zone network policy (old format only — new format deferred to 6b)
     lists:foreach(fun(#{allows := _, bridge := Bridge} = Zone) ->
         BridgeBin = iolist_to_binary(Bridge),
         erlkoenig_firewall_nft:apply_zone_allows(Zone, BridgeBin);
-       (#{chains := Chains} = Zone) when is_list(Chains), Chains =/= [] ->
-        %% New format: compile zone chains to nft forward rules
-        apply_zone_chains(Zone);
        (_) -> ok
     end, Zones),
 
@@ -228,12 +225,27 @@ apply_config_with_reconciliation(OldConfig, Config) ->
         end
     end, AllContainers),
 
-    %% 6b. Apply pod-internal forward chains (after spawn, need veth names)
+    %% 6b. Apply zone chains + pod forward chains (after spawn, need IPs)
     timer:sleep(1500),
-    logger:info("erlkoenig_config: spawned ~p containers for pod forward: ~p",
-                [length(Results), [N || {N, _} <- Results]]),
+
+    %% Build IP map from spawned containers: "web-0-nginx" → {10,0,0,2}
+    IpMap = lists:foldl(fun({Name, Pid}, Acc) ->
+        try erlkoenig:inspect(Pid) of
+            #{net_info := #{ip := Ip}} -> Acc#{Name => Ip};
+            _ -> Acc
+        catch _:_ -> Acc
+        end
+    end, #{}, Results),
+
+    %% Apply zone chains (forward, postrouting, etc.) with resolved pod refs
+    lists:foreach(fun(#{chains := Chains} = Zone) when is_list(Chains), Chains =/= [] ->
+        apply_zone_chains(Zone, IpMap);
+       (_) -> ok
+    end, Zones),
+
+    %% Apply pod-internal forward chains
     Pods = maps:get(pods, Config, []),
-    apply_pod_forward_chains(Pods, maps:get(zones, Config, []), Results),
+    apply_pod_forward_chains(Pods, Zones, Results),
 
     %% 7. Apply steering
     Report4 = maybe_apply_steering(Config, AllContainers, Report3),
@@ -528,18 +540,27 @@ maybe_add_health_check(_Pid, _Ct) ->
 %% Zone chains contain explicit rule terms ({rule, Verdict, Opts}) that get
 %% compiled via erlkoenig_firewall_nft:compile_generic_rule and added to
 %% the forward chain.
--spec apply_zone_chains(map()) -> ok.
-apply_zone_chains(#{chains := Chains} = Zone) ->
+-spec apply_zone_chains(map(), map()) -> ok.
+apply_zone_chains(#{chains := Chains} = Zone, IpMap) ->
     ZoneName = maps:get(name, Zone, <<"?">>),
     BridgeName = iolist_to_binary(maps:get(bridge, Zone,
         <<"ek_br_", (iolist_to_binary(ZoneName))/binary>>)),
-    lists:foreach(fun(#{name := _ChainName, rules := Rules}) ->
+    Ctx = #{bridge => BridgeName, ip_map => IpMap},
+    lists:foreach(fun(#{rules := Rules} = Chain) ->
+        ChainTarget = case maps:get(hook, Chain, nil) of
+            nil -> <<"forward">>;
+            input -> <<"input">>;
+            forward -> <<"forward">>;
+            postrouting -> <<"postrouting">>;
+            prerouting -> <<"prerouting">>;
+            output -> <<"output">>
+        end,
         RuleMsgs = lists:filtermap(fun(Rule) ->
             try
-                Resolved = resolve_zone_refs(Rule, BridgeName),
+                Resolved = resolve_host_refs(Rule, Ctx),
                 Compiled = erlkoenig_firewall_nft:compile_rule(Resolved),
                 {true, nft_encode:rule_fun(inet, <<"erlkoenig_ct">>,
-                    <<"forward">>, Compiled)}
+                    ChainTarget, Compiled)}
             catch _:Err ->
                 logger:warning("erlkoenig_config: zone ~s rule compile error: ~p for ~p",
                                [ZoneName, Err, Rule]),
@@ -559,23 +580,40 @@ apply_zone_chains(#{chains := Chains} = Zone) ->
                 end
         end
     end, Chains);
-apply_zone_chains(_) ->
+apply_zone_chains(_, _) ->
     ok.
 
-%% Resolve zone-level symbolic references in rules:
+%% Resolve symbolic references in rules:
 %%   :bridge      → zone bridge name (e.g. "ek_br_test")
 %%   :containers  → "vh_*" (all container veths)
--spec resolve_zone_refs(term(), binary()) -> term().
-resolve_zone_refs({rule, Verdict, Opts}, BridgeName) when is_map(Opts) ->
-    Resolved = maps:map(fun
-        (iif, bridge) -> BridgeName;
-        (oif, bridge) -> BridgeName;
-        (iif, containers) -> <<"vh_*">>;
-        (oif, containers) -> <<"vh_*">>;
-        (_K, V) -> V
-    end, Opts),
+%%   "pod.ct"     → IP-based match (saddr/daddr) for pod-qualified names
+-spec resolve_host_refs(term(), map()) -> term().
+resolve_host_refs({rule, Verdict, Opts}, Ctx) when is_map(Opts) ->
+    IpMap = maps:get(ip_map, Ctx, #{}),
+    Resolved = maps:fold(fun
+        (iif, bridge, Acc) -> Acc#{iif => maps:get(bridge, Ctx, <<"br0">>)};
+        (oif, bridge, Acc) -> Acc#{oif => maps:get(bridge, Ctx, <<"br0">>)};
+        (oif, containers, Acc) -> Acc#{oif => <<"vh_*">>};
+        (Dir, Name, Acc) when (Dir =:= iif orelse Dir =:= oif) andalso is_binary(Name) ->
+            case binary:split(Name, <<".">>) of
+                [PodName, CtName] ->
+                    %% Pod-qualified: "web.nginx" → IP lookup
+                    FullName = <<PodName/binary, "-0-", CtName/binary>>,
+                    case maps:find(FullName, IpMap) of
+                        {ok, Ip} ->
+                            IpKey = case Dir of iif -> saddr; oif -> daddr end,
+                            Acc#{IpKey => {element(1,Ip), element(2,Ip),
+                                           element(3,Ip), element(4,Ip), 32}};
+                        error ->
+                            Acc#{Dir => Name}
+                    end;
+                _ ->
+                    Acc#{Dir => Name}
+            end;
+        (K, V, Acc) -> Acc#{K => V}
+    end, #{}, Opts),
     {rule, Verdict, Resolved};
-resolve_zone_refs(Rule, _BridgeName) ->
+resolve_host_refs(Rule, _Ctx) ->
     Rule.
 
 %%====================================================================

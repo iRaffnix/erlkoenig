@@ -1,7 +1,10 @@
 defmodule PodFirewall do
   use Erlkoenig.Stack
 
-  # ── Host Firewall ─────────────────────────────────
+  # ═══════════════════════════════════════════════════
+  # Host — was darf auf den Host selbst
+  # ═══════════════════════════════════════════════════
+
   firewall "host" do
     counters [:ssh, :dropped]
 
@@ -13,7 +16,10 @@ defmodule PodFirewall do
     end
   end
 
-  # ── Pod: 2 Container mit interner Firewall ────────
+  # ═══════════════════════════════════════════════════
+  # Pod — Container-Gruppe mit interner Firewall
+  # ═══════════════════════════════════════════════════
+
   pod "web" do
     container "frontend",
       binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
@@ -35,7 +41,7 @@ defmodule PodFirewall do
       end
     end
 
-    # Inter-Container: nur frontend → api:4000, sonst drop
+    # Was darf zwischen Containern im Pod
     chain "forward", policy: :drop do
       rule :accept, ct: :established
       rule :accept, iif: {:ref, "frontend"}, oif: {:ref, "api"}, tcp: 4000
@@ -43,11 +49,16 @@ defmodule PodFirewall do
     end
   end
 
-  # ── Zone: Deployment + Netzwerk zum Host ──────────
+  # ═══════════════════════════════════════════════════
+  # Zone — was darf zwischen Host und Containern
+  # ═══════════════════════════════════════════════════
+
   zone "test", subnet: {10, 0, 0, 0} do
+    # :bridge = Zone-Bridge, :containers = alle Container-veths
     chain "forward" do
-      rule :accept, iif: "ek_br_test", oif: "vh_*"
+      rule :accept, iif: :bridge, oif: :containers
     end
+
     deploy "web", replicas: 1
   end
 end

@@ -327,8 +327,11 @@ defmodule ErlkoenigNft.Firewall.Builder do
 
   # -- Matches (read kernel state) --
   defp normalize_rule_opt(:iif, {:ref, name}), do: {:ref, to_string(name)}
+  defp normalize_rule_opt(:iif, :bridge), do: :bridge
   defp normalize_rule_opt(:iif, v), do: to_string(v)
   defp normalize_rule_opt(:oif, {:ref, name}), do: {:ref, to_string(name)}
+  defp normalize_rule_opt(:oif, :bridge), do: :bridge
+  defp normalize_rule_opt(:oif, :containers), do: :containers
   defp normalize_rule_opt(:oif, v), do: to_string(v)
   defp normalize_rule_opt(:oif_neq, v), do: to_string(v)
   defp normalize_rule_opt(:set, v), do: to_string(v)

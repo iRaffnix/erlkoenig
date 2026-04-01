@@ -531,10 +531,13 @@ maybe_add_health_check(_Pid, _Ct) ->
 -spec apply_zone_chains(map()) -> ok.
 apply_zone_chains(#{chains := Chains} = Zone) ->
     ZoneName = maps:get(name, Zone, <<"?">>),
+    BridgeName = iolist_to_binary(maps:get(bridge, Zone,
+        <<"ek_br_", (iolist_to_binary(ZoneName))/binary>>)),
     lists:foreach(fun(#{name := _ChainName, rules := Rules}) ->
         RuleMsgs = lists:filtermap(fun(Rule) ->
             try
-                Compiled = erlkoenig_firewall_nft:compile_rule(Rule),
+                Resolved = resolve_zone_refs(Rule, BridgeName),
+                Compiled = erlkoenig_firewall_nft:compile_rule(Resolved),
                 {true, nft_encode:rule_fun(inet, <<"erlkoenig_ct">>,
                     <<"forward">>, Compiled)}
             catch _:Err ->
@@ -558,6 +561,22 @@ apply_zone_chains(#{chains := Chains} = Zone) ->
     end, Chains);
 apply_zone_chains(_) ->
     ok.
+
+%% Resolve zone-level symbolic references in rules:
+%%   :bridge      → zone bridge name (e.g. "ek_br_test")
+%%   :containers  → "vh_*" (all container veths)
+-spec resolve_zone_refs(term(), binary()) -> term().
+resolve_zone_refs({rule, Verdict, Opts}, BridgeName) when is_map(Opts) ->
+    Resolved = maps:map(fun
+        (iif, bridge) -> BridgeName;
+        (oif, bridge) -> BridgeName;
+        (iif, containers) -> <<"vh_*">>;
+        (oif, containers) -> <<"vh_*">>;
+        (_K, V) -> V
+    end, Opts),
+    {rule, Verdict, Resolved};
+resolve_zone_refs(Rule, _BridgeName) ->
+    Rule.
 
 %%====================================================================
 %% Internal -- Pod Forward Chains

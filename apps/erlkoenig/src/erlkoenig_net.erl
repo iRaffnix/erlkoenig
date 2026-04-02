@@ -40,6 +40,7 @@ Network topology:
 -export([setup_container_net/3,
          setup_container_net/4,
          setup_container_net/5,
+         setup_container_net/6,
          teardown_container_net/1,
          teardown_container_veth/1]).
 
@@ -93,8 +94,15 @@ setup_container_net(Port, ContainerId, OsPid, Ip) ->
                           inet:ip4_address(), atom()) ->
     {ok, map()} | {error, term()}.
 setup_container_net(Port, ContainerId, OsPid, Ip, ZoneName) ->
-    HostVeth = host_veth_name(ContainerId),
-    ContainerVeth = peer_veth_name(ContainerId),
+    setup_container_net(Port, ContainerId, OsPid, Ip, ZoneName, undefined).
+
+-doc "Set up networking with an explicit IP, zone, and container name.".
+-spec setup_container_net(rt_handle(), binary(), non_neg_integer(),
+                          inet:ip4_address(), atom(), binary() | undefined) ->
+    {ok, map()} | {error, term()}.
+setup_container_net(Port, ContainerId, OsPid, Ip, ZoneName, Name) ->
+    HostVeth = host_veth_name(ContainerId, Name),
+    ContainerVeth = peer_veth_name(ContainerId, Name),
     maybe
         ok ?= do_host_setup(HostVeth, ContainerVeth, OsPid, ZoneName),
         Gateway = zone_gateway(ZoneName),
@@ -253,20 +261,41 @@ rollback_veth(HostVeth) ->
         erlkoenig_netlink:close(Sock)
     end.
 
-%% Generate veth names from container ID.
+%% Generate veth names from container ID or name.
 %% IFNAMSIZ is 16 (including NUL), so max 15 chars.
 %% Host:  "vh_" (3) + 12 chars = 15
 %% Peer:  "vp_" (3) + 12 chars = 15
-%% The peer name is temporary -- it keeps this name inside the netns.
 -spec host_veth_name(binary()) -> binary().
 host_veth_name(ContainerId) ->
-    Short = binary:part(ContainerId, 0, min(12, byte_size(ContainerId))),
-    <<"vh_", Short/binary>>.
+    <<"vh_", (short_id(ContainerId))/binary>>.
 
 -spec peer_veth_name(binary()) -> binary().
 peer_veth_name(ContainerId) ->
-    Short = binary:part(ContainerId, 0, min(12, byte_size(ContainerId))),
-    <<"vp_", Short/binary>>.
+    <<"vp_", (short_id(ContainerId))/binary>>.
+
+%% Named veth variants: use container name for readable ip/nft output.
+%% "web-0-nginx" → "vh.web0nginx" (dot instead of underscore to distinguish)
+-spec host_veth_name(binary(), binary() | undefined) -> binary().
+host_veth_name(ContainerId, undefined) ->
+    host_veth_name(ContainerId);
+host_veth_name(_ContainerId, Name) ->
+    <<"vh.", (short_name(Name))/binary>>.
+
+-spec peer_veth_name(binary(), binary() | undefined) -> binary().
+peer_veth_name(ContainerId, undefined) ->
+    peer_veth_name(ContainerId);
+peer_veth_name(_ContainerId, Name) ->
+    <<"vp.", (short_name(Name))/binary>>.
+
+short_id(Id) ->
+    binary:part(Id, 0, min(12, byte_size(Id))).
+
+%% Shorten name to fit in 12 chars: remove dashes, truncate.
+%% "web-0-nginx" → "web0nginx" (9 chars)
+%% "data-0-postgres" → "data0postgre" (12 chars)
+short_name(Name) ->
+    Compact = binary:replace(Name, <<"-">>, <<>>, [global]),
+    binary:part(Compact, 0, min(12, byte_size(Compact))).
 
 -spec zone_gateway(atom()) -> inet:ip4_address().
 zone_gateway(default) ->

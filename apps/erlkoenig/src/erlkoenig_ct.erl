@@ -903,9 +903,10 @@ do_container_net_setup(#ct_data{id = Id, ip = Ip,
     %% In socket mode, we temporarily set active=false for synchronous recv.
     Handle = rt_io_handle(Data),
     ok = maybe_set_active(Data, false),
+    Name = Data#ct_data.name,
     NetResult = case Ip of
         undefined -> erlkoenig_net:setup_container_net(Handle, Id, OsPid, Zone);
-        _         -> erlkoenig_net:setup_container_net(Handle, Id, OsPid, Ip, Zone)
+        _         -> erlkoenig_net:setup_container_net(Handle, Id, OsPid, Ip, Zone, Name)
     end,
     ok = maybe_set_active(Data, true),
     case NetResult of

@@ -910,7 +910,7 @@ do_container_net_setup(#ct_data{id = Id, ip = Ip,
     ok = maybe_set_active(Data, true),
     case NetResult of
         {ok, NetInfo} ->
-            firewall_add(Id, NetInfo, Data#ct_data.firewall),
+            firewall_add(Id, NetInfo, Data#ct_data.firewall, Data#ct_data.name),
             write_container_files(Data, Data#ct_data.files),
             send_to_rt(erlkoenig_proto:encode_cmd_go(), Data),
             Data2 = case Ip of
@@ -1257,10 +1257,10 @@ kill_os_pid(_) -> ok.
 
 %% -- Firewall (direct nft integration) ----------------------------
 
--spec firewall_add(binary(), map(), map()) -> ok.
-firewall_add(ContainerId, #{ip := Ip, host_veth := Veth} = _NetInfo, FwTerm) ->
+-spec firewall_add(binary(), map(), map(), binary() | undefined) -> ok.
+firewall_add(ContainerId, #{ip := Ip, host_veth := Veth} = _NetInfo, FwTerm, Name) ->
     Ports = [],  %% Port mappings handled via firewall term
-    case erlkoenig_firewall_nft:add_container(ContainerId, Ip, Veth, Ports, FwTerm) of
+    case erlkoenig_firewall_nft:add_container(ContainerId, Ip, Veth, Ports, FwTerm, Name) of
         ok -> ok;
         {error, Reason} ->
             logger:warning("firewall: failed to create chain for ~s: ~p",

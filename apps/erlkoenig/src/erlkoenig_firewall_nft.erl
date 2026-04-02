@@ -30,7 +30,7 @@ batches.
 """.
 
 -export([setup_table/0, setup_table/1, teardown_table/0,
-         add_container/3, add_container/4, add_container/5,
+         add_container/3, add_container/4, add_container/5, add_container/6,
          remove_container/1,
          apply_zone_allows/2,
          compile_rule/1,
@@ -253,8 +253,12 @@ When FirewallTerm is empty or has no chains, default rules are used
                     map()) ->
     ok | {error, term()}.
 add_container(ContainerId, Ip, HostVeth, Ports, FirewallTerm) ->
+    add_container(ContainerId, Ip, HostVeth, Ports, FirewallTerm, undefined).
+
+-doc "Add container with named chain for readable nft output.".
+add_container(ContainerId, Ip, HostVeth, Ports, FirewallTerm, Name) ->
     _ = ensure_ets(),
-    Chain = chain_name(ContainerId),
+    Chain = chain_name(ContainerId, Name),
     IpBin = ip_to_binary(Ip),
     Rules = rules_from_term(FirewallTerm),
     RuleMsgs = [nft_encode:rule_fun(inet, ?TABLE, Chain, R) || R <- Rules],
@@ -290,7 +294,7 @@ add_container(ContainerId, Ip, HostVeth, Ports, FirewallTerm) ->
     ]),
 
     %% Store container info for rebuild on remove
-    ets:insert(erlkoenig_firewall_ports, {ContainerId, HostVeth, Ip, Ports}),
+    ets:insert(erlkoenig_firewall_ports, {ContainerId, HostVeth, Ip, Ports, Chain}),
     nfnl_server:apply_msgs(?SERVER, Msgs ++ DnatMsgs).
 
 -doc """
@@ -303,7 +307,12 @@ remaining containers.
 -spec remove_container(binary()) -> ok | {error, term()}.
 remove_container(ContainerId) ->
     _ = ensure_ets(),
-    Chain = chain_name(ContainerId),
+    %% Get chain name from ETS (may be named or ID-based)
+    Chain = case ets:lookup(erlkoenig_firewall_ports, ContainerId) of
+        [{_, _, _, _, StoredChain}] -> StoredChain;
+        [{_, _, _, _}] -> chain_name(ContainerId);  %% old format
+        _ -> chain_name(ContainerId)
+    end,
     %% Remove this container from ETS
     ets:delete(erlkoenig_firewall_ports, ContainerId),
     %% Remaining containers
@@ -327,12 +336,10 @@ remove_container(ContainerId) ->
 
 -doc "Rebuild forward jump + DNAT rules for one container.".
 -spec rebuild_shared_rules(tuple()) -> [fun()].
-rebuild_shared_rules({_Id, Veth, _Ip, []}) ->
-    Chain2 = chain_name(_Id),
+rebuild_shared_rules({_Id, Veth, _Ip, [], Chain2}) ->
     [nft_encode:rule_fun(inet, ?TABLE, ?FORWARD_CHAIN,
         nft_rules:iifname_jump(Veth, Chain2))];
-rebuild_shared_rules({_Id, Veth, Ip, Ports}) ->
-    Chain2 = chain_name(_Id),
+rebuild_shared_rules({_Id, Veth, Ip, Ports, Chain2}) ->
     IpBin = ip_to_binary(Ip),
     [nft_encode:rule_fun(inet, ?TABLE, ?FORWARD_CHAIN,
         nft_rules:iifname_jump(Veth, Chain2)),
@@ -411,6 +418,15 @@ enable_route_localnet(IfName) ->
 chain_name(ContainerId) ->
     Short = binary:part(ContainerId, 0, min(12, byte_size(ContainerId))),
     <<"ct_", Short/binary>>.
+
+%% Named chain: use container name for readable nft output.
+%% "web-0-nginx" → "web-0-nginx" (nft chain name)
+-spec chain_name(binary(), binary() | undefined) -> binary().
+chain_name(_ContainerId, Name) when is_binary(Name), Name =/= <<>> ->
+    %% nft chain names: max 256 chars, no spaces
+    Name;
+chain_name(ContainerId, _) ->
+    chain_name(ContainerId).
 
 -spec ip_to_binary(inet:ip_address()) -> binary().
 ip_to_binary({A, B, C, D}) ->

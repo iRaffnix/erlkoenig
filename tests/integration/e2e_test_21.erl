@@ -74,7 +74,7 @@ run() ->
 
     %% Step 7: nftables check
     step("nft: generic rule in container chain", fun() ->
-        Output = os:cmd("nft list table inet erlkoenig_ct 2>&1"),
+        Output = os:cmd("nft list table inet erlkoenig 2>&1"),
         case string:find(Output, "tcp dport 7001 accept") of
             nomatch -> {error, "tcp dport 7001 accept rule missing"};
             _ ->
@@ -106,7 +106,7 @@ run() ->
 
     %% Step 10: Verify nft cleanup
     step("nft chains entfernt", fun() ->
-        Output = os:cmd("nft list table inet erlkoenig_ct 2>&1"),
+        Output = os:cmd("nft list table inet erlkoenig 2>&1"),
         case string:find(Output, "tcp dport 7001") of
             nomatch -> log("    Container chains sauber entfernt~n"), ok;
             _       -> log("    WARN: chain still present~n"), ok

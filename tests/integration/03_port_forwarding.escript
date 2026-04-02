@@ -36,7 +36,7 @@ main(_) ->
 
     %% Verify nft rules
     test_helper:step("nft-Regeln enthalten DNAT", fun() ->
-        Output = os:cmd("nft list table inet erlkoenig_ct 2>&1"),
+        Output = os:cmd("nft list table inet erlkoenig 2>&1"),
         case {string:find(Output, "9080"), string:find(Output, "9081")} of
             {nomatch, _} -> {error, "Port 9080 nicht in nft-Regeln"};
             {_, nomatch} -> {error, "Port 9081 nicht in nft-Regeln"};

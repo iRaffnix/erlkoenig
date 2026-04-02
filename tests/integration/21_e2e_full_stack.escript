@@ -82,7 +82,7 @@ main(_) ->
 
     %% Step 7: Verify nftables chains
     test_helper:step("nftables: generic rule in per-container chain", fun() ->
-        Output = os:cmd("nft list table inet erlkoenig_ct 2>&1"),
+        Output = os:cmd("nft list table inet erlkoenig 2>&1"),
         case string:find(Output, "tcp dport 7001 accept") of
             nomatch -> {error, "tcp dport 7001 accept rule missing"};
             _ ->
@@ -110,7 +110,7 @@ main(_) ->
         erlkoenig:stop(PidB),
         timer:sleep(1000),
         %% Verify chains are gone
-        Output = os:cmd("nft list table inet erlkoenig_ct 2>&1"),
+        Output = os:cmd("nft list table inet erlkoenig 2>&1"),
         case string:find(Output, "tcp dport 7001") of
             nomatch ->
                 io:format("    Container chains entfernt~n"),

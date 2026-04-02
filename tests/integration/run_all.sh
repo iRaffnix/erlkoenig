@@ -60,7 +60,7 @@ for entry in "${TESTS[@]}"; do
     fi
 
     # Clean up any leftover nft table between tests
-    nft delete table inet erlkoenig_ct 2>/dev/null || true
+    nft delete table inet erlkoenig 2>/dev/null || true
     sleep 1
 done
 

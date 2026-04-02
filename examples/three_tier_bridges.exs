@@ -18,18 +18,19 @@ defmodule ThreeTier do
     chain "forward", hook: :forward, policy: :drop do
       rule :accept, ct: :established
 
-      # WAN → DMZ: nur Port 8443
+      # Internet → DMZ: nur HTTPS zum Webserver
       rule :accept, iif: "eth0", oif: "web.nginx", tcp: 8443
 
-      # DMZ → App: nginx → api
+      # DMZ → App: Webserver darf zum API
       rule :accept, iif: "web.nginx", oif: "app.api", tcp: 4000
 
-      # App → Data: api → postgres
+      # App → Data: API darf zur Datenbank
       rule :accept, iif: "app.api", oif: "data.postgres", tcp: 5432
 
-      # Container → Internet
+      # DMZ → Internet: Container dürfen raus
       rule :accept, iif: "dmz", oif: "eth0"
 
+      # Alles andere: drop + log
       rule :drop, log: "FWD: "
     end
 

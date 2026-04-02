@@ -559,7 +559,7 @@ apply_zone_chains(#{chains := Chains} = Zone, IpMap) ->
             try
                 Resolved = resolve_host_refs(Rule, Ctx),
                 Compiled = erlkoenig_firewall_nft:compile_rule(Resolved),
-                {true, nft_encode:rule_fun(inet, <<"erlkoenig_ct">>,
+                {true, nft_encode:rule_fun(inet, <<"erlkoenig">>,
                     ChainTarget, Compiled)}
             catch _:Err ->
                 logger:warning("erlkoenig_config: zone ~s rule compile error: ~p for ~p",
@@ -742,7 +742,7 @@ resolve_and_compile_rule({rule, Verdict, Opts}, RefMap, PodName, ChainName) when
         false ->
             try
                 Compiled = erlkoenig_firewall_nft:compile_generic_rule(Verdict, Resolved),
-                {true, nft_encode:rule_fun(inet, <<"erlkoenig_ct">>,
+                {true, nft_encode:rule_fun(inet, <<"erlkoenig">>,
                     ChainName, Compiled)}
             catch _:Err ->
                 logger:warning("erlkoenig_config: pod ~s rule compile error: ~p",
@@ -753,7 +753,7 @@ resolve_and_compile_rule({rule, Verdict, Opts}, RefMap, PodName, ChainName) when
 resolve_and_compile_rule(Rule, _RefMap, PodName, ChainName) ->
     try
         Compiled = erlkoenig_firewall_nft:compile_rule(Rule),
-        {true, nft_encode:rule_fun(inet, <<"erlkoenig_ct">>,
+        {true, nft_encode:rule_fun(inet, <<"erlkoenig">>,
             ChainName, Compiled)}
     catch _:Err ->
         logger:warning("erlkoenig_config: pod ~s rule compile error: ~p for ~p",
@@ -804,7 +804,7 @@ maybe_configure_guard(_) ->
 -spec start_watch(map()) -> ok.
 start_watch(#{counters := Counters, actions := Actions} = Watch) ->
     Family   = maps:get(family, Watch, 1),
-    Table    = iolist_to_binary(maps:get(table, Watch, <<"erlkoenig_ct">>)),
+    Table    = iolist_to_binary(maps:get(table, Watch, <<"erlkoenig">>)),
     Interval = maps:get(interval, Watch, 2000),
     Name     = iolist_to_binary(maps:get(name, Watch, <<"unnamed">>)),
     CounterBins = [iolist_to_binary(C) || C <- Counters],

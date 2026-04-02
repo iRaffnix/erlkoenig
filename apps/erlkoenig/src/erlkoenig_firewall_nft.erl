@@ -39,7 +39,7 @@ batches.
 
 %% NFPROTO_INET = 1
 -define(FAMILY, 1).
--define(TABLE, <<"erlkoenig_ct">>).
+-define(TABLE, <<"erlkoenig">>).
 -define(FORWARD_CHAIN, <<"forward">>).
 -define(POSTROUTING_CHAIN, <<"postrouting">>).
 -define(PREROUTING_CHAIN, <<"prerouting">>).

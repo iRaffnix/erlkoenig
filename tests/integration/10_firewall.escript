@@ -39,7 +39,7 @@ main(_) ->
 
     %% Verify per-container chains exist
     test_helper:step("Per-Container nft-Chains vorhanden", fun() ->
-        Output = os:cmd("nft list table inet erlkoenig_ct 2>&1"),
+        Output = os:cmd("nft list table inet erlkoenig 2>&1"),
         case string:find(Output, "tcp dport 7001 accept") of
             nomatch -> {error, "Port 7001 accept rule missing"};
             _ ->

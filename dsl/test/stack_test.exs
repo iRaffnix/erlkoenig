@@ -11,7 +11,7 @@ defmodule StackTest do
     assert mod.config() == %{}
   end
 
-  test "host with interface, bridge and chain" do
+  test "host with interface and bridge" do
     [{mod, _}] = Code.compile_string(~S"""
     defmodule TestStack.HostOnly do
       use Erlkoenig.Stack
@@ -19,13 +19,6 @@ defmodule StackTest do
       host do
         interface "eth0", zone: :wan
         bridge "br0", subnet: {10, 0, 0, 0, 24}, uplink: "eth0"
-
-        chain "input", hook: :input, policy: :drop do
-          rule :accept, ct: :established
-          rule :accept, iif: "lo"
-          rule :accept, tcp: 22, limit: {25, burst: 5}
-          rule :drop, log: "HOST_DROP: "
-        end
       end
     end
     """)
@@ -33,63 +26,9 @@ defmodule StackTest do
     config = mod.config()
     assert config.host.bridges == [%{name: "br0", subnet: {10, 0, 0, 0},
       netmask: 24, gateway: {10, 0, 0, 1}, uplink: "eth0"}]
-    assert length(config.host.chains) == 1
-
-    chain = hd(config.host.chains)
-    assert chain.name == "input"
-    assert chain.hook == :input
-    assert chain.policy == :drop
-    assert length(chain.rules) == 4
   end
 
-  test "pod definition with containers and forward chain" do
-    [{mod, _}] = Code.compile_string(~S"""
-    defmodule TestStack.PodDef do
-      use Erlkoenig.Stack
-
-      pod "webstack" do
-        container "frontend", binary: "/opt/frontend" do
-          chain "inbound", policy: :drop do
-            rule :accept, ct: :established
-            rule :accept, tcp: 8080
-            rule :drop
-          end
-        end
-
-        container "api", binary: "/opt/api" do
-          chain "inbound", policy: :drop do
-            rule :accept, ct: :established
-            rule :accept, tcp: 4000
-            rule :drop
-          end
-        end
-
-        chain "forward", policy: :drop do
-          rule :accept, ct: :established
-          rule :drop, log: "POD_DROP: "
-        end
-      end
-    end
-    """)
-
-    config = mod.config()
-    assert length(config.pods) == 1
-
-    pod = hd(config.pods)
-    assert pod.name == "webstack"
-    assert length(pod.containers) == 2
-    assert length(pod.chains) == 1
-
-    [frontend, api] = pod.containers
-    assert frontend.name == "frontend"
-    assert frontend.firewall.chains |> hd() |> Map.get(:name) == "inbound"
-
-    fwd = hd(pod.chains)
-    assert fwd.name == "forward"
-    assert fwd.policy == :drop
-  end
-
-  test "host + pod + attach compiles" do
+  test "pod + attach compiles" do
     [{mod, _}] = Code.compile_string(~S"""
     defmodule TestStack.HostAttach do
       use Erlkoenig.Stack
@@ -97,12 +36,6 @@ defmodule StackTest do
       host do
         interface "eth0", zone: :wan
         bridge "br0", subnet: {10, 0, 0, 0, 24}, uplink: "eth0"
-
-        chain "forward", hook: :forward, policy: :drop do
-          rule :accept, ct: :established
-          rule :accept, iif: "eth0", oif: "web.frontend", tcp: 8080
-          rule :drop
-        end
       end
 
       pod "web" do
@@ -131,14 +64,6 @@ defmodule StackTest do
         bridge "dmz",  subnet: {10, 0, 0, 0, 24}, uplink: "eth0"
         bridge "app",  subnet: {10, 0, 1, 0, 24}
         bridge "data", subnet: {10, 0, 2, 0, 24}
-
-        chain "forward", hook: :forward, policy: :drop do
-          rule :accept, ct: :established
-          rule :accept, iif: "eth0", oif: "web.nginx", tcp: 443
-          rule :accept, iif: "web.nginx", oif: "app.api", tcp: 4000
-          rule :accept, iif: "app.api", oif: "data.postgres", tcp: 5432
-          rule :drop
-        end
       end
 
       pod "web" do
@@ -191,24 +116,31 @@ defmodule StackTest do
     assert {127, 0, 0, 1} in guard.whitelist
   end
 
-  test "ct_mark match vs ct_mark_set statement" do
+  test "same pod attached to multiple bridges" do
     [{mod, _}] = Code.compile_string(~S"""
-    defmodule TestStack.CtMark do
+    defmodule TestStack.MultiAttach do
       use Erlkoenig.Stack
 
       host do
-        chain "input", hook: :input, policy: :drop do
-          rule :accept, ct_mark: 0x42
-          rule :accept, tcp: 22, ct_mark_set: 0x42
-        end
+        bridge "region_eu", subnet: {10, 1, 0, 0, 24}
+        bridge "region_us", subnet: {10, 2, 0, 0, 24}
       end
+
+      pod "worker" do
+        container "fn", binary: "/opt/fn"
+      end
+
+      attach "worker", to: "region_eu", replicas: 3
+      attach "worker", to: "region_us", replicas: 2
     end
     """)
 
-    chain = hd(mod.config().host.chains)
-    [match_rule, set_rule] = chain.rules
-    assert {:rule, :accept, %{ct_mark: 0x42}} = match_rule
-    assert {:rule, :accept, %{ct_mark_set: 0x42, tcp: 22}} = set_rule
+    config = mod.config()
+    eu = Enum.find(config.zones, & &1.name == "region_eu")
+    us = Enum.find(config.zones, & &1.name == "region_us")
+
+    assert eu.deployments == [%{pod: "worker", replicas: 3}]
+    assert us.deployments == [%{pod: "worker", replicas: 2}]
   end
 
   test "attach references unknown pod raises" do
@@ -266,6 +198,105 @@ defmodule StackTest do
       end
       """)
     end
+  end
+
+  test "pod strategy: defaults to one_for_one" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestStack.DefaultStrategy do
+      use Erlkoenig.Stack
+      pod "web" do
+        container "app", binary: "/opt/app"
+      end
+    end
+    """)
+
+    pod = hd(mod.config().pods)
+    assert pod.strategy == :one_for_one
+  end
+
+  test "pod strategy: :one_for_all" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestStack.LinkedPod do
+      use Erlkoenig.Stack
+      pod "backend", strategy: :one_for_all do
+        container "db", binary: "/opt/db"
+        container "api", binary: "/opt/api"
+      end
+    end
+    """)
+
+    pod = hd(mod.config().pods)
+    assert pod.name == "backend"
+    assert pod.strategy == :one_for_all
+    assert length(pod.containers) == 2
+  end
+
+  test "pod strategy: :rest_for_one preserves container order" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestStack.OrderedPod do
+      use Erlkoenig.Stack
+      pod "pipeline", strategy: :rest_for_one do
+        container "db", binary: "/opt/db"
+        container "api", binary: "/opt/api"
+        container "proxy", binary: "/opt/proxy"
+      end
+    end
+    """)
+
+    pod = hd(mod.config().pods)
+    assert pod.strategy == :rest_for_one
+    names = Enum.map(pod.containers, & &1.name)
+    assert names == ["db", "api", "proxy"]
+  end
+
+  test "pod strategy: invalid value raises" do
+    assert_raise CompileError, ~r/invalid strategy.*:banana/, fn ->
+      Code.compile_string(~S"""
+      defmodule TestStack.BadStrategy do
+        use Erlkoenig.Stack
+        pod "bad", strategy: :banana do
+          container "x", binary: "/opt/x"
+        end
+      end
+      """)
+    end
+  end
+
+  test "mixed strategies in one stack" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestStack.MixedStrategies do
+      use Erlkoenig.Stack
+
+      host do
+        bridge "br0", subnet: {10, 0, 0, 0, 24}
+      end
+
+      pod "db", strategy: :one_for_all do
+        container "primary", binary: "/opt/pg"
+        container "replica", binary: "/opt/pg"
+      end
+
+      pod "workers" do
+        container "fn", binary: "/opt/fn"
+      end
+
+      pod "pipeline", strategy: :rest_for_one do
+        container "ingest", binary: "/opt/ingest"
+        container "process", binary: "/opt/proc"
+        container "export", binary: "/opt/export"
+      end
+
+      attach "db", to: "br0", replicas: 1
+      attach "workers", to: "br0", replicas: 5
+      attach "pipeline", to: "br0", replicas: 1
+    end
+    """)
+
+    config = mod.config()
+    strategies = Map.new(config.pods, &{&1.name, &1.strategy})
+    assert strategies["db"] == :one_for_all
+    assert strategies["workers"] == :one_for_one
+    assert strategies["pipeline"] == :rest_for_one
   end
 
   test "pod container without binary raises" do

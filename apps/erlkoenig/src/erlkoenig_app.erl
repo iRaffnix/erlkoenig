@@ -53,6 +53,10 @@ start(_StartType, _StartArgs) ->
 
     %% Step 4: Firewall + autostart
     setup_firewall(),
+
+    %% Step 5: Optional AMQP integration (ADR-0014)
+    maybe_start_amqp(Sup),
+
     autostart_containers(),
     {ok, Sup}.
 
@@ -77,6 +81,28 @@ setup_firewall() ->
         ok -> ok;
         {error, Reason} ->
             logger:error("firewall setup failed: ~p", [Reason])
+    end.
+
+%% Optional AMQP integration subtree (ADR-0014).
+%% Started dynamically to avoid boot-script dependency on amqp_client.
+maybe_start_amqp(Sup) ->
+    case application:get_env(erlkoenig, amqp, #{}) of
+        #{enabled := true} = Config ->
+            ChildSpec = #{
+                id => erlkoenig_amqp_sup,
+                start => {erlkoenig_amqp_sup, start_link, [Config]},
+                restart => permanent,
+                type => supervisor,
+                shutdown => 10_000
+            },
+            case supervisor:start_child(Sup, ChildSpec) of
+                {ok, _} ->
+                    logger:info("AMQP integration started");
+                {error, Reason} ->
+                    logger:warning("AMQP integration failed: ~p (continuing without)", [Reason])
+            end;
+        _ ->
+            ok
     end.
 
 %% Auto-start containers from config file.

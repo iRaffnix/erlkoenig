@@ -98,7 +98,7 @@ handle_event({container_metrics, Id, Event}, State) ->
     end,
     {ok, State};
 
-handle_event({container_started, Id, Pid}, State) ->
+handle_event({container_started, Id, _Name, Pid}, State) ->
     case ets:lookup(?TABLE, Id) of
         [Pol] ->
             ets:insert(?TABLE, Pol#pol{container_pid = Pid});
@@ -107,7 +107,7 @@ handle_event({container_started, Id, Pid}, State) ->
     end,
     {ok, State};
 
-handle_event({container_stopped, Id, _}, State) ->
+handle_event({container_stopped, Id, _Name, _}, State) ->
     ets:delete(?TABLE, Id),
     {ok, State};
 

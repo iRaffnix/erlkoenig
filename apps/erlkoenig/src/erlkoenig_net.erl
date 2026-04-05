@@ -161,6 +161,9 @@ do_host_setup(HostVeth, ContainerVeth, OsPid, ZoneName) ->
                          non_neg_integer(), atom()) -> ok | {error, term()}.
 do_host_setup_veth(Sock, HostVeth, ContainerVeth, OsPid, ZoneName) ->
     maybe
+        %% Clean up stale veth if it exists (e.g. from a crashed predecessor
+        %% with the same name). This prevents EEXIST on create.
+        _ = delete_link(Sock, HostVeth),
         Seq = erlkoenig_netlink:next_seq(),
         ok ?= erlkoenig_netlink:request(
                 Sock, erlkoenig_netlink:msg_create_veth(Seq, HostVeth, ContainerVeth)),

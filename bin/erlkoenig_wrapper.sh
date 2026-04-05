@@ -32,5 +32,19 @@ if [ -z "$RELX_COOKIE" ]; then
 fi
 
 # ── Delegate to relx release script ────────────────────────────────
+# Find the versioned release script (e.g. erlkoenig-0.4.0)
 
-exec "$RELEASE_ROOT/bin/_release" "$@"
+RELEASE_SCRIPT=""
+for f in "$RELEASE_ROOT"/bin/erlkoenig-*; do
+    if [ -x "$f" ] && [ "$(basename "$f")" != "erlkoenig" ]; then
+        RELEASE_SCRIPT="$f"
+        break
+    fi
+done
+
+if [ -z "$RELEASE_SCRIPT" ]; then
+    echo "FATAL: No release script found in $RELEASE_ROOT/bin/" >&2
+    exit 1
+fi
+
+exec "$RELEASE_SCRIPT" "$@"

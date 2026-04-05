@@ -18,24 +18,23 @@ defmodule ErlkoenigNft.Firewall do
   @moduledoc """
   DSL for defining nf_tables firewall configurations.
 
-  Compiles to Erlang terms compatible with `erlkoenig_nft`.
-
-  ## Example
+  All rules use the generic `rule` macro:
 
       defmodule MyFirewall do
         use ErlkoenigNft.Firewall
 
         firewall "web" do
           counters [:ssh, :dropped]
-          set "blocklist", :ipv4_addr, timeout: 3600
+          set "blocklist", :ipv4_addr, timeout: 3_600_000
 
           chain "inbound", hook: :input, policy: :drop do
-            accept :established
-            accept :icmp
-            accept_tcp 22, counter: :ssh, limit: {5, burst: 2}
-            accept_tcp [80, 443]
-            drop_if_in_set "blocklist", counter: :dropped
-            log_and_drop "BLOCKED: "
+            rule :accept, ct: :established
+            rule :accept, iif: "lo"
+            rule :accept, icmp: true
+            rule :accept, tcp: 22, counter: :ssh, limit: {25, burst: 5}
+            rule :accept, tcp: [80, 443]
+            rule :drop, set: "blocklist", counter: :dropped
+            rule :drop, log: "BLOCKED: "
           end
         end
       end
@@ -67,7 +66,7 @@ defmodule ErlkoenigNft.Firewall do
     end
   end
 
-  # --- Sets ---
+  # --- Structural macros (sets, chains, counters) ---
 
   defmacro set(name, type) do
     quote do
@@ -81,8 +80,6 @@ defmodule ErlkoenigNft.Firewall do
     end
   end
 
-  # --- Concatenated Sets ---
-
   defmacro concat_set(name, fields) do
     quote do
       @fw_builder Builder.add_concat_set(@fw_builder, unquote(name), unquote(fields))
@@ -95,15 +92,11 @@ defmodule ErlkoenigNft.Firewall do
     end
   end
 
-  # --- Verdict Maps ---
-
   defmacro vmap(name, type, opts) do
     quote do
       @fw_builder Builder.add_vmap(@fw_builder, unquote(name), unquote(type), unquote(opts))
     end
   end
-
-  # --- Counters ---
 
   defmacro counters(names) do
     quote do
@@ -111,15 +104,17 @@ defmodule ErlkoenigNft.Firewall do
     end
   end
 
-  # --- Quotas ---
-
   defmacro quota(name, bytes, opts \\ []) do
     quote do
       @fw_builder Builder.add_quota(@fw_builder, unquote(name), unquote(bytes), unquote(opts))
     end
   end
 
-  # --- Chain ---
+  defmacro flowtable(name, opts) do
+    quote do
+      @fw_builder Builder.add_flowtable(@fw_builder, unquote(name), unquote(opts))
+    end
+  end
 
   defmacro chain(name, opts, do: block) do
     quote do
@@ -130,380 +125,39 @@ defmodule ErlkoenigNft.Firewall do
     end
   end
 
-  # --- Generic rule macro ---
+  # --- The one rule macro ---
 
   @doc """
-  Generic rule builder. All firewall rules go through this macro.
+  Generic rule builder. Every firewall rule uses this macro.
 
       rule :accept, tcp: 22, limit: {25, burst: 5}, counter: :ssh
       rule :accept, ct: :established
+      rule :accept, iif: "lo"
+      rule :accept, icmp: true
+      rule :accept, tcp: 5432, saddr: {10, 0, 0, 0, 24}
       rule :drop, set: "blocklist", counter: :banned
+      rule :drop, log: "DROP: ", counter: :dropped
       rule :masquerade, oif_neq: "bridge0"
+
+  Options:
+    ct: :established         — conntrack state match
+    icmp: true               — ICMP protocol match
+    iif: "name"              — input interface (wildcard: "vh_*")
+    oif: "name"              — output interface (wildcard ok)
+    oif_neq: "name"          — output interface NOT equal
+    tcp: port                — TCP destination port
+    udp: port                — UDP destination port
+    saddr: {a,b,c,d,prefix}  — source IP/subnet
+    daddr: {a,b,c,d,prefix}  — destination IP/subnet
+    set: "name"              — match source IP against named set
+    log: "prefix"            — log with prefix
+    limit: {rate, burst: n}  — rate limit
+    counter: :name           — named counter
   """
   defmacro rule(verdict, opts \\ []) do
     quote do
       @fw_builder Builder.push_rule(@fw_builder,
         Builder.build_rule(unquote(verdict), unquote(opts)))
-    end
-  end
-
-  # --- Legacy rule macros (kept for backward compatibility) ---
-
-  defmacro accept(:established) do
-    quote do: @fw_builder Builder.push_rule(@fw_builder, Builder.ct_established_accept())
-  end
-
-  defmacro accept(:icmp) do
-    quote do: @fw_builder Builder.push_rule(@fw_builder, Builder.icmp_accept())
-  end
-
-  defmacro accept(:loopback) do
-    quote do: @fw_builder Builder.push_rule(@fw_builder, Builder.iifname_accept("lo"))
-  end
-
-  defmacro accept(:all) do
-    quote do: @fw_builder Builder.push_rule(@fw_builder, Builder.accept())
-  end
-
-  defmacro accept_tcp(ports) when is_list(ports) do
-    rules =
-      Enum.map(ports, fn port ->
-        quote do: Builder.tcp_accept(unquote(port))
-      end)
-
-    quote do
-      Enum.each(unquote(rules), fn rule ->
-        @fw_builder Builder.push_rule(@fw_builder, rule)
-      end)
-    end
-  end
-
-  defmacro accept_tcp(port) do
-    quote do: @fw_builder Builder.push_rule(@fw_builder, Builder.tcp_accept(unquote(port)))
-  end
-
-  defmacro accept_tcp(port, opts) do
-    quote do
-      @fw_builder Builder.push_rule_with_counter(@fw_builder,
-        Builder.tcp_accept(unquote(port), unquote(opts)))
-    end
-  end
-
-  defmacro accept_udp(port) do
-    quote do: @fw_builder Builder.push_rule(@fw_builder, Builder.udp_accept(unquote(port)))
-  end
-
-  defmacro accept_udp(port, opts) do
-    quote do
-      @fw_builder Builder.push_rule_with_counter(@fw_builder,
-        Builder.udp_accept(unquote(port), unquote(opts)))
-    end
-  end
-
-  defmacro accept_tcp_range(from, to_port) do
-    quote do
-      @fw_builder Builder.push_rule(@fw_builder, Builder.tcp_port_range_accept(unquote(from), unquote(to_port)))
-    end
-  end
-
-  defmacro accept_udp_range(from, to_port) do
-    quote do
-      @fw_builder Builder.push_rule(@fw_builder, Builder.udp_port_range_accept(unquote(from), unquote(to_port)))
-    end
-  end
-
-  defmacro reject_tcp(port) do
-    quote do: @fw_builder Builder.push_rule(@fw_builder, Builder.tcp_reject(unquote(port)))
-  end
-
-  defmacro accept_protocol(proto) do
-    quote do: @fw_builder Builder.push_rule(@fw_builder, Builder.protocol_accept(unquote(proto)))
-  end
-
-  defmacro accept_from(ip) do
-    quote do: @fw_builder Builder.push_rule(@fw_builder, Builder.ip_saddr_accept(unquote(ip)))
-  end
-
-  defmacro drop_from(ip) do
-    quote do: @fw_builder Builder.push_rule(@fw_builder, Builder.ip_saddr_drop(unquote(ip)))
-  end
-
-  defmacro drop_if_in_set(set_name) do
-    quote do: @fw_builder Builder.push_rule(@fw_builder, Builder.set_lookup_drop(unquote(set_name)))
-  end
-
-  defmacro drop_if_in_set(set_name, opts) do
-    quote do
-      counter = Keyword.get(unquote(opts), :counter)
-
-      rule =
-        if counter,
-          do: Builder.set_lookup_drop(unquote(set_name), counter),
-          else: Builder.set_lookup_drop(unquote(set_name))
-
-      @fw_builder Builder.push_rule(@fw_builder, rule)
-    end
-  end
-
-  defmacro connlimit_drop(max) do
-    quote do: @fw_builder Builder.push_rule(@fw_builder, Builder.connlimit_drop(unquote(max)))
-  end
-
-  defmacro connlimit_drop(max, offset) do
-    quote do
-      @fw_builder Builder.push_rule(@fw_builder, Builder.connlimit_drop(unquote(max), unquote(offset)))
-    end
-  end
-
-  defmacro log_and_drop(prefix) do
-    quote do: @fw_builder Builder.push_rule(@fw_builder, Builder.log_drop(unquote(prefix)))
-  end
-
-  defmacro log_and_drop(prefix, opts) do
-    quote do
-      counter = Keyword.get(unquote(opts), :counter)
-
-      rule =
-        if counter,
-          do: Builder.log_drop(unquote(prefix), counter),
-          else: Builder.log_drop(unquote(prefix))
-
-      @fw_builder Builder.push_rule(@fw_builder, rule)
-    end
-  end
-
-  defmacro log_and_reject(prefix) do
-    quote do: @fw_builder Builder.push_rule(@fw_builder, Builder.log_reject(unquote(prefix)))
-  end
-
-  # --- Interface matching ---
-
-  defmacro accept_on_interface(name) do
-    quote do: @fw_builder Builder.push_rule(@fw_builder, Builder.iifname_accept(unquote(name)))
-  end
-
-  defmacro accept_output_interface(name) do
-    quote do: @fw_builder Builder.push_rule(@fw_builder, Builder.oifname_accept(unquote(name)))
-  end
-
-  defmacro masquerade do
-    quote do: @fw_builder Builder.push_rule(@fw_builder, Builder.masquerade())
-  end
-
-  defmacro masquerade_not_via(name) do
-    quote do: @fw_builder Builder.push_rule(@fw_builder, Builder.oifname_neq_masq(unquote(name)))
-  end
-
-  defmacro accept_forward_established do
-    quote do: @fw_builder Builder.push_rule(@fw_builder, Builder.forward_established())
-  end
-
-  # --- NAT: DNAT ---
-
-  @doc "DNAT: redirect incoming TCP traffic on match_port to dst_ip:dst_port"
-  defmacro dnat(match_port, dst_ip, dst_port) do
-    quote do
-      @fw_builder Builder.push_rule(@fw_builder,
-        Builder.tcp_dnat(unquote(match_port), unquote(dst_ip), unquote(dst_port)))
-    end
-  end
-
-  @doc "SNAT: rewrite source address to ip:port (static source NAT)"
-  defmacro snat(ip, port) do
-    quote do
-      @fw_builder Builder.push_rule(@fw_builder,
-        Builder.snat(unquote(ip), unquote(port)))
-    end
-  end
-
-  # --- Zone definitions ---
-
-  defmacro zone(name, opts) do
-    quote do
-      @fw_builder Builder.add_zone(@fw_builder, unquote(name), unquote(opts))
-    end
-  end
-
-  defmacro zone_input(zone_name, opts, do: block) do
-    quote do
-      @fw_builder %{@fw_builder | rules_acc: []}
-      unquote(block)
-      {rules, builder} = Builder.take_rules(@fw_builder)
-      @fw_builder Builder.add_zone_input(builder, unquote(zone_name),
-        Keyword.get(unquote(opts), :policy, :drop), rules)
-    end
-  end
-
-  defmacro zone_forward(from_zone, opts, do: block) do
-    quote do
-      @fw_builder %{@fw_builder | rules_acc: []}
-      unquote(block)
-      {rules, builder} = Builder.take_rules(@fw_builder)
-      to_zone = Keyword.fetch!(unquote(opts), :to)
-      policy = Keyword.get(unquote(opts), :policy, :drop)
-      @fw_builder Builder.add_zone_forward(builder, unquote(from_zone), to_zone, policy, rules)
-    end
-  end
-
-  defmacro zone_masquerade(from_zone, opts) do
-    quote do
-      to_zone = Keyword.fetch!(unquote(opts), :to)
-      @fw_builder Builder.add_zone_masquerade(@fw_builder, unquote(from_zone), to_zone)
-    end
-  end
-
-  # --- SYN proxy ---
-
-  defmacro synproxy(ports, opts) do
-    quote do
-      ports = unquote(ports)
-      opts = unquote(opts)
-      port_list = if is_list(ports), do: ports, else: [ports]
-
-      Enum.each(port_list, fn port ->
-        @fw_builder Builder.push_rule(
-          @fw_builder,
-          Builder.synproxy_filter(port, opts)
-        )
-      end)
-    end
-  end
-
-  # --- Notrack ---
-
-  defmacro notrack(port, proto) do
-    quote do
-      @fw_builder Builder.push_rule(@fw_builder, Builder.notrack_rule(unquote(port), unquote(proto)))
-    end
-  end
-
-  # --- Meter macros ---
-
-  defmacro meter_limit(name, port, proto, opts) do
-    quote do
-      @fw_builder Builder.push_rule(@fw_builder,
-        Builder.meter_limit(unquote(name), unquote(port), unquote(proto), unquote(opts)))
-    end
-  end
-
-  # --- NFQUEUE macros ---
-
-  defmacro queue_to(port, proto, opts) do
-    quote do
-      @fw_builder Builder.push_rule(
-        @fw_builder,
-        Builder.queue_rule(unquote(port), unquote(proto), unquote(opts))
-      )
-    end
-  end
-
-  # --- Verdict map dispatch ---
-
-  defmacro dispatch(proto, vmap_name) do
-    quote do
-      @fw_builder Builder.push_rule(
-        @fw_builder,
-        Builder.vmap_dispatch(unquote(proto), unquote(vmap_name))
-      )
-    end
-  end
-
-  # --- Concatenated set matching ---
-
-  defmacro accept_if_in_concat_set(set_name, fields) do
-    quote do
-      @fw_builder Builder.push_rule(
-        @fw_builder,
-        Builder.accept_if_in_concat_set(unquote(set_name), unquote(fields))
-      )
-    end
-  end
-
-  # --- Cgroup matching ---
-
-  defmacro match_cgroup(cgroup_id, :accept) do
-    quote do
-      @fw_builder Builder.push_rule(@fw_builder, Builder.cgroup_accept(unquote(cgroup_id)))
-    end
-  end
-
-  defmacro match_cgroup(cgroup_id, :drop) do
-    quote do
-      @fw_builder Builder.push_rule(@fw_builder, Builder.cgroup_drop(unquote(cgroup_id)))
-    end
-  end
-
-  # --- Flowtable macros ---
-
-  defmacro flowtable(name, opts) do
-    quote do
-      @fw_builder Builder.add_flowtable(@fw_builder, unquote(name), unquote(opts))
-    end
-  end
-
-  defmacro offload(flowtable_name) do
-    quote do
-      @fw_builder Builder.push_rule(@fw_builder, Builder.flow_offload(unquote(flowtable_name)))
-    end
-  end
-
-  # --- ct mark macros ---
-
-  defmacro mark_connection(value) do
-    quote do
-      @fw_builder Builder.push_rule(@fw_builder, Builder.ct_mark_set(unquote(value)))
-    end
-  end
-
-  defmacro match_mark(value, opts) do
-    quote do
-      verdict = Keyword.get(unquote(opts), :verdict, :accept)
-      @fw_builder Builder.push_rule(@fw_builder, Builder.ct_mark_match(unquote(value), verdict))
-    end
-  end
-
-  # --- FIB / RPF macros ---
-
-  defmacro rpf_check do
-    quote do: @fw_builder Builder.push_rule(@fw_builder, Builder.fib_rpf_drop())
-  end
-
-  # --- OS Fingerprinting ---
-
-  defmacro match_os(os_name, verdict) do
-    quote do
-      @fw_builder Builder.push_rule(@fw_builder, Builder.osf_match(unquote(os_name), unquote(verdict)))
-    end
-  end
-
-  defmacro drop_if_in_concat_set(set_name, fields) do
-    quote do
-      @fw_builder Builder.push_rule(
-        @fw_builder,
-        Builder.drop_if_in_concat_set(unquote(set_name), unquote(fields))
-      )
-    end
-  end
-
-  # --- NFLOG macros ---
-
-  defmacro accept_udp_if_in_set(set_name, port) do
-    quote do
-      @fw_builder Builder.push_rule(@fw_builder, Builder.set_lookup_udp_accept(unquote(set_name), unquote(port)))
-    end
-  end
-
-  defmacro log_and_drop_nflog(prefix, opts) do
-    quote do
-      group = Keyword.get(unquote(opts), :group, 0)
-      counter = Keyword.get(unquote(opts), :counter)
-
-      rule =
-        if counter,
-          do: Builder.log_drop_nflog(unquote(prefix), group, counter),
-          else: Builder.log_drop_nflog(unquote(prefix), group, "unknown")
-
-      @fw_builder Builder.push_rule(@fw_builder, rule)
     end
   end
 end

@@ -43,6 +43,7 @@ defmodule Erlkoenig.Stack do
       Module.register_attribute(__MODULE__, :stack_attachments, accumulate: true)
       Module.register_attribute(__MODULE__, :stack_guard, accumulate: false)
       Module.register_attribute(__MODULE__, :stack_watches, accumulate: true)
+      Module.register_attribute(__MODULE__, :stack_nft_tables, accumulate: true)
 
       Module.put_attribute(__MODULE__, :stack_host, nil)
       Module.put_attribute(__MODULE__, :stack_guard, nil)
@@ -124,36 +125,28 @@ defmodule Erlkoenig.Stack do
       []
     end
 
-    # Host chains → firewall term (for host-level nft table)
-    # Forward/postrouting chains → zone chains (for erlkoenig_ct table)
-    {host_chains, zone_chains} = if host do
-      Enum.split_with(host.chains, fn chain ->
-        Map.get(chain, :hook) == :input
-      end)
-    else
-      {[], []}
-    end
-
-    firewall_term = if host_chains != [] do
-      %{table: "host", chains: host_chains}
-    end
-
-    # Attach zone-level chains (forward, postrouting, etc.) to zones
-    zones_term = if zone_chains != [] and zones_term != [] do
-      # Zone chains apply to the first zone (primary bridge)
-      [first | rest] = zones_term
-      [Map.put(first, :chains, zone_chains) | rest]
-    else
-      zones_term
-    end
-
+    # Build base term (no legacy firewall — ADR-0015)
     term = %{}
     term = if host, do: Map.put(term, :host, Erlkoenig.Host.Builder.to_term(host)), else: term
-    term = if firewall_term, do: Map.put(term, :firewall, firewall_term), else: term
     term = if pods_term != [], do: Map.put(term, :pods, pods_term), else: term
     term = if zones_term != [], do: Map.put(term, :zones, zones_term), else: term
+    # Validate and build nft_tables
+    nft_tables = Module.get_attribute(env.module, :stack_nft_tables) |> Enum.reverse()
+    Enum.each(nft_tables, &Erlkoenig.Nft.TableBuilder.validate!/1)
+
+    # Check table name uniqueness
+    table_names = Enum.map(nft_tables, & &1.name)
+    table_dupes = table_names -- Enum.uniq(table_names)
+    if table_dupes != [] do
+      raise CompileError,
+        description: "duplicate nft_table names: #{inspect(Enum.uniq(table_dupes))}"
+    end
+
+    nft_tables_term = Enum.map(nft_tables, &Erlkoenig.Nft.TableBuilder.to_term/1)
+
     term = if guard_config, do: Map.put(term, :ct_guard, guard_config), else: term
     term = if watches != [], do: Map.put(term, :watch, hd(watches)), else: term
+    term = if nft_tables_term != [], do: Map.put(term, :nft_tables, nft_tables_term), else: term
 
     quote do
       def config, do: unquote(Macro.escape(term))
@@ -198,12 +191,12 @@ defmodule Erlkoenig.Stack do
   # pod — container group template
   # ═══════════════════════════════════════════════════════════
 
-  defmacro pod(name, do: block) do
+  defmacro pod(name, opts \\ [], do: block) do
     Module.register_attribute(__CALLER__.module, :__ek_context__, accumulate: false)
     Module.put_attribute(__CALLER__.module, :__ek_context__, :pod)
 
     quote do
-      var!(ek_pod_builder) = Erlkoenig.Pod.Builder.new(unquote(name))
+      var!(ek_pod_builder) = Erlkoenig.Pod.Builder.new(unquote(name), unquote(opts))
       unquote(block)
       @stack_pods var!(ek_pod_builder)
     end
@@ -241,72 +234,21 @@ defmodule Erlkoenig.Stack do
   end
 
   # ═══════════════════════════════════════════════════════════
-  # chain / rule — same syntax in host and pod
+  # OLD SYNTAX REMOVED (ADR-0015: harter Bruch)
+  #
+  # The following macros were removed:
+  #   chain/3      — use nft_table + base_chain/nft_chain instead
+  #   rule/2       — use nft_rule instead (with nft field names)
+  #   counters/1   — use nft_counter inside nft_table instead
+  #   set/3        — not yet reimplemented
+  #
+  # Old field names:
+  #   tcp: 8443    → tcp_dport: 8443
+  #   iif: "eth0"  → iifname: "eth0"
+  #   oif: "br0"   → oifname: "br0"
+  #   ct: :established → ct_state: [:established, :related]
+  #   log: "DROP:" → log_prefix: "DROP:"
   # ═══════════════════════════════════════════════════════════
-
-  defmacro chain(name, opts \\ [], do: block) do
-    ctx = Module.get_attribute(__CALLER__.module, :__ek_context__)
-    case ctx do
-      :host ->
-        quote do
-          var!(ek_host_builder) = Erlkoenig.Host.Builder.begin_chain(
-            var!(ek_host_builder), unquote(name), unquote(opts))
-          unquote(block)
-          var!(ek_host_builder) = Erlkoenig.Host.Builder.end_chain(
-            var!(ek_host_builder), unquote(name), unquote(opts))
-        end
-
-      :pod ->
-        quote do
-          var!(ek_pod_builder) = Erlkoenig.Pod.Builder.begin_chain(
-            var!(ek_pod_builder), unquote(name), unquote(opts))
-          unquote(block)
-          var!(ek_pod_builder) = Erlkoenig.Pod.Builder.end_chain(
-            var!(ek_pod_builder), unquote(name), unquote(opts))
-        end
-    end
-  end
-
-  defmacro rule(verdict, opts \\ []) do
-    ctx = Module.get_attribute(__CALLER__.module, :__ek_context__)
-    case ctx do
-      :host ->
-        quote do
-          var!(ek_host_builder) = Erlkoenig.Host.Builder.push_rule(
-            var!(ek_host_builder),
-            ErlkoenigNft.Firewall.Builder.build_rule(unquote(verdict), unquote(opts)))
-        end
-
-      :pod ->
-        quote do
-          rule_term = ErlkoenigNft.Firewall.Builder.build_rule(
-            unquote(verdict), unquote(opts))
-          pod = var!(ek_pod_builder)
-          var!(ek_pod_builder) = if pod.current_ct != nil do
-            Erlkoenig.Pod.Builder.push_rule_to_ct(pod, rule_term)
-          else
-            Erlkoenig.Pod.Builder.push_rule_to_pod(pod, rule_term)
-          end
-        end
-    end
-  end
-
-  # ═══════════════════════════════════════════════════════════
-  # nft objects — inside host block
-  # ═══════════════════════════════════════════════════════════
-
-  defmacro counters(names) do
-    # TODO: store in host builder
-    quote do
-      _ = unquote(names)
-    end
-  end
-
-  defmacro set(name, type, opts \\ []) do
-    quote do
-      _ = {unquote(name), unquote(type), unquote(opts)}
-    end
-  end
 
   # ═══════════════════════════════════════════════════════════
   # guard / watch — Erlang runtime
@@ -348,6 +290,58 @@ defmodule Erlkoenig.Stack do
       var!(ek_watch_builder) = ErlkoenigNft.Watch.Builder.new(unquote(name))
       unquote(block)
       @stack_watches ErlkoenigNft.Watch.Builder.to_term(var!(ek_watch_builder))
+    end
+  end
+
+  # ═══════════════════════════════════════════════════════════
+  # nft_table / base_chain / chain — nft-transparent DSL (ADR-0015)
+  # ═══════════════════════════════════════════════════════════
+
+  defmacro nft_table(family, name, do: block) do
+    Module.register_attribute(__CALLER__.module, :__ek_context__, accumulate: false)
+    Module.put_attribute(__CALLER__.module, :__ek_context__, :nft_table)
+
+    quote do
+      var!(ek_nft_table) = Erlkoenig.Nft.TableBuilder.new(unquote(family), unquote(name))
+      unquote(block)
+      @stack_nft_tables var!(ek_nft_table)
+    end
+  end
+
+  defmacro base_chain(name, opts, do: block) do
+    quote do
+      var!(ek_nft_chain) = Erlkoenig.Nft.ChainBuilder.new_base(unquote(name), unquote(opts))
+      unquote(block)
+      var!(ek_nft_table) = Erlkoenig.Nft.TableBuilder.add_chain(
+        var!(ek_nft_table), var!(ek_nft_chain))
+    end
+  end
+
+  # Override: chain inside nft_table context (regular chain, no hook/policy)
+  # The existing chain/3 macro handles host/pod contexts via @__ek_context__
+  # This version is for nft_table context only
+  defmacro nft_chain(name, do: block) do
+    quote do
+      var!(ek_nft_chain) = Erlkoenig.Nft.ChainBuilder.new_regular(unquote(name))
+      unquote(block)
+      var!(ek_nft_table) = Erlkoenig.Nft.TableBuilder.add_chain(
+        var!(ek_nft_table), var!(ek_nft_chain))
+    end
+  end
+
+  # rule inside nft_table context — uses nft field names
+  defmacro nft_rule(action, opts \\ []) do
+    quote do
+      var!(ek_nft_chain) = Erlkoenig.Nft.ChainBuilder.add_rule(
+        var!(ek_nft_chain), unquote(action), unquote(opts))
+    end
+  end
+
+  # counter declaration at table level
+  defmacro nft_counter(name) do
+    quote do
+      var!(ek_nft_table) = Erlkoenig.Nft.TableBuilder.add_counter(
+        var!(ek_nft_table), unquote(name))
     end
   end
 end

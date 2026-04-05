@@ -137,7 +137,7 @@ handle_event({container_metrics, Id, #{type := oom} = Ev}, State) ->
     end),
     {ok, State};
 
-handle_event({container_stopped, Id, _}, State) ->
+handle_event({container_stopped, Id, _Name, _}, State) ->
     %% Clean up metrics 30s after stop (allows post-mortem inspection).
     %% Timer is fire-and-forget; if handler restarts, entries are orphaned
     %% but bounded by container count.

@@ -36,20 +36,20 @@ init([]) ->
     {ok, #{}}.
 
 -spec handle_event(term(), map()) -> {ok, map()}.
-handle_event({container_started, Id, Pid}, State) ->
-    logger:info("event: container ~s started (pid=~p)", [Id, Pid]),
+handle_event({container_started, _Id, Name, Pid}, State) ->
+    logger:info("event: container ~s started (pid=~p)", [Name, Pid]),
     {ok, State};
-handle_event({container_stopped, Id, ExitInfo}, State) ->
-    logger:info("event: container ~s stopped ~p", [Id, ExitInfo]),
+handle_event({container_stopped, _Id, Name, ExitInfo}, State) ->
+    logger:info("event: container ~s stopped ~p", [Name, ExitInfo]),
     {ok, State};
-handle_event({container_failed, Id, Reason}, State) ->
-    logger:warning("event: container ~s failed: ~p", [Id, Reason]),
+handle_event({container_failed, _Id, Name, Reason}, State) ->
+    logger:warning("event: container ~s failed: ~p", [Name, Reason]),
     {ok, State};
-handle_event({container_restarting, Id, Attempt}, State) ->
-    logger:info("event: container ~s restarting (attempt ~p)", [Id, Attempt]),
+handle_event({container_restarting, _Id, Name, Attempt}, State) ->
+    logger:info("event: container ~s restarting (attempt ~p)", [Name, Attempt]),
     {ok, State};
-handle_event({container_oom, Id}, State) ->
-    logger:warning("event: container ~s killed by OOM", [Id]),
+handle_event({container_oom, _Id, Name}, State) ->
+    logger:warning("event: container ~s killed by OOM", [Name]),
     {ok, State};
 handle_event(_Event, State) ->
     {ok, State}.

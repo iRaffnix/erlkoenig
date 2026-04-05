@@ -115,7 +115,8 @@ States:
     sig_meta      = undefined  :: map() | undefined,
     fuse_mount    = undefined  :: binary() | undefined,
     tmpfs_mounts  = []         :: [map()],
-    volumes       = []         :: [map()]
+    volumes       = []         :: [map()],
+    pod_supervised = false     :: boolean()
 }).
 
 -define(SPAWN_TIMEOUT, application:get_env(erlkoenig, spawn_timeout, 30_000)).
@@ -196,10 +197,12 @@ init({normal, BinaryPath, Opts}) ->
         firewall    = maps:get(firewall, Opts, #{}),
         sig_path    = maps:get(sig_path, Opts, undefined),
         volumes     = maps:get(volumes, Opts, []),
+        pod_supervised = maps:get(pod_supervised, Opts, false),
         extra_opts  = maps:without([args, env, uid, gid, ip, restart,
                                     limits, seccomp, caps, output, name,
                                     files, zone, pty, firewall, sig_path,
-                                    signature_required, comm_mode, volumes], Opts)
+                                    signature_required, comm_mode, volumes,
+                                    pod_supervised], Opts)
     },
     {ok, creating, Data};
 
@@ -461,7 +464,8 @@ starting({call, _From}, _, _Data) ->
 
 running(enter, _OldState, Data) ->
     pg:join(erlkoenig_pg, erlkoenig_cts, self()),
-    erlkoenig_events:notify({container_started, Data#ct_data.id, self()}),
+    erlkoenig_events:notify({container_started, Data#ct_data.id,
+                             Data#ct_data.name, self()}),
     dns_register(Data),
     dets_register(Data),
     audit_volumes_mounted(Data),
@@ -615,16 +619,28 @@ stopped(enter, _OldState, Data) ->
     pg:leave(erlkoenig_pg, erlkoenig_cts, self()),
     firewall_remove(Data#ct_data.id),
     cleanup_fuse(Data),
-    
+
     safe_sock_close(Data#ct_data.sock),
     cleanup_socket_file(Data#ct_data.socket_path),
     dns_unregister(Data),
     dets_unregister(Data),
     audit_volumes_released(Data),
     notify_stopped(Data),
-    self() ! check_restart,
-    {keep_state, Data#ct_data{sock = undefined,
-                              fuse_mount = undefined}};
+    Data2 = Data#ct_data{sock = undefined, fuse_mount = undefined},
+    case Data2#ct_data.pod_supervised of
+        true ->
+            %% Pod supervisor handles restart — propagate exit reason.
+            %% Full cleanup: veth, cgroup, IP — so fresh resources
+            %% are allocated on supervisor restart.
+            _ = teardown_veth(Data2),
+            _ = destroy_cgroup(Data2),
+            Data3 = release_ip(Data2#ct_data{net_info = undefined}),
+            ExitReason = pod_exit_reason(Data3),
+            {stop, ExitReason, Data3};
+        false ->
+            self() ! check_restart,
+            {keep_state, Data2}
+    end;
 
 stopped(info, check_restart, Data) ->
     handle_check_restart(Data);
@@ -645,7 +661,8 @@ stopped({call, From}, _, _Data) ->
 restarting(enter, _OldState, Data) ->
     Backoff = backoff_ms(Data#ct_data.restart_count),
     erlkoenig_events:notify({container_restarting, Data#ct_data.id,
-                           Data#ct_data.restart_count}),
+                             Data#ct_data.name,
+                             Data#ct_data.restart_count}),
     logger:info("container ~s restarting in ~pms (attempt ~p)",
                 [Data#ct_data.id, Backoff, Data#ct_data.restart_count]),
     {keep_state_and_data, [{state_timeout, Backoff, do_restart}]};
@@ -688,18 +705,30 @@ failed(enter, _OldState, Data) ->
     pg:leave(erlkoenig_pg, erlkoenig_cts, self()),
     firewall_remove(Data#ct_data.id),
     cleanup_fuse(Data),
-    
+
     safe_sock_close(Data#ct_data.sock),
     cleanup_socket_file(Data#ct_data.socket_path),
     dns_unregister(Data),
     dets_unregister(Data),
     erlkoenig_events:notify({container_failed, Data#ct_data.id,
-                           Data#ct_data.error_reason}),
+                             Data#ct_data.name,
+                             Data#ct_data.error_reason}),
     logger:error("container ~s failed: ~p",
                  [Data#ct_data.id, Data#ct_data.error_reason]),
-    self() ! check_restart,
-    {keep_state, Data#ct_data{sock = undefined,
-                              fuse_mount = undefined}};
+    Data2 = Data#ct_data{sock = undefined, fuse_mount = undefined},
+    case Data2#ct_data.pod_supervised of
+        true ->
+            _ = teardown_veth(Data2),
+            _ = destroy_cgroup(Data2),
+            Reason = case Data2#ct_data.error_reason of
+                undefined -> {container_failed, unknown, 0};
+                R -> {container_failed, R, 0}
+            end,
+            {stop, Reason, Data2};
+        false ->
+            self() ! check_restart,
+            {keep_state, Data2}
+    end;
 
 failed(info, check_restart, Data) ->
     handle_check_restart(Data);
@@ -970,6 +999,27 @@ is_failure_exit(#ct_data{exit_info = #{exit_code := 0, term_signal := 0}}) ->
 is_failure_exit(_) ->
     true.
 
+%% Exit reason for pod-supervised containers.
+%% normal/shutdown → supervisor does NOT restart (transient).
+%% Anything else → supervisor restarts the group.
+-spec pod_exit_reason(#ct_data{}) -> term().
+pod_exit_reason(#ct_data{user_stopped = true}) ->
+    shutdown;
+pod_exit_reason(Data) ->
+    case is_failure_exit(Data) of
+        false -> normal;
+        true ->
+            ExitCode = case Data#ct_data.exit_info of
+                #{exit_code := C} -> C;
+                _ -> unknown
+            end,
+            Signal = case Data#ct_data.exit_info of
+                #{term_signal := S} -> S;
+                _ -> 0
+            end,
+            {container_failed, ExitCode, Signal}
+    end.
+
 -spec validate_restart(term()) -> erlkoenig:restart_policy().
 validate_restart(no_restart)                            -> no_restart;
 validate_restart(always)                                -> always;
@@ -985,8 +1035,8 @@ backoff_ms(N)              -> min(30_000, 1000 bsl min(N - 1, 4)).
 %% -- Event notifications ------------------------------------------
 
 -spec notify_stopped(#ct_data{}) -> ok.
-notify_stopped(#ct_data{id = Id, exit_info = ExitInfo}) ->
-    erlkoenig_events:notify({container_stopped, Id, ExitInfo}),
+notify_stopped(#ct_data{id = Id, name = Name, exit_info = ExitInfo}) ->
+    erlkoenig_events:notify({container_stopped, Id, Name, ExitInfo}),
     %% Detect OOM-Kill via cgroup memory.events (authoritative).
     %% Fallback to signal heuristic if cgroup check fails.
     OOM = case erlkoenig_cgroup:was_oom_killed(Id) of
@@ -994,7 +1044,7 @@ notify_stopped(#ct_data{id = Id, exit_info = ExitInfo}) ->
         false -> maps:get(term_signal, ExitInfo, 0) =:= 9
     end,
     case OOM of
-        true  -> erlkoenig_events:notify({container_oom, Id});
+        true  -> erlkoenig_events:notify({container_oom, Id, Name});
         false -> ok
     end.
 
@@ -1259,6 +1309,9 @@ kill_os_pid(_) -> ok.
 %% -- Firewall (direct nft integration) ----------------------------
 
 -spec firewall_add(binary(), map(), map(), binary() | undefined) -> ok.
+firewall_add(_ContainerId, _NetInfo, skip_firewall, _Name) ->
+    %% nft_tables mode (ADR-0015): firewall defined in DSL, not auto-generated
+    ok;
 firewall_add(ContainerId, #{ip := Ip, host_veth := Veth} = _NetInfo, FwTerm, Name) ->
     Ports = [],  %% Port mappings handled via firewall term
     case erlkoenig_firewall_nft:add_container(ContainerId, Ip, Veth, Ports, FwTerm, Name) of

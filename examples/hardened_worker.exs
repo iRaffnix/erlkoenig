@@ -1,30 +1,47 @@
 defmodule HardenedWorker do
   use Erlkoenig.Stack
 
-  pod "worker" do
-    container "worker",
-      binary: "/opt/bin/compute_worker",
-      args: ["--queue", "default"],
-      limits: %{memory: "512M", pids: 100},
-      seccomp: :strict,
-      restart: {:on_failure, 10},
-      health_check: [port: 9090, interval: 15_000, retries: 5] do
+  # ── Gehärteter Worker mit Limits + Egress-Filter ──────
+  #
+  # Zeigt: Memory/PID-Limits, Health-Checks, Restart-Policy,
+  # nft-transparente Firewall mit Egress-Filter.
+  #
+  # Der Worker darf nur antworten (ct established).
+  # Jeder aktive Outbound-Versuch wird gedroppt + gezählt.
 
-      chain "inbound", policy: :drop do
-        rule :accept, ct: :established
-        rule :accept, icmp: true
-        rule :accept, udp: 53
-        rule :drop, log: "DROP: "
+  host do
+    bridge "compute", subnet: {10, 0, 0, 0, 24}
+
+    nft_table :inet, "erlkoenig" do
+      nft_counter "forward_drop"
+      nft_counter "worker_drop"
+
+      base_chain "forward",
+        hook: :forward, type: :filter,
+        priority: :filter, policy: :drop do
+
+        nft_rule :accept, ct_state: [:established, :related]
+        nft_rule :jump, iifname: {:veth_of, "worker", "worker"}, to: "from-worker"
+        nft_rule :drop, log_prefix: "FWD: ", counter: "forward_drop"
+      end
+
+      # Worker: nur antworten, kein aktiver Outbound
+      nft_chain "from-worker" do
+        nft_rule :accept, ct_state: [:established, :related]
+        nft_rule :drop, counter: "worker_drop"
       end
     end
   end
 
-  zone "default", subnet: {10, 0, 0, 0} do
-    chain "forward", policy: :drop do
-      rule :accept, ct: :established
-      rule :drop
-    end
-
-    deploy "worker", replicas: 1
+  pod "worker" do
+    container "worker",
+      binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
+      args: ["9090"],
+      limits: %{memory: 536_870_912, pids: 100},
+      seccomp: :default,
+      restart: {:on_failure, 10},
+      health_check: [port: 9090, interval: 15_000, retries: 5]
   end
+
+  attach "worker", to: "compute", replicas: 1
 end

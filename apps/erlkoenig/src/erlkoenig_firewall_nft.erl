@@ -35,7 +35,10 @@ batches.
          apply_zone_allows/2,
          compile_rule/1,
          compile_generic_rule/2,
-         chain_name/1]).
+         chain_name/1,
+         inject_drop_counter/2,
+         inject_drop_observability/3,
+         next_nflog_group/0]).
 
 %% NFPROTO_INET = 1
 -define(FAMILY, 1).
@@ -261,10 +264,19 @@ add_container(ContainerId, Ip, HostVeth, Ports, FirewallTerm, Name) ->
     Chain = chain_name(ContainerId, Name),
     IpBin = ip_to_binary(Ip),
     Rules = rules_from_term(FirewallTerm),
-    RuleMsgs = [nft_encode:rule_fun(inet, ?TABLE, Chain, R) || R <- Rules],
+
+    %% Add counter + nflog to drop rules for observability (SPEC-EK-005)
+    DropCounterName = <<Chain/binary, "_drop">>,
+    NflogGroup = next_nflog_group(),
+    Rules2 = inject_drop_observability(Rules, DropCounterName, NflogGroup),
+    RuleMsgs = [nft_encode:rule_fun(inet, ?TABLE, Chain, R) || R <- Rules2],
 
     SetMsgs = sets_from_term(FirewallTerm),
     CounterMsgs = counters_from_term(FirewallTerm),
+    %% Add the drop counter object
+    DropCounterMsg = [fun(S) ->
+        nft_object:add_counter(?FAMILY, ?TABLE, DropCounterName, S)
+    end],
 
     %% For containers with port-forwarding, allow inbound traffic
     %% via oifname so DNAT'd packets pass the forward chain.
@@ -278,7 +290,7 @@ add_container(ContainerId, Ip, HostVeth, Ports, FirewallTerm, Name) ->
         %% 1. Create regular chain (no hook)
         fun(S) -> nft_chain:add_regular(?FAMILY,
             #{table => ?TABLE, name => Chain}, S) end
-    ] ++ SetMsgs ++ CounterMsgs ++ RuleMsgs ++ [
+    ] ++ SetMsgs ++ CounterMsgs ++ DropCounterMsg ++ RuleMsgs ++ [
         %% Jump rule in forward chain (container -> host)
         nft_encode:rule_fun(inet, ?TABLE, ?FORWARD_CHAIN,
             nft_rules:iifname_jump(HostVeth, Chain))
@@ -295,7 +307,22 @@ add_container(ContainerId, Ip, HostVeth, Ports, FirewallTerm, Name) ->
 
     %% Store container info for rebuild on remove
     ets:insert(erlkoenig_firewall_ports, {ContainerId, HostVeth, Ip, Ports, Chain}),
-    nfnl_server:apply_msgs(?SERVER, Msgs ++ DnatMsgs).
+    Result = nfnl_server:apply_msgs(?SERVER, Msgs ++ DnatMsgs),
+
+    %% Start NFLOG receiver for this container's drop events
+    case NflogGroup of
+        undefined -> ok;
+        _ ->
+            case erlkoenig_nft_nflog:start_link(NflogGroup) of
+                {ok, _} ->
+                    logger:info("erlkoenig_firewall_nft: nflog group ~p for ~s",
+                                [NflogGroup, Chain]);
+                {error, Reason} ->
+                    logger:warning("erlkoenig_firewall_nft: nflog start failed for ~s: ~p",
+                                    [Chain, Reason])
+            end
+    end,
+    Result.
 
 -doc """
 Remove all firewall rules for a container.
@@ -462,6 +489,50 @@ counters_from_term(#{counters := Counters}) when is_list(Counters), Counters =/=
      end || C <- Counters];
 counters_from_term(_) ->
     [].
+
+%% Inject counter + nflog into drop rules for observability.
+%% Counter counts drops, NFLOG sends packet details to userspace.
+-spec inject_drop_counter([list()], binary()) -> [list()].
+inject_drop_counter(CompiledRules, CounterName) ->
+    inject_drop_observability(CompiledRules, CounterName, undefined).
+
+-spec inject_drop_observability([list()], binary(), non_neg_integer() | undefined) -> [list()].
+inject_drop_observability(CompiledRules, CounterName, NflogGroup) ->
+    lists:map(fun(Exprs) ->
+        case has_drop_verdict(Exprs) of
+            true ->
+                inject_before_verdict(Exprs, CounterName, NflogGroup);
+            false ->
+                Exprs
+        end
+    end, CompiledRules).
+
+has_drop_verdict([]) -> false;
+has_drop_verdict([{immediate, #{verdict := drop}} | _]) -> true;
+has_drop_verdict([_ | Rest]) -> has_drop_verdict(Rest).
+
+inject_before_verdict([], _, _) -> [];
+inject_before_verdict([{immediate, #{verdict := drop}} = Drop | Rest], CounterName, NflogGroup) ->
+    Counter = [nft_expr_ir:objref_counter(CounterName)],
+    Nflog = case NflogGroup of
+        undefined -> [];
+        Group -> [nft_expr_ir:log(#{group => Group, prefix => CounterName})]
+    end,
+    Counter ++ Nflog ++ [Drop | Rest];
+inject_before_verdict([Expr | Rest], CounterName, NflogGroup) ->
+    [Expr | inject_before_verdict(Rest, CounterName, NflogGroup)].
+
+%% NFLOG group allocator — base 100, incrementing per container.
+-define(NFLOG_BASE_GROUP, 100).
+
+next_nflog_group() ->
+    try
+        ets:update_counter(erlkoenig_firewall_ports, nflog_group_counter, 1)
+    catch
+        error:badarg ->
+            ets:insert(erlkoenig_firewall_ports, {nflog_group_counter, ?NFLOG_BASE_GROUP}),
+            ?NFLOG_BASE_GROUP
+    end.
 
 -doc "Convert a single DSL rule atom/tuple to nft_rules expression list.".
 -spec compile_rule(atom() | tuple()) -> list().

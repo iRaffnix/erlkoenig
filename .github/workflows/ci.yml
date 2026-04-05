@@ -40,12 +40,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout erlkoenig_nft (DSL dependency)
-        uses: actions/checkout@v4
-        with:
-          repository: iRaffnix/erlkoenig_nft
-          path: erlkoenig_nft
-
       - name: Setup Beam
         uses: erlef/setup-beam@v1
         with:
@@ -54,10 +48,10 @@ jobs:
           rebar3-version: '3.24'
 
       - name: DSL tests
-        run: cd dsl && ERLKOENIG_NFT_DSL_PATH=$GITHUB_WORKSPACE/erlkoenig_nft/dsl mix test
+        run: cd dsl && mix test
 
       - name: Build escript
-        run: ERLKOENIG_NFT_DSL_PATH=$GITHUB_WORKSPACE/erlkoenig_nft/dsl make dsl-escript
+        run: make dsl-escript
 
       - name: Verify escript
         run: dsl/erlkoenig-dsl --help || true
@@ -93,6 +87,11 @@ jobs:
         run: |
           curl -fsSL https://s3.amazonaws.com/rebar3/rebar3 -o /usr/local/bin/rebar3
           chmod +x /usr/local/bin/rebar3
+
+      - name: Install hex + rebar for mix
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
 
       - name: Compile + release
         run: |

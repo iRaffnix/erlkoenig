@@ -240,46 +240,8 @@ run_one_test() {
             fi
         done
 
-        if [ -z "$dsl_escript" ]; then
-            echo "  SKIP: $name (dsl) — no DSL escript found"
-        else
-            # DSL end-to-end test:
-            # 1. Compile .exs → .term (new format with nft_tables)
-            # 2. Apply via escript in namespace
-            # 3. Compare nft JSON output against reference
-            local exs_copy="$TMPDIR_BASE/test_dsl.exs"
-            cp "$exs_file" "$exs_copy"
-            if "$dsl_escript" compile "$exs_copy" >/dev/null 2>&1; then
-                local compiled_term="$TMPDIR_BASE/test_dsl.term"
-                if [ -f "$compiled_term" ]; then
-                    # Apply compiled term in a fresh namespace
-                    local dsl_json="$TMPDIR_BASE/dsl.json"
-                    unshare -n bash -c "
-                        $ERTS_BIN/escript $ESCRIPT $ROOTDIR $compiled_term >/dev/null 2>&1
-                        nft -j list ruleset
-                    " > "$dsl_json" 2>/dev/null
-
-                    local dsl_san="$TMPDIR_BASE/dsl_san.json"
-                    sanitize "$dsl_json" > "$dsl_san" 2>/dev/null
-
-                    if diff -q "$ref_san" "$dsl_san" >/dev/null 2>&1; then
-                        echo "  PASS: $name (dsl)"
-                    else
-                        echo "  FAIL: $name (dsl DIFF)"
-                        if [ "$VERBOSE" = "1" ]; then
-                            diff --unified "$ref_san" "$dsl_san" | head -30
-                        fi
-                        return 1
-                    fi
-                else
-                    echo "  FAIL: $name (dsl — compile produced no output)"
-                    return 1
-                fi
-            else
-                echo "  FAIL: $name (dsl — compile failed)"
-                return 1
-            fi
-        fi
+        # DSL compile tests run separately (not in the sudo runner).
+        # See CI workflow "Run nft DSL compile tests" step.
     fi
 
     return 0

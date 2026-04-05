@@ -104,14 +104,28 @@ echo ""
 
 SANITIZE_PY='
 import json, sys
+
+def sort_key(obj):
+    """Sort nftables objects: metainfo first, then tables, chains, sets, counters, rules."""
+    order = {"metainfo": 0, "table": 1, "counter": 2, "set": 3, "map": 4,
+             "flowtable": 5, "chain": 6, "quota": 7, "rule": 8}
+    for key in order:
+        if key in obj:
+            name = obj[key].get("name", obj[key].get("chain", ""))
+            return (order[key], str(name), json.dumps(obj, sort_keys=True))
+    return (99, "", json.dumps(obj, sort_keys=True))
+
 def sanitize(data):
-    for o in data.get("nftables", []):
+    items = data.get("nftables", [])
+    for o in items:
         if "metainfo" in o:
             o["metainfo"] = {"json_schema_version": 1}
         for key in ("table","chain","rule","set","map","counter","quota","flowtable"):
             if key in o and "handle" in o[key]:
                 o[key]["handle"] = 0
+    data["nftables"] = sorted(items, key=sort_key)
     return data
+
 data = sanitize(json.load(sys.stdin))
 json.dump(data, sys.stdout, indent=2, sort_keys=True)
 '

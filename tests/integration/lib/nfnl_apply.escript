@@ -50,26 +50,23 @@ main([RootDir, TermFile]) ->
             end
     end,
 
-    %% Create vmaps BEFORE chains
-    Vmaps = maps:get(vmaps, Config, []),
-    lists:foreach(fun(Vmap) ->
-        apply_vmap(Table, Vmap)
-    end, Vmaps),
-
     %% Create sets BEFORE chains (rules reference them)
     Sets = maps:get(sets, Config, []),
     lists:foreach(fun(SetSpec) ->
         apply_set(Table, SetSpec)
     end, Sets),
 
-    %% Process chains: regular chains first (jump targets), then base chains
+    %% Create vmaps BEFORE chains (rules reference them via vmap_dispatch)
+    %% But vmaps with jump verdicts need their target chains first.
+    %% Solution: create all regular chains (no rules), then vmaps, then rules.
+    Vmaps = maps:get(vmaps, Config, []),
+
+    %% Phase 1: Create ALL chains (no rules) — regular first, then base
     SortedChains = lists:sort(fun(A, _B) ->
         not maps:is_key(hook, A)
     end, Chains),
     lists:foreach(fun(Chain) ->
         ChainName = iolist_to_binary(maps:get(name, Chain)),
-
-        %% Create chain
         ChainMsg = case maps:find(hook, Chain) of
             {ok, Hook} ->
                 [fun(S) -> nft_chain:add(1, #{
@@ -84,17 +81,46 @@ main([RootDir, TermFile]) ->
                     table => Table, name => ChainName
                 }, S) end]
         end,
-        ok = nfnl_server:apply_msgs(erlkoenig_nft_srv, ChainMsg),
+        case nfnl_server:apply_msgs(erlkoenig_nft_srv, ChainMsg) of
+            ok -> ok;
+            {error, ChainErr} ->
+                io:format(standard_error, "Chain create error ~s: ~p~n", [ChainName, ChainErr])
+        end
+    end, SortedChains),
+
+    %% Phase 2: Create vmaps (after chains exist for jump targets)
+    lists:foreach(fun(Vmap) ->
+        apply_vmap(Table, Vmap)
+    end, Vmaps),
+
+    %% Phase 3: Add rules to chains
+    lists:foreach(fun(Chain) ->
+        ChainName = iolist_to_binary(maps:get(name, Chain)),
 
         %% Compile and add rules
         Rules = maps:get(rules, Chain, []),
-        RuleMsgs = lists:filtermap(fun(Rule) ->
+        RuleMsgs = lists:flatmap(fun(Rule) ->
             try
                 Compiled = erlkoenig_firewall_nft:compile_rule(Rule),
-                {true, nft_encode:rule_fun(1, Table, ChainName, Compiled)}
+                %% Some rules return a list of rules (e.g. tcp_accept_limited)
+                %% Detect: if first element is a list, it's multi-rule
+                case Compiled of
+                    [] -> [];
+                    [First | _] when is_list(First) ->
+                        [nft_encode:rule_fun(1, Table, ChainName, R) || R <- Compiled];
+                    _ ->
+                        [nft_encode:rule_fun(1, Table, ChainName, Compiled)]
+                end
             catch C:E ->
                 io:format(standard_error, "Rule compile error: ~p:~p for ~p~n", [C, E, Rule]),
-                false
+                %% nfnl_server may have crashed — restart it
+                case whereis(erlkoenig_nft_srv) of
+                    undefined ->
+                        {ok, NewSrv} = nfnl_server:start_link(),
+                        register(erlkoenig_nft_srv, NewSrv);
+                    _ -> ok
+                end,
+                []
             end
         end, Rules),
         case RuleMsgs of

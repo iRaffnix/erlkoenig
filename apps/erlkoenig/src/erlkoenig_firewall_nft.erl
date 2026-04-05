@@ -485,6 +485,10 @@ parse_ip_string(Bin) ->
         _ -> Bin
     end.
 
+to_binary(B) when is_binary(B) -> B;
+to_binary(A) when is_atom(A) -> atom_to_binary(A);
+to_binary(L) when is_list(L) -> iolist_to_binary(L).
+
 %% --- Term-based rule compilation ---
 
 -doc "Extract nft_rules from a DSL firewall term. Returns a list of compiled rule expression lists.".
@@ -599,7 +603,7 @@ compile_rule({iifname_accept, Name}) ->
 compile_rule({set_lookup_drop, SetName}) ->
     nft_rules:set_lookup_drop(iolist_to_binary(SetName));
 compile_rule({set_lookup_drop, SetName, Counter}) ->
-    nft_rules:set_lookup_drop_named(iolist_to_binary(SetName), iolist_to_binary(Counter));
+    nft_rules:set_lookup_drop_named(iolist_to_binary(SetName), to_binary(Counter));
 compile_rule({connlimit_drop, Max, Offset}) ->
     nft_rules:connlimit_drop(Max, Offset);
 compile_rule({log_drop, Prefix}) ->

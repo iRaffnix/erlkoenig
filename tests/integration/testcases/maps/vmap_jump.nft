@@ -1,0 +1,15 @@
+table inet test {
+    map port_dispatch {
+        type inet_service : verdict
+        elements = { 80 : jump web, 443 : jump web, 8080 : jump web }
+    }
+    chain input {
+        type filter hook input priority 0; policy drop;
+        ct state established,related accept
+        tcp dport 22 accept
+        tcp dport vmap @port_dispatch
+    }
+    chain web {
+        accept
+    }
+}

@@ -1,0 +1,10 @@
+table inet test {
+    chain input {
+        type filter hook input priority 0; policy drop;
+        ct state established,related accept
+        tcp dport 22 accept
+        icmp type echo-request accept
+        meta l4proto ipv6-icmp accept
+        tcp dport 23 reject with tcp reset
+    }
+}

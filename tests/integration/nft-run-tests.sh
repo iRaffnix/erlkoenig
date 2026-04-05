@@ -1,0 +1,285 @@
+#!/bin/bash
+#
+# erlkoenig_nft Dual-Namespace Integration Tests
+#
+# Compares our Netlink encoding against nft CLI output.
+# Each test has a .term (our config) and .nft (reference) file.
+# Both are applied in separate network namespaces, then
+# nft -j list ruleset output is compared after sanitization.
+#
+# Usage:
+#   ./run-tests.sh                     # Run all tests
+#   ./run-tests.sh testcases/basic     # Run one category
+#   ./run-tests.sh testcases/basic/tcp_accept  # Run one test
+#   VERBOSE=1 ./run-tests.sh           # Show diffs on failure
+#
+# Requirements:
+#   - Linux with unshare -n (network namespace support)
+#   - Root (or user namespace support)
+#   - nft CLI installed
+#   - erlkoenig_nft release built (rebar3 as prod release)
+#     OR installed at /opt/erlkoenig_nft
+#
+# Exit codes:
+#   0 — all tests passed
+#   1 — at least one test failed
+#   77 — skipped (missing requirements)
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+VERBOSE="${VERBOSE:-0}"
+
+# ── Find erlkoenig_nft release ──────────────────────────────────
+
+find_release() {
+    # 1. Explicit env var
+    if [ -n "${ERLKOENIG_NFT_DIR:-}" ] && [ -d "$ERLKOENIG_NFT_DIR/lib" ]; then
+        echo "$ERLKOENIG_NFT_DIR"
+        return
+    fi
+    # 2. Local erlkoenig build (merged repo)
+    local ek_rel="$SCRIPT_DIR/../../_build/default/rel/erlkoenig"
+    if [ -d "$ek_rel/lib" ]; then
+        echo "$(cd "$ek_rel" && pwd)"
+        return
+    fi
+    # 3. Local erlkoenig_nft build (legacy)
+    local nft_rel="$SCRIPT_DIR/../../_build/prod/rel/erlkoenig_nft"
+    if [ -d "$nft_rel/lib" ]; then
+        echo "$(cd "$nft_rel" && pwd)"
+        return
+    fi
+    # 4. System install
+    if [ -d "/opt/erlkoenig/lib" ]; then
+        echo "/opt/erlkoenig"
+        return
+    fi
+    if [ -d "/opt/erlkoenig_nft/lib" ]; then
+        echo "/opt/erlkoenig_nft"
+        return
+    fi
+    echo ""
+}
+
+ROOTDIR=$(find_release)
+if [ -z "$ROOTDIR" ]; then
+    echo "ERROR: erlkoenig_nft release not found." >&2
+    echo "  Build: rebar3 as prod release" >&2
+    echo "  Or set: ERLKOENIG_NFT_DIR=/path/to/release" >&2
+    exit 77
+fi
+
+# Find erts bin directory (no glob in subshell)
+ERTS_BIN=$(ls -d "$ROOTDIR"/erts-*/bin 2>/dev/null | head -1)
+if [ -z "$ERTS_BIN" ]; then
+    echo "ERROR: ERTS not found in $ROOTDIR" >&2
+    exit 77
+fi
+
+# Check nft CLI
+if ! command -v nft >/dev/null 2>&1; then
+    echo "ERROR: nft CLI not found" >&2
+    exit 77
+fi
+
+# Check unshare works
+if ! unshare -n true 2>/dev/null; then
+    echo "ERROR: unshare -n not available (need root or user namespace support)" >&2
+    exit 77
+fi
+
+# Check escript
+ESCRIPT="$SCRIPT_DIR/lib/nfnl_apply.escript"
+if [ ! -f "$ESCRIPT" ]; then
+    echo "ERROR: $ESCRIPT not found" >&2
+    exit 1
+fi
+
+echo "Release:  $ROOTDIR"
+echo "ERTS:     $ERTS_BIN"
+echo ""
+
+# ── Sanitize JSON ───────────────────────────────────────────────
+
+SANITIZE_PY='
+import json, sys
+
+def sort_key(obj):
+    """Sort nftables objects: metainfo first, then tables, chains, sets, counters, rules."""
+    order = {"metainfo": 0, "table": 1, "counter": 2, "set": 3, "map": 4,
+             "flowtable": 5, "chain": 6, "quota": 7, "rule": 8}
+    for key in order:
+        if key in obj:
+            name = obj[key].get("name", obj[key].get("chain", ""))
+            return (order[key], str(name), json.dumps(obj, sort_keys=True))
+    return (99, "", json.dumps(obj, sort_keys=True))
+
+def sanitize(data):
+    items = data.get("nftables", [])
+    for o in items:
+        if "metainfo" in o:
+            o["metainfo"] = {"json_schema_version": 1}
+        for key in ("table","chain","rule","set","map","counter","quota","flowtable"):
+            if key in o and "handle" in o[key]:
+                o[key]["handle"] = 0
+    data["nftables"] = sorted(items, key=sort_key)
+    return data
+
+data = sanitize(json.load(sys.stdin))
+json.dump(data, sys.stdout, indent=2, sort_keys=True)
+'
+
+sanitize() {
+    python3 -c "$SANITIZE_PY" < "$1"
+}
+
+# ── Find tests ──────────────────────────────────────────────────
+
+find_tests() {
+    local search="${1:-$SCRIPT_DIR/testcases}"
+
+    # Resolve to absolute path — the escript runs in a different cwd (cd /tmp)
+    # so relative paths would break inside the unshare namespace.
+    if [ -d "$search" ]; then
+        search="$(cd "$search" && pwd)"
+    elif [ -f "$search.term" ]; then
+        search="$(cd "$(dirname "$search")" && pwd)/$(basename "$search")"
+    fi
+
+    if [ -f "$search.term" ] && [ -f "$search.nft" ]; then
+        # Single test specified
+        echo "$search"
+        return
+    fi
+
+    # Find all .term files that have a matching .nft
+    find "$search" -name "*.term" -print0 2>/dev/null | while IFS= read -r -d '' term; do
+        local base="${term%.term}"
+        if [ -f "${base}.nft" ]; then
+            echo "$base"
+        fi
+    done | sort
+}
+
+# ── Run single test ─────────────────────────────────────────────
+
+TMPDIR_BASE=$(mktemp -d)
+trap "rm -rf $TMPDIR_BASE" EXIT
+
+run_one_test() {
+    local base="$1"
+    local name="${base#$SCRIPT_DIR/testcases/}"
+    local nft_file="${base}.nft"
+    local term_file="${base}.term"
+    local ref_json="$TMPDIR_BASE/ref.json"
+    local ours_json="$TMPDIR_BASE/ours.json"
+    local ref_san="$TMPDIR_BASE/ref_san.json"
+    local ours_san="$TMPDIR_BASE/ours_san.json"
+
+    # Namespace A: nft CLI (reference)
+    if ! unshare -n sh -c "nft -f '$nft_file' && nft -j list ruleset" > "$ref_json" 2>/dev/null; then
+        echo "  SKIP: $name (nft -f failed)"
+        return 77
+    fi
+
+    # Namespace B: erlkoenig_nft (our code)
+    rm -f /tmp/etc/firewall.term 2>/dev/null
+    if ! unshare -n sh -c "
+        export PATH=$ERTS_BIN:\$PATH
+        cd /tmp
+        escript '$ESCRIPT' '$ROOTDIR' '$term_file' >/dev/null 2>&1
+        nft -j list ruleset
+    " > "$ours_json" 2>/dev/null; then
+        echo "  FAIL: $name (erlkoenig_nft apply failed)"
+        return 1
+    fi
+
+    # Check we got actual content (not just metainfo)
+    local ours_size
+    ours_size=$(wc -c < "$ours_json")
+    if [ "$ours_size" -lt 200 ]; then
+        echo "  FAIL: $name (erlkoenig_nft produced empty ruleset)"
+        if [ "$VERBOSE" = "1" ]; then
+            echo "    ours.json ($ours_size bytes):"
+            cat "$ours_json" | head -5
+        fi
+        return 1
+    fi
+
+    # Sanitize both
+    sanitize "$ref_json" > "$ref_san" 2>/dev/null
+    sanitize "$ours_json" > "$ours_san" 2>/dev/null
+
+    # Compare kernel output
+    if diff -q "$ref_san" "$ours_san" >/dev/null 2>&1; then
+        echo "  PASS: $name (kernel)"
+    else
+        echo "  FAIL: $name (kernel DIFF)"
+        if [ "$VERBOSE" = "1" ]; then
+            diff --unified "$ref_san" "$ours_san" | head -40
+        fi
+        return 1
+    fi
+
+    # DSL verification: if .exs exists, compile it and compare with checked-in .term
+    local exs_file="${base}.exs"
+    if [ -f "$exs_file" ]; then
+        local dsl_compiled="$TMPDIR_BASE/dsl_compiled.term"
+        local dsl_cli="$ERTS_BIN/escript"
+
+        # Find the DSL escript
+        local dsl_escript=""
+        for candidate in \
+            "$ROOTDIR/bin/erlkoenig-dsl" \
+            "$ROOTDIR/bin/erlkoenig" \
+            "$SCRIPT_DIR/../../dsl/erlkoenig"; do
+            if [ -x "$candidate" ]; then
+                dsl_escript="$candidate"
+                break
+            fi
+        done
+
+        # DSL compile tests run separately (not in the sudo runner).
+        # See CI workflow "Run nft DSL compile tests" step.
+    fi
+
+    return 0
+}
+
+# ── Main ────────────────────────────────────────────────────────
+
+TESTS=$(find_tests "${1:-}")
+if [ -z "$TESTS" ]; then
+    echo "No tests found."
+    exit 1
+fi
+
+TOTAL=0
+PASS=0
+FAIL=0
+SKIP=0
+
+echo "══════════════════════════════════════════════"
+echo "  erlkoenig_nft Dual-Namespace Tests"
+echo "══════════════════════════════════════════════"
+echo ""
+
+while IFS= read -r test_base; do
+    TOTAL=$((TOTAL + 1))
+    rc=0
+    run_one_test "$test_base" || rc=$?
+    case $rc in
+        0)  PASS=$((PASS + 1)) ;;
+        77) SKIP=$((SKIP + 1)) ;;
+        *)  FAIL=$((FAIL + 1)) ;;
+    esac
+done <<< "$TESTS"
+
+echo ""
+echo "══════════════════════════════════════════════"
+echo "  $TOTAL tests: $PASS passed, $FAIL failed, $SKIP skipped"
+echo "══════════════════════════════════════════════"
+
+[ "$FAIL" -gt 0 ] && exit 1
+exit 0

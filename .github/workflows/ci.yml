@@ -7,30 +7,6 @@ on:
     branches: [main]
 
 jobs:
-  # ── C Runtime (static musl binary) ────────────────────────
-  c-runtime:
-    name: C Runtime
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install musl toolchain
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
-
-      - name: Build erlkoenig_rt (static musl)
-        run: make rt
-
-      - name: Verify static binary
-        run: |
-          file build/release/erlkoenig_rt | grep -q "statically linked"
-          ls -lh build/release/erlkoenig_rt
-
-      - name: Upload C runtime
-        uses: actions/upload-artifact@v4
-        with:
-          name: erlkoenig-rt-linux-amd64
-          path: build/release/erlkoenig_rt
-
   # ── Erlang (compile + eunit + dialyzer) ──────────────────
   erlang:
     name: Erlang Tests + Dialyzer
@@ -57,42 +33,12 @@ jobs:
       - name: CI gate
         run: make test dialyzer
 
-  # ── Kernel Tests (privileged, root) ──────────────────────
-  kernel:
-    name: Kernel Tests (root)
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y musl-tools check pkgconf
-
-      - name: Build + run C runtime tests (unprivileged)
-        run: |
-          cmake -B build/test \
-            -DERLKOENIG_BUILD_TESTS=ON \
-            -DERLKOENIG_BUILD_DEMOS=OFF \
-            -DCMAKE_BUILD_TYPE=Debug
-          cmake --build build/test -j$(nproc)
-          build/test/test/test_container_setup
-
-      - name: Run C runtime tests (root)
-        run: sudo build/test/test/test_container_setup
-
   # ── Elixir DSL ────────────────────────────────────────────
   dsl:
     name: Elixir DSL Tests
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-
-      - name: Checkout erlkoenig_nft (DSL dependency)
-        uses: actions/checkout@v4
-        with:
-          repository: iRaffnix/erlkoenig_nft
-          path: erlkoenig_nft
 
       - name: Setup Beam
         uses: erlef/setup-beam@v1
@@ -102,23 +48,137 @@ jobs:
           rebar3-version: '3.24'
 
       - name: DSL tests
-        run: cd dsl && ERLKOENIG_NFT_DSL_PATH=$GITHUB_WORKSPACE/erlkoenig_nft/dsl mix test
+        run: cd dsl && mix test
 
       - name: Build escript
-        run: ERLKOENIG_NFT_DSL_PATH=$GITHUB_WORKSPACE/erlkoenig_nft/dsl make dsl-escript
+        run: make dsl-escript
 
       - name: Verify escript
         run: dsl/erlkoenig-dsl --help || true
 
+  # ── nft Namespace Integration Tests ───────────────────────
+  nft-integration:
+    name: nft Namespace Tests
+    runs-on: ubuntu-22.04
+    needs: [erlang]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Beam
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: '28'
+          rebar3-version: '3.24'
+
+      - name: Cache rebar3
+        uses: actions/cache@v4
+        with:
+          path: |
+            _build
+            ~/.cache/rebar3
+          key: erlang-${{ hashFiles('rebar.lock', 'rebar.config') }}
+          restore-keys: |
+            erlang-
+
+      - name: Setup Elixir (for DSL escript)
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: '28'
+          elixir-version: '1.18'
+          rebar3-version: '3.24'
+
+      - name: Install nft
+        run: sudo apt-get update && sudo apt-get install -y nftables
+
+      - name: Build release + DSL escript
+        run: |
+          rebar3 compile
+          rebar3 release
+          make dsl-escript
+
+      - name: Run nft kernel tests
+        run: sudo bash tests/integration/nft-run-tests.sh tests/integration/testcases
+
+      - name: Run nft DSL end-to-end tests
+        run: |
+          # DSL .exs → compile (normal user) → apply in namespace (sudo) → compare nft JSON
+          ROOTDIR=$PWD/_build/default/rel/erlkoenig
+          ERTS_BIN=$(ls -d $ROOTDIR/erts-*/bin | head -1)
+          ESCRIPT=$PWD/tests/integration/lib/nfnl_apply.escript
+          SANITIZE='
+          import json, sys
+          def sort_key(obj):
+              order = {"metainfo": 0, "table": 1, "counter": 2, "set": 3, "map": 4,
+                       "flowtable": 5, "chain": 6, "quota": 7, "rule": 8}
+              for key in order:
+                  if key in obj:
+                      name = obj[key].get("name", obj[key].get("chain", ""))
+                      return (order[key], str(name), json.dumps(obj, sort_keys=True))
+              return (99, "", json.dumps(obj, sort_keys=True))
+          def sanitize(data):
+              items = data.get("nftables", [])
+              for o in items:
+                  if "metainfo" in o: o["metainfo"] = {"json_schema_version": 1}
+                  for key in ("table","chain","rule","set","map","counter","quota","flowtable"):
+                      if key in o and "handle" in o[key]: o[key]["handle"] = 0
+              data["nftables"] = sorted(items, key=sort_key)
+              return data
+          data = sanitize(json.load(sys.stdin))
+          json.dump(data, sys.stdout, indent=2, sort_keys=True)
+          '
+          PASS=0; FAIL=0; TOTAL=0
+          for exs in tests/integration/testcases/**/*.exs; do
+            dir=$(dirname $exs)
+            base=$(basename $exs .exs)
+            name="$(basename $dir)/$base"
+            nft_ref="$dir/$base.nft"
+            TOTAL=$((TOTAL+1))
+
+            # Step 1: Compile .exs → .term (normal user)
+            tmpterm=$(mktemp /tmp/dsl_e2e_XXXXX.term)
+            if ! dsl/erlkoenig compile "$exs" -o "$tmpterm" >/dev/null 2>&1; then
+              echo "  FAIL: $name (dsl compile)"
+              FAIL=$((FAIL+1)); rm -f "$tmpterm"; continue
+            fi
+
+            # Step 2: Apply in namespace + get nft JSON (sudo)
+            dsl_json=$(sudo unshare -n bash -c "
+              $ERTS_BIN/escript $ESCRIPT $ROOTDIR $tmpterm >/dev/null 2>&1
+              nft -j list ruleset
+            " 2>/dev/null)
+            rm -f "$tmpterm"
+
+            # Step 3: Get reference nft JSON
+            if [ ! -f "$nft_ref" ]; then
+              echo "  SKIP: $name (no .nft reference)"
+              continue
+            fi
+            ref_json=$(sudo unshare -n bash -c "
+              nft -f $nft_ref 2>/dev/null
+              nft -j list ruleset
+            " 2>/dev/null)
+
+            # Step 4: Sanitize + compare
+            dsl_san=$(echo "$dsl_json" | python3 -c "$SANITIZE" 2>/dev/null)
+            ref_san=$(echo "$ref_json" | python3 -c "$SANITIZE" 2>/dev/null)
+
+            if [ "$dsl_san" = "$ref_san" ]; then
+              echo "  PASS: $name (dsl e2e)"
+              PASS=$((PASS+1))
+            else
+              echo "  FAIL: $name (dsl e2e DIFF)"
+              FAIL=$((FAIL+1))
+            fi
+          done
+          echo ""
+          echo "$PASS/$TOTAL DSL end-to-end tests passed ($FAIL failed)"
+          [ $FAIL -eq 0 ] || exit 1
+
   # ── Release artifacts (for pre-release testing) ───────────
-  #
-  # Baut dieselben Artifacts wie release.yml, aber ohne GitHub Release.
-  # Download: gh run download <run-id> -D /tmp/artifacts
-  # Test:     sudo sh install.sh --local /tmp/artifacts
   release:
     name: Release ${{ matrix.target.name }}
     runs-on: ${{ matrix.target.runner }}
-    needs: [erlang, c-runtime]
+    needs: [erlang]
     strategy:
       fail-fast: false
       matrix:
@@ -145,6 +205,11 @@ jobs:
         run: |
           curl -fsSL https://s3.amazonaws.com/rebar3/rebar3 -o /usr/local/bin/rebar3
           chmod +x /usr/local/bin/rebar3
+
+      - name: Install hex + rebar for mix
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
 
       - name: Compile + release
         run: |

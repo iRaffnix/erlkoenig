@@ -1,0 +1,1 @@
+#{table => <<"test">>, sets => [{<<"tempban">>,ipv4_addr,#{flags => [timeout], timeout => 60000}}], chains => [#{name => <<"input">>, type => filter, hook => input, priority => 0, policy => drop, rules => [ct_established_accept,{set_lookup_drop,<<"tempban">>},{tcp_accept,22}]}]}.

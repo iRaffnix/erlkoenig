@@ -1,0 +1,1 @@
+#{table => <<"test">>, chains => [#{name => <<"postrouting">>, type => nat, hook => postrouting, priority => 100, policy => accept, rules => [{snat,<<"192.168.1.1">>,0}]}]}.

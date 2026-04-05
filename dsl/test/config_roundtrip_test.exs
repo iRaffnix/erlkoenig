@@ -16,10 +16,10 @@ defmodule Erlkoenig.ConfigRoundtripTest do
       limits cpu: 2, memory: "256M"
 
       firewall do
-        accept :established
-        accept :icmp
-        accept_tcp 80
-        log_and_drop "DROP: "
+        rule :accept, ct: :established
+        rule :accept, icmp: true
+        rule :accept, tcp: 80
+        rule :drop, log: "DROP: "
       end
     end
 
@@ -28,10 +28,10 @@ defmodule Erlkoenig.ConfigRoundtripTest do
       ip {10, 0, 0, 20}
 
       firewall do
-        accept :established
-        accept :icmp
-        accept_udp 53
-        accept :all
+        rule :accept, ct: :established
+        rule :accept, icmp: true
+        rule :accept, udp: 53
+        rule :accept
       end
     end
   end
@@ -125,10 +125,10 @@ defmodule Erlkoenig.ConfigRoundtripTest do
       args ["7001"]
 
       firewall do
-        accept :established
-        accept :icmp
-        accept_udp 53
-        accept :all
+        rule :accept, ct: :established
+        rule :accept, icmp: true
+        rule :accept, udp: 53
+        rule :accept
       end
     end
 
@@ -138,10 +138,10 @@ defmodule Erlkoenig.ConfigRoundtripTest do
       args ["7002"]
 
       firewall do
-        accept :established
-        accept :icmp
-        accept_tcp 7002
-        log_and_drop "DROP: "
+        rule :accept, ct: :established
+        rule :accept, icmp: true
+        rule :accept, tcp: 7002
+        rule :drop, log: "DROP: "
       end
     end
 
@@ -182,12 +182,12 @@ defmodule Erlkoenig.ConfigRoundtripTest do
       # Verify firewall term
       [chain] = alpha.firewall.chains
       assert chain.policy == :drop
-      assert {:tcp_accept, 80} in chain.rules
+      assert {:rule, :accept, %{tcp: 80}} in chain.rules
 
       # Verify beta has standard firewall
       beta = Enum.find(term.containers, fn c -> c.name == "beta" end)
       [beta_chain] = beta.firewall.chains
-      assert :accept in beta_chain.rules
+      assert {:rule, :accept, %{}} in beta_chain.rules
 
       File.rm!(path)
     end
@@ -303,7 +303,7 @@ defmodule Erlkoenig.ConfigRoundtripTest do
       containers = FullUseCases.containers()
       strict = Enum.find(containers, &(&1.name == "fw_strict"))
       [chain] = strict.firewall.chains
-      assert {:tcp_accept, 7002} in chain.rules
+      assert {:rule, :accept, %{tcp: 7002}} in chain.rules
 
       path = Path.join(System.tmp_dir!(), "erlkoenig_fw_#{:rand.uniform(100000)}.term")
       formatted = :io_lib.format(~c"~tp.~n", [%{containers: [strict]}])
@@ -311,7 +311,7 @@ defmodule Erlkoenig.ConfigRoundtripTest do
       {:ok, [term]} = :file.consult(String.to_charlist(path))
       [rt] = term.containers
       [rt_chain] = rt.firewall.chains
-      assert {:tcp_accept, 7002} in rt_chain.rules
+      assert {:rule, :accept, %{tcp: 7002}} in rt_chain.rules
       File.rm!(path)
     end
 

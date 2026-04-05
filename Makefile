@@ -41,7 +41,7 @@ BUILD_DIR       := build/release
 BUILD_SAN       := build/san
 RT_BIN          := $(BUILD_DIR)/erlkoenig_rt
 RT_BIN_SAN      := $(BUILD_SAN)/erlkoenig_rt
-INT_TESTS       := integration-tests
+INT_TESTS       := tests/integration
 
 # ── Hauptziel ─────────────────────────────────────────────
 
@@ -149,14 +149,14 @@ dsl:
 dsl-escript: dsl
 	cd dsl && mix escript.build
 	@echo ""
-	@echo "==> dsl/erlkoenig-dsl"
+	@echo "==> dsl/erlkoenig"
 
 test-dsl:
 	cd dsl && mix test
 
 # ── Release ──────────────────────────────────────────────
 #
-# OTP Release: BEAM + ERTS + erlkoenig_core + erlkoenig_nft
+# OTP Release: BEAM + ERTS + erlkoenig + erlkoenig_nft
 # Kein Erlang auf dem Zielserver noetig.
 # C-Runtime ist NICHT enthalten — wird separat via install.sh installiert.
 # Discovery: {rt_path, auto} findet /opt/erlkoenig/rt/erlkoenig_rt
@@ -166,7 +166,7 @@ release: erl dsl-escript
 	rebar3 tar
 	@mkdir -p dist
 	cp _build/default/rel/erlkoenig/erlkoenig-*.tar.gz dist/
-	cp dsl/erlkoenig-dsl dist/
+	cp dsl/erlkoenig dist/erlkoenig-dsl
 	@echo ""
 	@echo "==> dist/$$(cd dist && ls erlkoenig-*.tar.gz)"
 	@echo "==> dist/erlkoenig-dsl"
@@ -205,7 +205,7 @@ install: release rt
 	chown root:root $(PREFIX)/rt/erlkoenig_rt
 	setcap cap_sys_admin,cap_net_admin,cap_sys_chroot,cap_sys_ptrace,cap_setpcap,cap_setuid,cap_setgid,cap_dac_override,cap_bpf,cap_sys_resource+ep $(PREFIX)/rt/erlkoenig_rt
 	@# DSL escript (if built)
-	@[ -f dsl/erlkoenig-dsl ] && install -m 755 dsl/erlkoenig-dsl $(PREFIX)/bin/erlkoenig-dsl || true
+	@[ -f dsl/erlkoenig ] && install -m 755 dsl/erlkoenig $(PREFIX)/bin/erlkoenig-dsl || true
 	@# Ownership: root owns files, service user can read
 	chown -R root:$(SERVICE_USER) $(PREFIX)
 	chmod 750 $(PREFIX)
@@ -262,7 +262,7 @@ endif
 
 # ── Version Tag ─────────────────────────────────────────
 CURRENT_VERSION = $(shell grep -oP '(?<=\{release, \{erlkoenig, ")[^"]+' rebar.config)
-VERSION_FILES = rebar.config apps/erlkoenig_core/src/erlkoenig_core.app.src dsl/mix.exs install.sh
+VERSION_FILES = rebar.config apps/erlkoenig/src/erlkoenig.app.src dsl/mix.exs install.sh
 
 tag:
 ifndef VERSION
@@ -285,7 +285,7 @@ endif
 	fi
 	@echo "Bumping version: $(CURRENT_VERSION) -> $(VERSION)"
 	sed -i 's/{release, {erlkoenig, "[^"]*"}/{release, {erlkoenig, "$(VERSION)"}/' rebar.config
-	sed -i 's/{vsn, "[^"]*"}/{vsn, "$(VERSION)"}/' apps/erlkoenig_core/src/erlkoenig_core.app.src
+	sed -i 's/{vsn, "[^"]*"}/{vsn, "$(VERSION)"}/' apps/erlkoenig/src/erlkoenig.app.src
 	sed -i 's/version: "[^"]*"/version: "$(VERSION)"/' dsl/mix.exs
 	sed -i 's/--version v[0-9]*\.[0-9]*\.[0-9]*/--version v$(VERSION)/' install.sh
 	git add $(VERSION_FILES)

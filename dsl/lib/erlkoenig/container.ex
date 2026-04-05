@@ -170,78 +170,11 @@ defmodule Erlkoenig.Container do
     end
   end
 
-  # Firewall rules
-  defmacro accept(:established) do
-    quote do: @ct_current Builder.add_fw_rule(@ct_current, :ct_established_accept)
-  end
-  defmacro accept(:loopback) do
-    quote do: @ct_current Builder.add_fw_rule(@ct_current, {:iifname_accept, "lo"})
-  end
-  defmacro accept(:icmp) do
-    quote do: @ct_current Builder.add_fw_rule(@ct_current, :icmp_accept)
-  end
-  defmacro accept(:all) do
-    quote do: @ct_current Builder.add_fw_rule(@ct_current, :accept)
-  end
-
-  defmacro accept_tcp(port) do
-    quote do: @ct_current Builder.add_fw_rule(@ct_current, {:tcp_accept, unquote(port)})
-  end
-  defmacro accept_tcp(port, opts) do
+  @doc "Generic rule macro for per-container firewall. Same syntax as host firewall."
+  defmacro rule(verdict, opts \\ []) do
     quote do
-      rule = case unquote(opts) do
-        [counter: c] ->
-          {:tcp_accept, unquote(port), to_string(c)}
-        [counter: c, limit: {rate, burst: b}] ->
-          {:tcp_accept_limited, unquote(port), to_string(c), %{rate: rate, burst: b}}
-        [limit: {rate, burst: b}] ->
-          {:tcp_accept_limited, unquote(port), "limited", %{rate: rate, burst: b}}
-        _ ->
-          {:tcp_accept, unquote(port)}
-      end
-      @ct_current Builder.add_fw_rule(@ct_current, rule)
-    end
-  end
-
-  defmacro accept_udp(port) do
-    quote do: @ct_current Builder.add_fw_rule(@ct_current, {:udp_accept, unquote(port)})
-  end
-
-  defmacro accept_from(ip) do
-    quote do: @ct_current Builder.add_fw_rule(@ct_current, {:ip_saddr_accept, unquote(ip)})
-  end
-
-  defmacro accept_protocol(proto) do
-    quote do: @ct_current Builder.add_fw_rule(@ct_current, {:protocol_accept, unquote(proto)})
-  end
-
-  defmacro connlimit_drop(max) do
-    quote do: @ct_current Builder.add_fw_rule(@ct_current, {:connlimit_drop, unquote(max), 0})
-  end
-
-  defmacro drop_if_in_set(set_name) do
-    quote do: @ct_current Builder.add_fw_rule(@ct_current, {:set_lookup_drop, unquote(set_name)})
-  end
-  defmacro drop_if_in_set(set_name, opts) do
-    quote do
-      rule = case unquote(opts) do
-        [counter: c] -> {:set_lookup_drop, unquote(set_name), to_string(c)}
-        _ -> {:set_lookup_drop, unquote(set_name)}
-      end
-      @ct_current Builder.add_fw_rule(@ct_current, rule)
-    end
-  end
-
-  defmacro log_and_drop(prefix) do
-    quote do: @ct_current Builder.add_fw_rule(@ct_current, {:log_drop, unquote(prefix)})
-  end
-  defmacro log_and_drop(prefix, opts) do
-    quote do
-      rule = case unquote(opts) do
-        [counter: c] -> {:log_drop, unquote(prefix), to_string(c)}
-        _ -> {:log_drop, unquote(prefix)}
-      end
-      @ct_current Builder.add_fw_rule(@ct_current, rule)
+      @ct_current Builder.add_fw_rule(@ct_current,
+        ErlkoenigNft.Firewall.Builder.build_rule(unquote(verdict), unquote(opts)))
     end
   end
 

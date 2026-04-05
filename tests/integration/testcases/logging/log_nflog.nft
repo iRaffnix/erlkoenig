@@ -1,0 +1,11 @@
+table inet test {
+    counter dropped {
+        packets 0 bytes 0
+    }
+    chain input {
+        type filter hook input priority 0; policy drop;
+        ct state established,related accept
+        tcp dport 22 accept
+        log prefix "NFLOG-DROP: " group 1 counter name "dropped" drop
+    }
+}

@@ -27,10 +27,10 @@ defmodule Erlkoenig.ContainerDslTest do
       binary "/opt/bin/app"
       ip {10, 0, 0, 10}
       firewall do
-        accept :established
-        accept :icmp
-        accept_udp 53
-        accept :all
+        rule :accept, ct: :established
+        rule :accept, icmp: true
+        rule :accept, udp: 53
+        rule :accept
       end
     end
 
@@ -38,9 +38,9 @@ defmodule Erlkoenig.ContainerDslTest do
       binary "/opt/bin/api"
       ip {10, 0, 0, 20}
       firewall do
-        accept :established
-        accept :icmp
-        accept_tcp 443
+        rule :accept, ct: :established
+        rule :accept, icmp: true
+        rule :accept, tcp: 443
       end
     end
   end
@@ -195,17 +195,17 @@ defmodule Erlkoenig.ContainerDslTest do
       assert Map.has_key?(app, :firewall)
       assert is_map(app.firewall)
       [chain] = app.firewall.chains
-      assert {:udp_accept, 53} in chain.rules
-      assert :accept in chain.rules
+      assert {:rule, :accept, %{udp: 53}} in chain.rules
+      assert {:rule, :accept, %{}} in chain.rules
     end
 
-    test "firewall block with strict rules (no accept :all)" do
+    test "firewall block with strict rules (no rule :accept)" do
       containers = WithFirewall.containers()
       api = Enum.find(containers, &(&1.name == "api"))
 
       assert Map.has_key?(api, :firewall)
       [chain] = api.firewall.chains
-      assert {:tcp_accept, 443} in chain.rules
+      assert {:rule, :accept, %{tcp: 443}} in chain.rules
       refute :accept in chain.rules
     end
 

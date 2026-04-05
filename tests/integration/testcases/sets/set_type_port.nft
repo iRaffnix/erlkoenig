@@ -1,0 +1,11 @@
+table inet test {
+    set allowed_ports {
+        type inet_service
+        elements = { 22, 80, 443, 8080, 8443 }
+    }
+    chain input {
+        type filter hook input priority 0; policy drop;
+        ct state established,related accept
+        meta l4proto tcp tcp dport @allowed_ports accept
+    }
+}

@@ -1,7 +1,4 @@
 #!/bin/sh
-# Start erlkoenig as a standalone daemon (no Erlang distribution).
-# Managed by systemd — shutdown via SIGTERM.
-
 ROOTDIR="${ERLKOENIG_ROOTDIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 REL_VSN=$(cut -d' ' -f2 < "$ROOTDIR/releases/start_erl.data")
 ERTS_VSN=$(cut -d' ' -f1 < "$ROOTDIR/releases/start_erl.data")

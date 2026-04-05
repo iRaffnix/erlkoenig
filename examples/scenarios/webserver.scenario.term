@@ -1,0 +1,34 @@
+#{
+    config => "etc/firewall.term",
+    chain => <<"inbound">>,
+    policy => drop,
+    sets => #{
+        <<"blocklist">> => [{192,0,2,99}]
+    },
+    packets => [
+        #{name => <<"ssh_legit">>,
+          proto => tcp, saddr => {10,0,0,1}, dport => 22,
+          expect => accept},
+
+        #{name => <<"http_ok">>,
+          proto => tcp, saddr => {10,0,0,1}, dport => 80,
+          expect => accept},
+
+        #{name => <<"https_ok">>,
+          proto => tcp, saddr => {10,0,0,1}, dport => 443,
+          expect => accept},
+
+        #{name => <<"icmp_ping">>,
+          proto => icmp, saddr => {10,0,0,1}, type => echo_request,
+          expect => accept},
+
+        #{name => <<"random_udp">>,
+          proto => udp, saddr => {10,0,0,1}, dport => 12345,
+          expect => drop},
+
+        #{name => <<"established">>,
+          proto => tcp, saddr => {10,0,0,1}, dport => 9999,
+          ct_state => established,
+          expect => accept}
+    ]
+}.

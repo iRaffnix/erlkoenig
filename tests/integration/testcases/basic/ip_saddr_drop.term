@@ -1,0 +1,1 @@
+#{table => <<"test">>, chains => [#{name => <<"input">>, type => filter, hook => input, priority => 0, policy => drop, rules => [ct_established_accept,{ip_saddr_drop,<<"10.0.0.99">>}]}]}.

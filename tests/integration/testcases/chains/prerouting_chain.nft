@@ -1,0 +1,6 @@
+table inet test {
+    chain prerouting {
+        type filter hook prerouting priority -300; policy accept;
+        ct state established,related accept
+    }
+}

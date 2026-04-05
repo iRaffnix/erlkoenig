@@ -1,0 +1,15 @@
+table inet test {
+    set blocklist {
+        type ipv4_addr
+        elements = { 10.0.0.1, 10.0.0.2, 10.0.0.3 }
+    }
+    counter dropped {
+        packets 0 bytes 0
+    }
+    chain input {
+        type filter hook input priority 0; policy drop;
+        ct state established,related accept
+        ip saddr @blocklist counter name "dropped" drop
+        tcp dport 22 accept
+    }
+}

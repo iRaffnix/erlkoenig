@@ -1,0 +1,9 @@
+#{
+    table => <<"test">>,
+    counters => [<<"ssh_cnt">>,<<"icmp_cnt">>,<<"dropped_cnt">>],
+    sets => [
+        {<<"blocklist_v4">>,ipv4_addr,#{elements => [<<"198.51.100.1">>]}},
+        {<<"blocklist_v6">>,ipv6_addr,#{}}
+    ],
+    chains => [#{name => <<"input">>, type => filter, hook => input, priority => 0, policy => drop, rules => [ct_established_accept,{iifname_accept,<<"lo">>},{set_lookup_drop,<<"blocklist_v4">>,dropped_cnt},{set_lookup_drop,<<"blocklist_v6">>,dropped_cnt},{icmp_accept_named,<<"icmp_cnt">>},{tcp_accept,22,<<"ssh_cnt">>},{log_drop,<<"DROP: ">>,<<"dropped_cnt">>}]}]
+}.

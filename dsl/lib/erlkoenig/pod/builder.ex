@@ -1,0 +1,147 @@
+#
+# Copyright 2026 Erlkoenig Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+defmodule Erlkoenig.Pod.Builder do
+  @moduledoc """
+  Accumulates pod definitions — a group of containers with
+  per-container firewall chains and inter-container forwarding rules.
+
+  A pod is a **template**. It produces no kernel objects by itself.
+  Only when deployed via `deploy "pod", replicas: N` inside a zone
+  does the compiler expand it into concrete containers with IPs,
+  veth pairs, and nft chains.
+
+  ## Container References
+
+  Inside a pod, `@container_name` references are used in `iif:` and
+  `oif:` rule options to specify inter-container traffic paths.
+  These are resolved to concrete veth names at deploy time.
+
+  ## Structure
+
+      pod "webstack" do
+        container "frontend", binary: "/opt/frontend" do
+          chain "inbound", policy: :drop do
+            rule :accept, ct: :established
+            rule :accept, tcp: 8080
+            rule :drop
+          end
+        end
+
+        chain "forward", policy: :drop do
+          rule :accept, ct: :established
+          rule :accept, iif: @frontend, oif: @api, tcp: 4000
+          rule :drop
+        end
+      end
+  """
+
+  @valid_strategies [:one_for_one, :one_for_all, :rest_for_one]
+
+  defstruct name: nil,
+            strategy: :one_for_one,
+            containers: [],
+            current_ct: nil
+
+  def new(name, opts \\ []) when is_binary(name) do
+    strategy = Keyword.get(opts, :strategy, :one_for_one)
+    unless strategy in @valid_strategies do
+      raise CompileError,
+        description: "pod #{inspect(name)}: invalid strategy #{inspect(strategy)}. " <>
+          "Allowed: #{inspect(@valid_strategies)}"
+    end
+    %__MODULE__{name: name, strategy: strategy}
+  end
+
+  # --- Container lifecycle ---
+
+  def begin_container(%__MODULE__{} = pod, name, opts) when is_binary(name) do
+    ct = %{
+      name: name,
+      binary: opts[:binary] && to_string(opts[:binary]),
+      image: opts[:image] && to_string(opts[:image]),
+      ports: opts[:ports] || [],
+      limits: opts[:limits] || %{},
+      restart: opts[:restart] || :no_restart,
+      seccomp: opts[:seccomp] || :default,
+      uid: opts[:uid] || 65534,
+      gid: opts[:gid] || 65534,
+      args: opts[:args] || [],
+      caps: opts[:caps] || []
+    }
+    %{pod | current_ct: ct}
+  end
+
+  def end_container(%__MODULE__{current_ct: ct, containers: cts} = pod) do
+    %{pod | containers: cts ++ [ct], current_ct: nil}
+  end
+
+  # --- Validation ---
+
+  def validate!(%__MODULE__{} = pod) do
+    if pod.containers == [] do
+      raise CompileError,
+        description: "pod #{inspect(pod.name)}: must have at least one container"
+    end
+
+    names = Enum.map(pod.containers, & &1.name)
+    dupes = names -- Enum.uniq(names)
+    if dupes != [] do
+      raise CompileError,
+        description: "pod #{inspect(pod.name)}: duplicate container names: #{inspect(Enum.uniq(dupes))}"
+    end
+
+    Enum.each(pod.containers, fn ct ->
+      if ct.binary == nil do
+        raise CompileError,
+          description: "pod #{inspect(pod.name)}/#{ct.name}: missing binary"
+      end
+    end)
+
+    :ok
+  end
+
+  # --- Term output ---
+
+  def to_term(%__MODULE__{} = pod) do
+    containers = Enum.map(pod.containers, fn ct ->
+      ct_term = %{
+        name: ct.name,
+        binary: ct.binary,
+        ports: ct.ports,
+        limits: ct.limits,
+        restart: ct.restart,
+        seccomp: ct.seccomp,
+        uid: ct.uid,
+        gid: ct.gid,
+        args: ct.args,
+        caps: ct.caps
+      }
+
+      ct_term = if ct.image, do: Map.put(ct_term, :image, ct.image), else: ct_term
+
+      ct_term
+      |> Enum.reject(fn {_k, v} -> v == nil or v == [] or v == %{} end)
+      |> Map.new()
+    end)
+
+    %{
+      name: pod.name,
+      strategy: pod.strategy,
+      containers: containers
+    }
+  end
+end

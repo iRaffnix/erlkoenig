@@ -1,0 +1,1 @@
+#{table => <<"test">>, sets => [{<<"allowed_v6">>,ipv6_addr,#{elements => [<<"2001:db8::1">>,<<"2001:db8::2">>]}}], chains => [#{name => <<"input">>, type => filter, hook => input, priority => 0, policy => drop, rules => [ct_established_accept,{set_lookup_accept,<<"allowed_v6">>},{tcp_accept,22}]}]}.

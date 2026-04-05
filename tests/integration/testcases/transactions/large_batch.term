@@ -1,0 +1,44 @@
+#{
+    table => <<"test">>,
+    counters => [<<"c_ssh">>,<<"c_http">>,<<"c_dns">>,<<"c_drop">>],
+    sets => [{<<"blocklist">>,ipv4_addr,#{elements => [<<"10.0.0.1">>,<<"10.0.0.2">>,<<"10.0.0.3">>,<<"10.0.0.4">>,<<"10.0.0.5">>,<<"10.0.0.6">>,<<"10.0.0.7">>,<<"10.0.0.8">>,<<"10.0.0.9">>,<<"10.0.0.10">>]}}],
+    chains => [
+        #{
+            name => <<"input">>,
+            type => filter,
+            hook => input,
+            priority => 0,
+            policy => drop,
+            rules => [
+                ct_established_accept,
+                {iifname_accept,<<"lo">>},
+                {set_lookup_drop,<<"blocklist">>},
+                icmp_accept,
+                {tcp_accept,22,<<"c_ssh">>},
+                {tcp_accept,80,<<"c_http">>},
+                {tcp_accept,443,<<"c_http">>},
+                {udp_accept,53,<<"c_dns">>},
+                {log_drop,<<"DROP: ">>,<<"c_drop">>}
+            ]
+        },
+        #{
+            name => <<"forward">>,
+            type => filter,
+            hook => forward,
+            priority => 0,
+            policy => drop,
+            rules => [
+                ct_established_accept,
+                {set_lookup_drop,<<"blocklist">>}
+            ]
+        },
+        #{
+            name => <<"output">>,
+            type => filter,
+            hook => output,
+            priority => 0,
+            policy => accept,
+            rules => []
+        }
+    ]
+}.

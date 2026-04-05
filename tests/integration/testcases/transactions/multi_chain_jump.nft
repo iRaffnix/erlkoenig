@@ -1,0 +1,11 @@
+table inet test {
+    chain input {
+        type filter hook input priority 0; policy drop;
+        ct state established,related accept
+        tcp dport 22 accept
+        jump web_filter
+    }
+    chain web_filter {
+        log prefix "WEB: " drop
+    }
+}

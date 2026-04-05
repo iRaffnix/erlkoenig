@@ -1,0 +1,15 @@
+table inet test {
+    set blocklist4 {
+        type ipv4_addr
+        elements = { 10.0.0.1 }
+    }
+    set blocklist6 {
+        type ipv6_addr
+        elements = { fe80::1 }
+    }
+    chain input {
+        type filter hook input priority 0; policy drop;
+        ip saddr @blocklist4 drop
+        ip6 saddr @blocklist6 drop
+    }
+}

@@ -1,0 +1,8 @@
+## Erlkoenig VM arguments
+## Substituted at startup by relx (${VAR} → environment variable)
+
+-sname erlkoenig
+-setcookie ${RELX_COOKIE}
+
+## Scheduler busy-wait: respond quickly to events
++sbwt very_short

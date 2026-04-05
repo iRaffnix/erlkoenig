@@ -1,0 +1,1 @@
+#{table => <<"test">>, sets => [{<<"dyn_blocklist">>,ipv4_addr,#{flags => [eval,timeout], timeout => 300000}}], chains => [#{name => <<"input">>, type => filter, hook => input, priority => 0, policy => drop, rules => [ct_established_accept,{set_lookup_drop,<<"dyn_blocklist">>},{tcp_accept,22}]}]}.

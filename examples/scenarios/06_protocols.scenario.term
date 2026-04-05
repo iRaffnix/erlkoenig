@@ -1,0 +1,39 @@
+#{
+    config => "examples/06_protocols.term",
+    chain => <<"inbound">>,
+    policy => drop,
+    packets => [
+        #{name => <<"ssh">>,
+          proto => tcp, saddr => {10,0,0,1}, dport => 22,
+          expect => accept},
+
+        #{name => <<"http">>,
+          proto => tcp, saddr => {10,0,0,1}, dport => 80,
+          expect => accept},
+
+        #{name => <<"https">>,
+          proto => tcp, saddr => {10,0,0,1}, dport => 443,
+          expect => accept},
+
+        #{name => <<"dns">>,
+          proto => udp, saddr => {10,0,0,1}, dport => 53,
+          expect => accept},
+
+        #{name => <<"ntp">>,
+          proto => udp, saddr => {10,0,0,1}, dport => 123,
+          expect => accept},
+
+        #{name => <<"ping">>,
+          proto => icmp, saddr => {10,0,0,1},
+          expect => accept},
+
+        %% Not allowed
+        #{name => <<"smtp">>,
+          proto => tcp, saddr => {10,0,0,1}, dport => 25,
+          expect => drop},
+
+        #{name => <<"random_udp">>,
+          proto => udp, saddr => {10,0,0,1}, dport => 9999,
+          expect => drop}
+    ]
+}.

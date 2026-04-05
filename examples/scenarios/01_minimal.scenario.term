@@ -1,0 +1,18 @@
+#{
+    config => "examples/01_minimal.term",
+    chain => <<"inbound">>,
+    policy => drop,
+    packets => [
+        #{name => <<"ssh">>,
+          proto => tcp, saddr => {10,0,0,1}, dport => 22,
+          expect => accept},
+
+        #{name => <<"http">>,
+          proto => tcp, saddr => {10,0,0,1}, dport => 80,
+          expect => accept},
+
+        #{name => <<"blocked">>,
+          proto => tcp, saddr => {10,0,0,1}, dport => 443,
+          expect => drop}
+    ]
+}.

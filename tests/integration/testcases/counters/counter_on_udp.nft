@@ -1,0 +1,9 @@
+table inet test {
+    counter dns {
+        packets 0 bytes 0
+    }
+    chain input {
+        type filter hook input priority 0; policy drop;
+        udp dport 53 counter name "dns" accept
+    }
+}

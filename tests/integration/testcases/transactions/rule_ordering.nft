@@ -1,0 +1,13 @@
+table inet test {
+    chain input {
+        type filter hook input priority 0; policy drop;
+        ct state established,related accept
+        iifname "lo" accept
+        icmp type echo-request accept
+        tcp dport 22 accept
+        tcp dport 80 accept
+        tcp dport 443 accept
+        udp dport 53 accept
+        log prefix "DROPPED: " drop
+    }
+}

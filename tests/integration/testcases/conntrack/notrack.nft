@@ -1,0 +1,7 @@
+table inet test {
+    chain prerouting {
+        type filter hook prerouting priority -300; policy accept;
+        udp dport 53 notrack
+        udp dport 123 notrack
+    }
+}

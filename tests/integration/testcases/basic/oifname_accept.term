@@ -1,0 +1,1 @@
+#{table => <<"test">>, chains => [#{name => <<"output">>, type => filter, hook => output, priority => 0, policy => drop, rules => [ct_established_accept,{oifname_accept,<<"eth0">>}]}]}.

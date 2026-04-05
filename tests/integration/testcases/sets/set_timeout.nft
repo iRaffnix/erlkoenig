@@ -1,0 +1,12 @@
+table inet test {
+    set tempban {
+        type ipv4_addr
+        timeout 60s
+    }
+    chain input {
+        type filter hook input priority 0; policy drop;
+        ct state established,related accept
+        ip saddr @tempban drop
+        tcp dport 22 accept
+    }
+}

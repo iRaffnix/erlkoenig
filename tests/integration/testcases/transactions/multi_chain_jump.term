@@ -1,0 +1,1 @@
+#{table => <<"test">>, chains => [#{name => <<"input">>, type => filter, hook => input, priority => 0, policy => drop, rules => [ct_established_accept,{tcp_accept,22},{jump,<<"web_filter">>}]},#{name => <<"web_filter">>, rules => [{log_drop,<<"WEB: ">>}]}]}.

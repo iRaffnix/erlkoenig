@@ -1,0 +1,1 @@
+#{table => <<"test">>, counters => [<<"dns">>], chains => [#{name => <<"input">>, type => filter, hook => input, priority => 0, policy => drop, rules => [{udp_accept,53,<<"dns">>}]}]}.

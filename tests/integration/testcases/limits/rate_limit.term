@@ -1,0 +1,1 @@
+#{table => <<"test">>, counters => [<<"tcp_22">>], chains => [#{name => <<"input">>, type => filter, hook => input, priority => 0, policy => drop, rules => [ct_established_accept,{tcp_accept_limited,22,<<"tcp_22">>,#{burst => 3, rate => 10}}]}]}.

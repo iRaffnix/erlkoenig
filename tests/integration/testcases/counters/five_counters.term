@@ -1,0 +1,5 @@
+#{
+    table => <<"test">>,
+    counters => [<<"ssh">>,<<"http">>,<<"https">>,<<"dns">>,<<"dropped">>],
+    chains => [#{name => <<"input">>, type => filter, hook => input, priority => 0, policy => drop, rules => [ct_established_accept,{tcp_accept,22,<<"ssh">>},{tcp_accept,80,<<"http">>},{tcp_accept,443,<<"https">>},{udp_accept,53,<<"dns">>},{log_drop,<<"DROP: ">>,<<"dropped">>}]}]
+}.

@@ -11,11 +11,11 @@ defmodule Erlkoenig.DslTest do
       env %{"PORT" => "80", "ENV" => "prod"}
 
       firewall do
-        accept :established
-        accept :icmp
-        accept_tcp 80
-        accept_tcp 443
-        log_and_drop "DROP: "
+        rule :accept, ct: :established
+        rule :accept, icmp: true
+        rule :accept, tcp: 80
+        rule :accept, tcp: 443
+        rule :drop, log: "DROP: "
       end
     end
 
@@ -25,10 +25,10 @@ defmodule Erlkoenig.DslTest do
       args ["--threads", "4"]
 
       firewall do
-        accept :established
-        accept :icmp
-        accept_udp 53
-        accept :all
+        rule :accept, ct: :established
+        rule :accept, icmp: true
+        rule :accept, udp: 53
+        rule :accept
       end
     end
 
@@ -37,10 +37,10 @@ defmodule Erlkoenig.DslTest do
       ip {10, 0, 0, 30}
 
       firewall do
-        accept :established
-        accept :icmp
-        accept_tcp 6379
-        log_and_drop "DROP: "
+        rule :accept, ct: :established
+        rule :accept, icmp: true
+        rule :accept, tcp: 6379
+        rule :drop, log: "DROP: "
       end
 
       limits cpu: 2, memory: "512M", pids: 50
@@ -57,8 +57,8 @@ defmodule Erlkoenig.DslTest do
       [web | _] = FullExample.containers()
       assert web.name == "web_api"
       [chain] = web.firewall.chains
-      assert {:tcp_accept, 80} in chain.rules
-      assert {:tcp_accept, 443} in chain.rules
+      assert {:rule, :accept, %{tcp: 80}} in chain.rules
+      assert {:rule, :accept, %{tcp: 443}} in chain.rules
       refute :accept in chain.rules
     end
 
@@ -66,15 +66,15 @@ defmodule Erlkoenig.DslTest do
       containers = FullExample.containers()
       worker = Enum.find(containers, &(&1.name == "worker"))
       [chain] = worker.firewall.chains
-      assert :accept in chain.rules
-      assert {:udp_accept, 53} in chain.rules
+      assert {:rule, :accept, %{}} in chain.rules
+      assert {:rule, :accept, %{udp: 53}} in chain.rules
     end
 
     test "cache has strict with redis port" do
       containers = FullExample.containers()
       cache = Enum.find(containers, &(&1.name == "cache"))
       [chain] = cache.firewall.chains
-      assert {:tcp_accept, 6379} in chain.rules
+      assert {:rule, :accept, %{tcp: 6379}} in chain.rules
     end
 
     test "spawn_opts returns three tuples" do

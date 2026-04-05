@@ -1,0 +1,11 @@
+table inet test {
+    map port_policy {
+        type inet_service : verdict
+    }
+    chain input {
+        type filter hook input priority 0; policy drop;
+        ct state established,related accept
+        tcp dport vmap @port_policy
+        tcp dport 22 accept
+    }
+}

@@ -1,0 +1,37 @@
+{application, erlkoenig, [
+    {description, "Zero-trust container runtime with integrated firewall"},
+    {vsn, "0.4.0"},
+    {registered, [
+        %% Orchestrator
+        erlkoenig_sup, erlkoenig_zone, erlkoenig_zone_sup,
+        erlkoenig_bridge, erlkoenig_dns,
+        erlkoenig_ip_pool, erlkoenig_cgroup, erlkoenig_events,
+        erlkoenig_health, erlkoenig_audit, erlkoenig_pki,
+        erlkoenig_node_state,
+        %% Firewall engine (merged from erlkoenig_nft)
+        erlkoenig_nft_sup, erlkoenig_nft_srv, erlkoenig_nft_firewall,
+        erlkoenig_nft_watch_sup
+    ]},
+    {mod, {erlkoenig_app, []}},
+    {applications, [
+        kernel,
+        stdlib,
+        crypto,
+        inets,
+        ssl,
+        public_key
+    ]},
+    {env, [
+        {rt_path, auto},
+        %% Socket mode only — no port mode. Runtime started via systemd.
+        {comm_mode, socket},
+        {socket_dir, "/run/erlkoenig/"}
+    ]},
+    {modules, []},
+    {licenses, ["Apache-2.0"]},
+    {links, [
+        {"GitHub", "https://github.com/iRaffnix/erlkoenig"}
+    ]},
+    {files, ["src", "include", "rebar.config", "README.md", "LICENSE"]},
+    {build_tools, ["rebar3"]}
+]}.

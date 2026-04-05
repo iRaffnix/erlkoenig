@@ -1,0 +1,20 @@
+#{
+    table => <<"set_demo">>,
+    sets => [
+        {<<"blocklist">>,ipv4_addr}
+    ],
+    chains => [
+        #{
+            name => <<"inbound">>,
+            type => filter,
+            hook => input,
+            priority => 0,
+            policy => accept,
+            rules => [
+                {set_lookup_drop,<<"blocklist">>},
+                {tcp_accept,22},
+                {tcp_accept,80}
+            ]
+        }
+    ]
+}.

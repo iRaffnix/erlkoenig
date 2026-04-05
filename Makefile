@@ -149,7 +149,7 @@ dsl:
 dsl-escript: dsl
 	cd dsl && mix escript.build
 	@echo ""
-	@echo "==> dsl/erlkoenig-dsl"
+	@echo "==> dsl/erlkoenig"
 
 test-dsl:
 	cd dsl && mix test
@@ -166,7 +166,7 @@ release: erl dsl-escript
 	rebar3 tar
 	@mkdir -p dist
 	cp _build/default/rel/erlkoenig/erlkoenig-*.tar.gz dist/
-	cp dsl/erlkoenig-dsl dist/
+	cp dsl/erlkoenig dist/erlkoenig-dsl
 	@echo ""
 	@echo "==> dist/$$(cd dist && ls erlkoenig-*.tar.gz)"
 	@echo "==> dist/erlkoenig-dsl"
@@ -205,7 +205,7 @@ install: release rt
 	chown root:root $(PREFIX)/rt/erlkoenig_rt
 	setcap cap_sys_admin,cap_net_admin,cap_sys_chroot,cap_sys_ptrace,cap_setpcap,cap_setuid,cap_setgid,cap_dac_override,cap_bpf,cap_sys_resource+ep $(PREFIX)/rt/erlkoenig_rt
 	@# DSL escript (if built)
-	@[ -f dsl/erlkoenig-dsl ] && install -m 755 dsl/erlkoenig-dsl $(PREFIX)/bin/erlkoenig-dsl || true
+	@[ -f dsl/erlkoenig ] && install -m 755 dsl/erlkoenig $(PREFIX)/bin/erlkoenig-dsl || true
 	@# Ownership: root owns files, service user can read
 	chown -R root:$(SERVICE_USER) $(PREFIX)
 	chmod 750 $(PREFIX)

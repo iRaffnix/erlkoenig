@@ -243,24 +243,31 @@ run_one_test() {
         if [ -z "$dsl_escript" ]; then
             echo "  SKIP: $name (dsl) — no DSL escript found"
         else
-            # Compile .exs to temp .term
+            # DSL end-to-end test:
+            # 1. Compile .exs → .term (new format with nft_tables)
+            # 2. Apply via escript in namespace
+            # 3. Compare nft JSON output against reference
             local exs_copy="$TMPDIR_BASE/test_dsl.exs"
             cp "$exs_file" "$exs_copy"
             if "$dsl_escript" compile "$exs_copy" >/dev/null 2>&1; then
                 local compiled_term="$TMPDIR_BASE/test_dsl.term"
                 if [ -f "$compiled_term" ]; then
-                    # Normalize whitespace for comparison (erlang term formatting may differ)
-                    local norm_compiled="$TMPDIR_BASE/norm_compiled"
-                    local norm_reference="$TMPDIR_BASE/norm_reference"
-                    tr -s '[:space:]' ' ' < "$compiled_term" > "$norm_compiled"
-                    tr -s '[:space:]' ' ' < "$term_file" > "$norm_reference"
+                    # Apply compiled term in a fresh namespace
+                    local dsl_json="$TMPDIR_BASE/dsl.json"
+                    unshare -n bash -c "
+                        $ERTS_BIN/escript $ESCRIPT $ROOTDIR $compiled_term >/dev/null 2>&1
+                        nft -j list ruleset
+                    " > "$dsl_json" 2>/dev/null
 
-                    if diff -q "$norm_compiled" "$norm_reference" >/dev/null 2>&1; then
+                    local dsl_san="$TMPDIR_BASE/dsl_san.json"
+                    sanitize "$dsl_json" > "$dsl_san" 2>/dev/null
+
+                    if diff -q "$ref_san" "$dsl_san" >/dev/null 2>&1; then
                         echo "  PASS: $name (dsl)"
                     else
-                        echo "  FAIL: $name (dsl DIFF — .exs compiled .term differs from checked-in .term)"
+                        echo "  FAIL: $name (dsl DIFF)"
                         if [ "$VERBOSE" = "1" ]; then
-                            diff --unified "$term_file" "$compiled_term" | head -20
+                            diff --unified "$ref_san" "$dsl_san" | head -30
                         fi
                         return 1
                     fi

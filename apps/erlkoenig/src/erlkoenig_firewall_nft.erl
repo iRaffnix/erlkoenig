@@ -864,17 +864,51 @@ compile_generic_rule(Verdict, Opts) ->
         {true, _} -> Exprs1;
         {_, true} -> Exprs2;
         _ ->
-            %% Build match expressions
-            Matches = compile_generic_matches(Opts),
+            %% Delegate to specific handlers for complex rules
+            case compile_generic_special(Verdict, Opts) of
+                {ok, Result} -> Result;
+                false ->
+                    %% Build match expressions
+                    Matches = compile_generic_matches(Opts),
 
-            %% Modifiers (counter, limit, log)
-            Mods = compile_generic_modifiers(Opts),
+                    %% Modifiers (counter, limit, log)
+                    Mods = compile_generic_modifiers(Opts),
 
-            %% Verdict
-            V = compile_generic_verdict(Verdict, Opts),
+                    %% Verdict
+                    V = compile_generic_verdict(Verdict, Opts),
 
-            Matches ++ Mods ++ V
+                    Matches ++ Mods ++ V
+            end
     end.
+
+%% Handle rule types that need special compilation (not match+modifier+verdict)
+-spec compile_generic_special(atom(), map()) -> {ok, list()} | false.
+compile_generic_special(notrack, #{udp := Port}) ->
+    {ok, nft_rules:notrack_rule(Port, udp)};
+compile_generic_special(notrack, #{tcp := Port}) ->
+    {ok, nft_rules:notrack_rule(Port, tcp)};
+compile_generic_special(ct_mark_set, #{value := Value}) ->
+    {ok, nft_rules:ct_mark_set(Value)};
+compile_generic_special(ct_mark_match, #{value := Value, verdict := Verdict}) ->
+    {ok, nft_rules:ct_mark_match(Value, Verdict)};
+compile_generic_special(snat, #{addr := Addr, port := Port}) ->
+    {ok, nft_rules:snat_rule(ensure_ip_binary(Addr), Port)};
+compile_generic_special(snat, #{addr := Addr}) ->
+    {ok, nft_rules:snat_rule(ensure_ip_binary(Addr), 0)};
+compile_generic_special(dnat, #{tcp := MatchPort, addr := Addr, dport := DstPort}) ->
+    {ok, nft_rules:tcp_dnat(MatchPort, ensure_ip_binary(Addr), DstPort)};
+compile_generic_special(fib_rpf, _) ->
+    {ok, nft_rules:fib_rpf_drop()};
+compile_generic_special(connlimit_drop, #{max := Max}) ->
+    Flags = 1,
+    {ok, nft_rules:connlimit_drop(Max, Flags)};
+compile_generic_special(vmap_dispatch, #{proto := Proto, name := Name}) ->
+    {ok, nft_rules:vmap_dispatch(Proto, iolist_to_binary(Name))};
+compile_generic_special(accept, #{tcp_range := {From, To}}) ->
+    {ok, nft_rules:tcp_port_range_accept(From, To)};
+compile_generic_special(accept, #{protocol := Proto}) ->
+    {ok, nft_rules:protocol_accept(Proto)};
+compile_generic_special(_, _) -> false.
 
 -spec compile_generic_matches(map()) -> list().
 compile_generic_matches(Opts) ->
@@ -953,6 +987,12 @@ compile_match_udp(#{udp := Port}) when is_integer(Port) ->
             nft_expr_ir:cmp(eq, 1, <<Port:16/big>>)]};
 compile_match_udp(_) -> false.
 
+compile_match_set(#{set := SetName, set_type := ipv6_addr}) ->
+    SetBin = iolist_to_binary(SetName),
+    {true, [nft_expr_ir:meta(nfproto, 1),
+            nft_expr_ir:cmp(eq, 1, <<10>>),
+            nft_expr_ir:ip6_saddr(1),
+            nft_expr_ir:lookup(1, SetBin)]};
 compile_match_set(#{set := SetName}) ->
     SetBin = iolist_to_binary(SetName),
     {true, [nft_expr_ir:meta(nfproto, 1),
@@ -960,6 +1000,7 @@ compile_match_set(#{set := SetName}) ->
             nft_expr_ir:ip_saddr(1),
             nft_expr_ir:lookup(1, SetBin)]};
 compile_match_set(_) -> false.
+
 
 -spec compile_generic_modifiers(map()) -> list().
 compile_generic_modifiers(Opts) ->
@@ -977,7 +1018,13 @@ compile_generic_modifiers(Opts) ->
         {ok, Prefix} -> Mods2 ++ [nft_expr_ir:log(#{prefix => iolist_to_binary(Prefix)})];
         _ -> Mods2
     end,
-    Mods3.
+    Mods4 = case maps:find(nflog, Opts) of
+        {ok, #{prefix := NfPrefix, group := NfGroup}} ->
+            Mods3 ++ [nft_expr_ir:nflog(#{prefix => iolist_to_binary(NfPrefix),
+                                           group => NfGroup})];
+        _ -> Mods3
+    end,
+    Mods4.
 
 -spec compile_generic_verdict(atom(), map()) -> list().
 compile_generic_verdict(accept, _Opts) -> [nft_expr_ir:accept()];

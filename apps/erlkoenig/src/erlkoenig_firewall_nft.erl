@@ -38,7 +38,8 @@ batches.
          chain_name/1,
          inject_drop_counter/2,
          inject_drop_observability/3,
-         next_nflog_group/0]).
+         next_nflog_group/0,
+         set_msg/1]).
 
 %% NFPROTO_INET = 1
 -define(FAMILY, 1).
@@ -461,6 +462,29 @@ ip_to_binary({A, B, C, D}) ->
 ip_to_binary({A, B, C, D, E, F, G, H}) ->
     <<A:16, B:16, C:16, D:16, E:16, F:16, G:16, H:16>>.
 
+%% Convert IP in any format to 4-byte binary.
+%% Handles: <<10,0,0,1>> (already binary), <<"10.0.0.1">> (string), {10,0,0,1} (tuple)
+-spec ensure_ip_binary(binary() | tuple()) -> binary().
+ensure_ip_binary(<<A, B, C, D>>) when byte_size(<<A,B,C,D>>) =:= 4, A < 256 ->
+    %% Could be 4-byte IP or start of a string like "10.0"
+    %% If all bytes are < 256 and no dots, treat as raw IP
+    case binary:match(<<A,B,C,D>>, <<".">>) of
+        nomatch -> <<A, B, C, D>>;
+        _ -> parse_ip_string(<<A,B,C,D>>)
+    end;
+ensure_ip_binary(Bin) when is_binary(Bin) ->
+    parse_ip_string(Bin);
+ensure_ip_binary({A, B, C, D}) ->
+    <<A, B, C, D>>;
+ensure_ip_binary(Other) ->
+    ip_to_binary(Other).
+
+parse_ip_string(Bin) ->
+    case inet:parse_address(binary_to_list(Bin)) of
+        {ok, {A, B, C, D}} -> <<A, B, C, D>>;
+        _ -> Bin
+    end.
+
 %% --- Term-based rule compilation ---
 
 -doc "Extract nft_rules from a DSL firewall term. Returns a list of compiled rule expression lists.".
@@ -567,9 +591,9 @@ compile_rule({udp_port_range_accept, From, To}) ->
 compile_rule({protocol_accept, Proto}) ->
     nft_rules:protocol_accept(Proto);
 compile_rule({ip_saddr_accept, Ip}) ->
-    nft_rules:ip_saddr_accept(Ip);
+    nft_rules:ip_saddr_accept(ensure_ip_binary(Ip));
 compile_rule({ip_saddr_drop, Ip}) ->
-    nft_rules:ip_saddr_drop(Ip);
+    nft_rules:ip_saddr_drop(ensure_ip_binary(Ip));
 compile_rule({iifname_accept, Name}) ->
     nft_rules:iifname_accept(iolist_to_binary(Name));
 compile_rule({set_lookup_drop, SetName}) ->
@@ -585,7 +609,62 @@ compile_rule({log_drop, Prefix, Counter}) ->
 compile_rule({log_reject, Prefix}) ->
     nft_rules:log_reject(iolist_to_binary(Prefix));
 compile_rule({dnat, Ip, Port}) ->
-    nft_rules:tcp_dnat(Port, ip_to_binary(Ip), Port);
+    nft_rules:tcp_dnat(Port, ensure_ip_binary(Ip), Port);
+%% Masquerade
+compile_rule(masq) ->
+    nft_rules:masq_rule();
+compile_rule({oifname_neq_masq, Name}) ->
+    nft_rules:oifname_neq_masq(iolist_to_binary(Name));
+%% Jump
+compile_rule({jump, Chain}) ->
+    [nft_expr_ir:jump(iolist_to_binary(Chain))];
+%% Conntrack mark
+compile_rule({ct_mark_match, Value, Verdict}) ->
+    nft_rules:ct_mark_match(Value, Verdict);
+compile_rule({ct_mark_set, Value}) ->
+    nft_rules:ct_mark_set(Value);
+%% Notrack
+compile_rule({notrack, Proto, Port}) ->
+    nft_rules:notrack_rule(Proto, Port);
+%% NFLOG drop
+compile_rule({log_drop_nflog, Prefix, Group, Counter}) ->
+    nft_rules:log_drop_nflog(iolist_to_binary(Prefix), Group,
+                              iolist_to_binary(Counter));
+%% oifname accept
+compile_rule({oifname_accept, Name}) ->
+    nft_rules:oifname_accept(iolist_to_binary(Name));
+%% ICMP with counter
+compile_rule({icmp_accept_named, Counter}) ->
+    nft_rules:icmp_accept_named(iolist_to_binary(Counter));
+%% Set lookup accept
+compile_rule({set_lookup_accept, SetName}) ->
+    nft_rules:set_lookup_accept(iolist_to_binary(SetName));
+compile_rule({set_lookup_accept, SetName, Counter}) ->
+    nft_rules:set_lookup_accept(iolist_to_binary(SetName),
+                                 iolist_to_binary(Counter));
+compile_rule({set_lookup_accept_tcp, SetName}) ->
+    nft_rules:set_lookup_tcp_accept(iolist_to_binary(SetName));
+%% SNAT
+compile_rule({snat, Ip}) ->
+    nft_rules:snat_rule(ensure_ip_binary(Ip), 0);
+compile_rule({snat, Ip, Port}) ->
+    nft_rules:snat_rule(ensure_ip_binary(Ip), Port);
+%% TCP DNAT (full form)
+compile_rule({tcp_dnat, HostPort, Ip, ContainerPort}) ->
+    nft_rules:tcp_dnat(HostPort, ensure_ip_binary(Ip), ContainerPort);
+%% Vmap dispatch
+compile_rule({vmap_dispatch, Proto, VmapName}) ->
+    nft_rules:vmap_dispatch(Proto, iolist_to_binary(VmapName));
+compile_rule({vmap_dispatch, VmapName}) ->
+    nft_rules:vmap_dispatch(tcp, iolist_to_binary(VmapName));
+%% FIB
+compile_rule(fib_rpf_drop) ->
+    nft_rules:fib_rpf_drop();
+%% Connlimit (full form)
+compile_rule({connlimit_drop, Max}) ->
+    nft_rules:connlimit_drop(Max, 0);
+
+%% Catch-all
 compile_rule(Unknown) ->
     logger:warning("erlkoenig_firewall_nft: unknown rule ~p, skipping", [Unknown]),
     [].

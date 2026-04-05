@@ -99,20 +99,79 @@ jobs:
       - name: Run nft kernel tests
         run: sudo bash tests/integration/nft-run-tests.sh tests/integration/testcases
 
-      - name: Run nft DSL compile tests
+      - name: Run nft DSL end-to-end tests
         run: |
-          PASS=0; FAIL=0
+          # DSL .exs → compile (normal user) → apply in namespace (sudo) → compare nft JSON
+          ROOTDIR=$PWD/_build/default/rel/erlkoenig
+          ERTS_BIN=$(ls -d $ROOTDIR/erts-*/bin | head -1)
+          ESCRIPT=$PWD/tests/integration/lib/nfnl_apply.escript
+          SANITIZE='
+          import json, sys
+          def sort_key(obj):
+              order = {"metainfo": 0, "table": 1, "counter": 2, "set": 3, "map": 4,
+                       "flowtable": 5, "chain": 6, "quota": 7, "rule": 8}
+              for key in order:
+                  if key in obj:
+                      name = obj[key].get("name", obj[key].get("chain", ""))
+                      return (order[key], str(name), json.dumps(obj, sort_keys=True))
+              return (99, "", json.dumps(obj, sort_keys=True))
+          def sanitize(data):
+              items = data.get("nftables", [])
+              for o in items:
+                  if "metainfo" in o: o["metainfo"] = {"json_schema_version": 1}
+                  for key in ("table","chain","rule","set","map","counter","quota","flowtable"):
+                      if key in o and "handle" in o[key]: o[key]["handle"] = 0
+              data["nftables"] = sorted(items, key=sort_key)
+              return data
+          data = sanitize(json.load(sys.stdin))
+          json.dump(data, sys.stdout, indent=2, sort_keys=True)
+          '
+          PASS=0; FAIL=0; TOTAL=0
           for exs in tests/integration/testcases/**/*.exs; do
-            name=$(basename $(dirname $exs))/$(basename $exs .exs)
-            if dsl/erlkoenig compile "$exs" -o /tmp/dsl_test_$$.term >/dev/null 2>&1; then
+            dir=$(dirname $exs)
+            base=$(basename $exs .exs)
+            name="$(basename $dir)/$base"
+            nft_ref="$dir/$base.nft"
+            TOTAL=$((TOTAL+1))
+
+            # Step 1: Compile .exs → .term (normal user)
+            tmpterm=$(mktemp /tmp/dsl_e2e_XXXXX.term)
+            if ! dsl/erlkoenig compile "$exs" -o "$tmpterm" >/dev/null 2>&1; then
+              echo "  FAIL: $name (dsl compile)"
+              FAIL=$((FAIL+1)); rm -f "$tmpterm"; continue
+            fi
+
+            # Step 2: Apply in namespace + get nft JSON (sudo)
+            dsl_json=$(sudo unshare -n bash -c "
+              $ERTS_BIN/escript $ESCRIPT $ROOTDIR $tmpterm >/dev/null 2>&1
+              nft -j list ruleset
+            " 2>/dev/null)
+            rm -f "$tmpterm"
+
+            # Step 3: Get reference nft JSON
+            if [ ! -f "$nft_ref" ]; then
+              echo "  SKIP: $name (no .nft reference)"
+              continue
+            fi
+            ref_json=$(sudo unshare -n bash -c "
+              nft -f $nft_ref 2>/dev/null
+              nft -j list ruleset
+            " 2>/dev/null)
+
+            # Step 4: Sanitize + compare
+            dsl_san=$(echo "$dsl_json" | python3 -c "$SANITIZE" 2>/dev/null)
+            ref_san=$(echo "$ref_json" | python3 -c "$SANITIZE" 2>/dev/null)
+
+            if [ "$dsl_san" = "$ref_san" ]; then
+              echo "  PASS: $name (dsl e2e)"
               PASS=$((PASS+1))
             else
-              echo "FAIL: $name (dsl compile)"
+              echo "  FAIL: $name (dsl e2e DIFF)"
               FAIL=$((FAIL+1))
             fi
-            rm -f /tmp/dsl_test_$$.term
           done
-          echo "$PASS/$((PASS+FAIL)) DSL compile tests passed"
+          echo ""
+          echo "$PASS/$TOTAL DSL end-to-end tests passed ($FAIL failed)"
           [ $FAIL -eq 0 ] || exit 1
 
   # ── Release artifacts (for pre-release testing) ───────────

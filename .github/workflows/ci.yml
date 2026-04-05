@@ -96,8 +96,24 @@ jobs:
           rebar3 release
           make dsl-escript
 
-      - name: Run nft namespace tests
+      - name: Run nft kernel tests
         run: sudo bash tests/integration/nft-run-tests.sh tests/integration/testcases
+
+      - name: Run nft DSL compile tests
+        run: |
+          PASS=0; FAIL=0
+          for exs in tests/integration/testcases/**/*.exs; do
+            name=$(basename $(dirname $exs))/$(basename $exs .exs)
+            if dsl/erlkoenig compile "$exs" -o /tmp/dsl_test_$$.term >/dev/null 2>&1; then
+              PASS=$((PASS+1))
+            else
+              echo "FAIL: $name (dsl compile)"
+              FAIL=$((FAIL+1))
+            fi
+            rm -f /tmp/dsl_test_$$.term
+          done
+          echo "$PASS/$((PASS+FAIL)) DSL compile tests passed"
+          [ $FAIL -eq 0 ] || exit 1
 
   # ── Release artifacts (for pre-release testing) ───────────
   release:

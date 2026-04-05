@@ -51,7 +51,13 @@ main([RootDir, TermFile]) ->
     end,
 
     %% Create sets BEFORE chains (rules reference them)
+    %% Track set types for IPv6 awareness in rules
     Sets = maps:get(sets, Config, []),
+    SetTypes = lists:foldl(fun
+        ({Name, Type}, Acc) -> Acc#{iolist_to_binary(Name) => Type};
+        ({Name, Type, _}, Acc) -> Acc#{iolist_to_binary(Name) => Type};
+        (_, Acc) -> Acc
+    end, #{}, Sets),
     lists:foreach(fun(SetSpec) ->
         apply_set(Table, SetSpec)
     end, Sets),
@@ -101,7 +107,9 @@ main([RootDir, TermFile]) ->
         Rules = maps:get(rules, Chain, []),
         RuleMsgs = lists:flatmap(fun(Rule) ->
             try
-                Compiled = erlkoenig_firewall_nft:compile_rule(Rule),
+                %% Enrich set-referencing rules with set type (IPv6 awareness)
+                Rule2 = enrich_set_rule(Rule, SetTypes),
+                Compiled = erlkoenig_firewall_nft:compile_rule(Rule2),
                 %% Some rules return a list of rules (e.g. tcp_accept_limited)
                 %% Detect: if first element is a list, it's multi-rule
                 case Compiled of
@@ -139,6 +147,24 @@ main([RootDir, TermFile]) ->
 main(_) ->
     io:format(standard_error, "Usage: nfnl_apply.escript <rootdir> <config.term>~n", []),
     halt(1).
+
+%% Add set type info to set-referencing rules so compile_rule uses the right IP version
+enrich_set_rule({set_lookup_drop, SetName}, SetTypes) ->
+    case maps:find(SetName, SetTypes) of
+        {ok, ipv6_addr} -> {set_lookup_drop, SetName, ipv6_addr};
+        _ -> {set_lookup_drop, SetName}
+    end;
+enrich_set_rule({set_lookup_drop, SetName, Counter}, SetTypes) when is_atom(Counter), Counter =/= ipv4_addr, Counter =/= ipv6_addr ->
+    case maps:find(SetName, SetTypes) of
+        {ok, ipv6_addr} -> {set_lookup_drop_named, SetName, atom_to_binary(Counter), ipv6_addr};
+        _ -> {set_lookup_drop, SetName, Counter}
+    end;
+enrich_set_rule({set_lookup_accept, SetName}, SetTypes) ->
+    case maps:find(SetName, SetTypes) of
+        {ok, ipv6_addr} -> {set_lookup_accept, SetName, ipv6_addr};
+        _ -> {set_lookup_accept, SetName}
+    end;
+enrich_set_rule(Rule, _) -> Rule.
 
 apply_set(Table, {Name, Type}) ->
     apply_set(Table, {Name, Type, #{}});

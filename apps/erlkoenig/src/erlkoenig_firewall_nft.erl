@@ -602,8 +602,12 @@ compile_rule({iifname_accept, Name}) ->
     nft_rules:iifname_accept(iolist_to_binary(Name));
 compile_rule({set_lookup_drop, SetName}) ->
     nft_rules:set_lookup_drop(iolist_to_binary(SetName));
+compile_rule({set_lookup_drop, SetName, Type}) when Type =:= ipv4_addr; Type =:= ipv6_addr ->
+    nft_rules:set_lookup_drop(iolist_to_binary(SetName), Type);
 compile_rule({set_lookup_drop, SetName, Counter}) ->
     nft_rules:set_lookup_drop_named(iolist_to_binary(SetName), to_binary(Counter));
+compile_rule({set_lookup_drop_named, SetName, Counter, Type}) ->
+    nft_rules:set_lookup_drop_named(iolist_to_binary(SetName), to_binary(Counter), Type);
 compile_rule({connlimit_drop, Max, Offset}) ->
     nft_rules:connlimit_drop(Max, Offset);
 compile_rule({log_drop, Prefix}) ->
@@ -643,6 +647,8 @@ compile_rule({icmp_accept_named, Counter}) ->
 %% Set lookup accept
 compile_rule({set_lookup_accept, SetName}) ->
     nft_rules:set_lookup_accept(iolist_to_binary(SetName));
+compile_rule({set_lookup_accept, SetName, Type}) when Type =:= ipv4_addr; Type =:= ipv6_addr ->
+    nft_rules:set_lookup_accept(iolist_to_binary(SetName), Type);
 compile_rule({set_lookup_accept, SetName, Counter}) ->
     nft_rules:set_lookup_accept(iolist_to_binary(SetName),
                                  iolist_to_binary(Counter));

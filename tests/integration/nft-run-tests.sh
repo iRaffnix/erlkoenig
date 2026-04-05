@@ -38,13 +38,23 @@ find_release() {
         echo "$ERLKOENIG_NFT_DIR"
         return
     fi
-    # 2. Local build (_build/prod/rel)
-    local local_rel="$SCRIPT_DIR/../../_build/prod/rel/erlkoenig_nft"
-    if [ -d "$local_rel/lib" ]; then
-        echo "$(cd "$local_rel" && pwd)"
+    # 2. Local erlkoenig build (merged repo)
+    local ek_rel="$SCRIPT_DIR/../../_build/default/rel/erlkoenig"
+    if [ -d "$ek_rel/lib" ]; then
+        echo "$(cd "$ek_rel" && pwd)"
         return
     fi
-    # 3. System install
+    # 3. Local erlkoenig_nft build (legacy)
+    local nft_rel="$SCRIPT_DIR/../../_build/prod/rel/erlkoenig_nft"
+    if [ -d "$nft_rel/lib" ]; then
+        echo "$(cd "$nft_rel" && pwd)"
+        return
+    fi
+    # 4. System install
+    if [ -d "/opt/erlkoenig/lib" ]; then
+        echo "/opt/erlkoenig"
+        return
+    fi
     if [ -d "/opt/erlkoenig_nft/lib" ]; then
         echo "/opt/erlkoenig_nft"
         return

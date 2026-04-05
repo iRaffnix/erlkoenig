@@ -80,13 +80,21 @@ jobs:
           restore-keys: |
             erlang-
 
+      - name: Setup Elixir (for DSL escript)
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: '28'
+          elixir-version: '1.18'
+          rebar3-version: '3.24'
+
       - name: Install nft
         run: sudo apt-get update && sudo apt-get install -y nftables
 
-      - name: Build release
+      - name: Build release + DSL escript
         run: |
           rebar3 compile
           rebar3 release
+          make dsl-escript
 
       - name: Run nft namespace tests
         run: sudo bash tests/integration/nft-run-tests.sh tests/integration/testcases

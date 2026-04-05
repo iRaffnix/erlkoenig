@@ -1015,21 +1015,22 @@ compile_match_set(_) -> false.
 
 -spec compile_generic_modifiers(map()) -> list().
 compile_generic_modifiers(Opts) ->
+    %% Order: log, counter, limit (matches nft_rules convention)
     Mods = [],
-    Mods1 = case maps:find(counter, Opts) of
-        {ok, Name} -> Mods ++ [nft_expr_ir:objref_counter(iolist_to_binary(Name))];
+    Mods1 = case maps:find(log, Opts) of
+        {ok, Prefix} when is_binary(Prefix); is_list(Prefix) ->
+            Mods ++ [nft_expr_ir:log(#{prefix => iolist_to_binary(Prefix)})];
+        {ok, #{prefix := Prefix, group := Group}} ->
+            Mods ++ [nft_expr_ir:log(#{prefix => iolist_to_binary(Prefix), group => Group})];
         _ -> Mods
     end,
-    Mods2 = case maps:find(limit, Opts) of
-        {ok, #{rate := Rate, burst := Burst}} ->
-            Mods1 ++ [nft_expr_ir:limit(Rate, Burst)];
+    Mods2 = case maps:find(counter, Opts) of
+        {ok, Name} -> Mods1 ++ [nft_expr_ir:objref_counter(iolist_to_binary(Name))];
         _ -> Mods1
     end,
-    Mods3 = case maps:find(log, Opts) of
-        {ok, Prefix} when is_binary(Prefix); is_list(Prefix) ->
-            Mods2 ++ [nft_expr_ir:log(#{prefix => iolist_to_binary(Prefix)})];
-        {ok, #{prefix := Prefix, group := Group}} ->
-            Mods2 ++ [nft_expr_ir:log(#{prefix => iolist_to_binary(Prefix), group => Group})];
+    Mods3 = case maps:find(limit, Opts) of
+        {ok, #{rate := Rate, burst := Burst}} ->
+            Mods2 ++ [nft_expr_ir:limit(Rate, Burst)];
         _ -> Mods2
     end,
     Mods3.

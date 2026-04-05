@@ -56,6 +56,41 @@ jobs:
       - name: Verify escript
         run: dsl/erlkoenig-dsl --help || true
 
+  # ── nft Namespace Integration Tests ───────────────────────
+  nft-integration:
+    name: nft Namespace Tests
+    runs-on: ubuntu-22.04
+    needs: [erlang]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Beam
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: '28'
+          rebar3-version: '3.24'
+
+      - name: Cache rebar3
+        uses: actions/cache@v4
+        with:
+          path: |
+            _build
+            ~/.cache/rebar3
+          key: erlang-${{ hashFiles('rebar.lock', 'rebar.config') }}
+          restore-keys: |
+            erlang-
+
+      - name: Install nft
+        run: sudo apt-get update && sudo apt-get install -y nftables
+
+      - name: Build release
+        run: |
+          rebar3 compile
+          rebar3 release
+
+      - name: Run nft namespace tests
+        run: sudo bash tests/integration/nft-run-tests.sh tests/integration/testcases
+
   # ── Release artifacts (for pre-release testing) ───────────
   release:
     name: Release ${{ matrix.target.name }}

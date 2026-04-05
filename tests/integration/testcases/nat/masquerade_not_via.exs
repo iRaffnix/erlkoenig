@@ -1,8 +1,9 @@
 defmodule Firewall.MasqueradeNotVia do
-  use ErlkoenigNft.Firewall
-  firewall "test" do
-    chain "postrouting", hook: :postrouting, type: :nat, policy: :accept do
-      masquerade_not_via "lo"
+  use Erlkoenig.Stack
+
+  nft_table :inet, "test" do
+    base_chain "postrouting", hook: :postrouting, type: :nat, priority: :filter, policy: :accept do
+      nft_rule :masquerade, oif_neq: "lo"
     end
   end
 end

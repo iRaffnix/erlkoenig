@@ -1,14 +1,14 @@
 defmodule Firewall.NamedSet do
-  use ErlkoenigNft.Firewall
+  use Erlkoenig.Stack
 
-  firewall "test" do
-    set "blocklist", :ipv4_addr, elements: [
+  nft_table :inet, "test" do
+    nft_set "blocklist", :ipv4_addr, elements: [
       "198.51.100.1",
       "203.0.113.5"
     ]
 
-    chain "input", hook: :input, policy: :drop do
-      drop_if_in_set "blocklist"
+    base_chain "input", hook: :input, type: :filter, priority: :filter, policy: :drop do
+      nft_rule :drop, set: "blocklist"
     end
   end
 end

@@ -1,10 +1,10 @@
 defmodule Firewall.Notrack do
-  use ErlkoenigNft.Firewall
+  use Erlkoenig.Stack
 
-  firewall "test" do
-    chain "prerouting", hook: :prerouting, priority: -300, policy: :accept do
-      notrack 53, :udp
-      notrack 123, :udp
+  nft_table :inet, "test" do
+    base_chain "prerouting", hook: :prerouting, type: :filter, priority: :raw, policy: :accept do
+      nft_rule :notrack, udp: 53
+      nft_rule :notrack, udp: 123
     end
   end
 end

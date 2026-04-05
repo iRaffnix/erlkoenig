@@ -1,14 +1,17 @@
 defmodule Firewall.MultiChain do
-  use ErlkoenigNft.Firewall
-  firewall "test" do
-    chain "input", hook: :input, policy: :drop do
-      accept :established
-      accept_tcp 22
+  use Erlkoenig.Stack
+
+  nft_table :inet, "test" do
+    base_chain "input", hook: :input, type: :filter, priority: :filter, policy: :drop do
+      nft_rule :accept, ct: :established
+      nft_rule :accept, tcp: 22
     end
-    chain "forward", hook: :forward, policy: :drop do
-      accept :established
+
+    base_chain "forward", hook: :forward, type: :filter, priority: :filter, policy: :drop do
+      nft_rule :accept, ct: :established
     end
-    chain "output", hook: :output, policy: :accept do
+
+    base_chain "output", hook: :output, type: :filter, priority: :filter, policy: :accept do
     end
   end
 end

@@ -1,9 +1,11 @@
 defmodule Firewall.EmptySet do
-  use ErlkoenigNft.Firewall
-  firewall "test" do
-    set "blocklist", :ipv4_addr
-    chain "input", hook: :input, policy: :drop do
-      drop_if_in_set "blocklist"
+  use Erlkoenig.Stack
+
+  nft_table :inet, "test" do
+    nft_set "blocklist", :ipv4_addr
+
+    base_chain "input", hook: :input, type: :filter, priority: :filter, policy: :drop do
+      nft_rule :drop, set: "blocklist"
     end
   end
 end

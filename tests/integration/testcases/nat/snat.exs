@@ -1,9 +1,9 @@
 defmodule Firewall.Snat do
-  use ErlkoenigNft.Firewall
+  use Erlkoenig.Stack
 
-  firewall "test" do
-    chain "postrouting", hook: :postrouting, type: :nat, priority: 100, policy: :accept do
-      snat "192.168.1.1", 0
+  nft_table :inet, "test" do
+    base_chain "postrouting", hook: :postrouting, type: :nat, priority: 100, policy: :accept do
+      nft_rule :snat, addr: "192.168.1.1", port: 0
     end
   end
 end

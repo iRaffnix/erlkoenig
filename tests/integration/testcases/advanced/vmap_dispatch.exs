@@ -1,13 +1,15 @@
 defmodule Firewall.VmapDispatch do
-  use ErlkoenigNft.Firewall
-  firewall "test" do
-    vmap "port_vmap", :inet_service, entries: [
+  use Erlkoenig.Stack
+
+  nft_table :inet, "test" do
+    nft_vmap "port_vmap", :inet_service, [
       {80, :accept},
       {443, :accept}
     ]
-    chain "input", hook: :input, policy: :drop do
-      accept :established
-      dispatch :tcp, "port_vmap"
+
+    base_chain "input", hook: :input, type: :filter, priority: :filter, policy: :drop do
+      nft_rule :accept, ct: :established
+      nft_rule :vmap_dispatch, proto: :tcp, name: "port_vmap"
     end
   end
 end

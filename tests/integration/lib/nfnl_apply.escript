@@ -46,6 +46,7 @@ apply_nft_tables(Tables) ->
             fun(S) -> nft_table:add(1, Table, S) end
         ]),
 
+        %% Counters
         case Counters of
             [] -> ok;
             _ -> nfnl_server:apply_msgs(erlkoenig_nft_srv, [fun(S) ->
@@ -53,20 +54,44 @@ apply_nft_tables(Tables) ->
                  end || N <- Counters])
         end,
 
-        Sorted = lists:sort(fun(A, _) -> not maps:is_key(hook, A) end, Chains),
+        %% Sets (new format: list of {Name, Type} | {Name, Type, Opts})
+        Sets = maps:get(sets, TableDef, []),
+        SetTypes = lists:foldl(fun
+            ({Name, Type}, Acc) -> Acc#{iolist_to_binary(Name) => Type};
+            ({Name, Type, _}, Acc) -> Acc#{iolist_to_binary(Name) => Type};
+            (_, Acc) -> Acc
+        end, #{}, Sets),
+        lists:foreach(fun(Spec) -> apply_set(Table, Spec) end, Sets),
 
+        %% Chains: regular first, then base
+        Sorted = lists:sort(fun(A, _) -> not maps:is_key(hook, A) end, Chains),
         lists:foreach(fun(C) -> create_chain(Table, C) end, Sorted),
 
+        %% VMaps (after chains for jump targets)
+        Vmaps = maps:get(vmaps, TableDef, []),
+        lists:foreach(fun(V) -> apply_vmap(Table, V) end, Vmaps),
+
+        %% Rules
         lists:foreach(fun(C) ->
             ChainName = iolist_to_binary(maps:get(name, C)),
             Rules = maps:get(rules, C, []),
             RuleMsgs = lists:flatmap(fun({Action, Opts}) ->
-                compile_and_encode(1, Table, ChainName, {rule, Action, Opts})
+                Rule = enrich_set_rule_generic(Action, Opts, SetTypes),
+                compile_and_encode(1, Table, ChainName, Rule)
             end, Rules),
             apply_rule_msgs(RuleMsgs)
         end, Sorted)
     end, Tables),
     halt(0).
+
+%% Enrich generic rules that reference sets with set type info
+enrich_set_rule_generic(drop, #{set := SetName} = Opts, SetTypes) ->
+    case maps:find(iolist_to_binary(SetName), SetTypes) of
+        {ok, ipv6_addr} -> {rule, drop, Opts#{set_type => ipv6_addr}};
+        _ -> {rule, drop, Opts}
+    end;
+enrich_set_rule_generic(Action, Opts, _) ->
+    {rule, Action, Opts}.
 
 %% ═══════════════════════════════════════════════════════════════
 %% Legacy format: table/chains/sets/vmaps
@@ -127,11 +152,12 @@ create_chain(Table, Chain) ->
     ChainName = iolist_to_binary(maps:get(name, Chain)),
     Msg = case maps:find(hook, Chain) of
         {ok, Hook} ->
+            Prio = priority_to_int(maps:get(priority, Chain, 0)),
             [fun(S) -> nft_chain:add(1, #{
                 table => Table, name => ChainName,
                 hook => Hook,
                 type => maps:get(type, Chain, filter),
-                priority => maps:get(priority, Chain, 0),
+                priority => Prio,
                 policy => maps:get(policy, Chain, accept)
             }, S) end];
         error ->
@@ -143,6 +169,13 @@ create_chain(Table, Chain) ->
         ok -> ok;
         {error, E} -> io:format(standard_error, "Chain ~s: ~p~n", [ChainName, E])
     end.
+
+priority_to_int(filter) -> 0;
+priority_to_int(dstnat) -> -100;
+priority_to_int(srcnat) -> 100;
+priority_to_int(mangle) -> -150;
+priority_to_int(raw) -> -300;
+priority_to_int(N) when is_integer(N) -> N.
 
 compile_and_encode(Family, Table, Chain, Rule) ->
     try

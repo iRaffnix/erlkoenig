@@ -1,9 +1,9 @@
 defmodule Firewall.Masquerade do
-  use ErlkoenigNft.Firewall
+  use Erlkoenig.Stack
 
-  firewall "test" do
-    chain "postrouting", hook: :postrouting, type: :nat, policy: :accept do
-      masquerade()
+  nft_table :inet, "test" do
+    base_chain "postrouting", hook: :postrouting, type: :nat, priority: :filter, policy: :accept do
+      nft_rule :masquerade
     end
   end
 end

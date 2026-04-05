@@ -1,10 +1,11 @@
 defmodule Firewall.LogReject do
-  use ErlkoenigNft.Firewall
-  firewall "test" do
-    chain "input", hook: :input, policy: :drop do
-      accept :established
-      accept_tcp 22
-      log_and_reject "REJECT: "
+  use Erlkoenig.Stack
+
+  nft_table :inet, "test" do
+    base_chain "input", hook: :input, type: :filter, priority: :filter, policy: :drop do
+      nft_rule :accept, ct: :established
+      nft_rule :accept, tcp: 22
+      nft_rule :reject, log: "REJECT: "
     end
   end
 end

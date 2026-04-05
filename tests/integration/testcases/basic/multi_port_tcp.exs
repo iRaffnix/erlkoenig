@@ -1,13 +1,14 @@
 defmodule Firewall.MultiPortTcp do
-  use ErlkoenigNft.Firewall
-  firewall "test" do
-    chain "input", hook: :input, policy: :drop do
-      accept :established
-      accept_tcp 22
-      accept_tcp 80
-      accept_tcp 443
-      accept_tcp 8080
-      accept_tcp 8443
+  use Erlkoenig.Stack
+
+  nft_table :inet, "test" do
+    base_chain "input", hook: :input, type: :filter, priority: :filter, policy: :drop do
+      nft_rule :accept, ct: :established
+      nft_rule :accept, tcp: 22
+      nft_rule :accept, tcp: 80
+      nft_rule :accept, tcp: 443
+      nft_rule :accept, tcp: 8080
+      nft_rule :accept, tcp: 8443
     end
   end
 end

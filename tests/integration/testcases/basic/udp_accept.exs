@@ -1,10 +1,11 @@
 defmodule Firewall.UdpAccept do
-  use ErlkoenigNft.Firewall
-  firewall "test" do
-    chain "input", hook: :input, policy: :drop do
-      accept :established
-      accept_udp 53
-      accept_udp 123
+  use Erlkoenig.Stack
+
+  nft_table :inet, "test" do
+    base_chain "input", hook: :input, type: :filter, priority: :filter, policy: :drop do
+      nft_rule :accept, ct: :established
+      nft_rule :accept, udp: 53
+      nft_rule :accept, udp: 123
     end
   end
 end

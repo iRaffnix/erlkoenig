@@ -1,9 +1,9 @@
 defmodule Firewall.TcpDnat do
-  use ErlkoenigNft.Firewall
+  use Erlkoenig.Stack
 
-  firewall "test" do
-    chain "prerouting", hook: :prerouting, type: :nat, priority: -100, policy: :accept do
-      dnat 8080, "10.0.0.5", 80
+  nft_table :inet, "test" do
+    base_chain "prerouting", hook: :prerouting, type: :nat, priority: -100, policy: :accept do
+      nft_rule :dnat, tcp: 8080, addr: "10.0.0.5", dport: 80
     end
   end
 end

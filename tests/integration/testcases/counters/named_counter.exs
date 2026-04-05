@@ -1,12 +1,13 @@
 defmodule Firewall.NamedCounter do
-  use ErlkoenigNft.Firewall
+  use Erlkoenig.Stack
 
-  firewall "test" do
-    counters [:ssh, :http]
+  nft_table :inet, "test" do
+    nft_counter "ssh"
+    nft_counter "http"
 
-    chain "input", hook: :input, policy: :drop do
-      accept_tcp 22, counter: :ssh
-      accept_tcp 80, counter: :http
+    base_chain "input", hook: :input, type: :filter, priority: :filter, policy: :drop do
+      nft_rule :accept, tcp: 22, counter: "ssh"
+      nft_rule :accept, tcp: 80, counter: "http"
     end
   end
 end

@@ -1,9 +1,10 @@
 defmodule Firewall.OifnameAccept do
-  use ErlkoenigNft.Firewall
-  firewall "test" do
-    chain "output", hook: :output, policy: :drop do
-      accept :established
-      accept_output_interface "eth0"
+  use Erlkoenig.Stack
+
+  nft_table :inet, "test" do
+    base_chain "output", hook: :output, type: :filter, priority: :filter, policy: :drop do
+      nft_rule :accept, ct: :established
+      nft_rule :accept, oif: "eth0"
     end
   end
 end

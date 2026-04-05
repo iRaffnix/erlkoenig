@@ -13,6 +13,8 @@ defmodule Erlkoenig.Nft.TableBuilder do
   defstruct family: :inet,
             name: nil,
             counters: [],
+            sets: [],
+            vmaps: [],
             chains: []
 
   def new(family, name) do
@@ -25,6 +27,19 @@ defmodule Erlkoenig.Nft.TableBuilder do
 
   def add_chain(%__MODULE__{chains: cs} = t, chain) do
     %{t | chains: cs ++ [chain]}
+  end
+
+  def add_set(%__MODULE__{sets: ss} = t, name, type, opts \\ []) do
+    set = case Keyword.get(opts, :elements) do
+      nil -> {name, type}
+      elems -> {name, type, %{elements: elems}}
+    end
+    %{t | sets: ss ++ [set]}
+  end
+
+  def add_vmap(%__MODULE__{vmaps: vs} = t, name, type, entries) do
+    vmap = %{name: name, type: type, entries: entries}
+    %{t | vmaps: vs ++ [vmap]}
   end
 
   def validate!(%__MODULE__{} = t) do
@@ -65,6 +80,8 @@ defmodule Erlkoenig.Nft.TableBuilder do
       counters: t.counters,
       chains: Enum.map(t.chains, &chain_to_term/1)
     }
+    base = if t.sets != [], do: Map.put(base, :sets, t.sets), else: base
+    base = if t.vmaps != [], do: Map.put(base, :vmaps, t.vmaps), else: base
     base
   end
 

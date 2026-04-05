@@ -908,6 +908,11 @@ compile_generic_special(accept, #{tcp_range := {From, To}}) ->
     {ok, nft_rules:tcp_port_range_accept(From, To)};
 compile_generic_special(accept, #{protocol := Proto}) ->
     {ok, nft_rules:protocol_accept(Proto)};
+compile_generic_special(reject, #{tcp := Port}) ->
+    {ok, nft_rules:tcp_reject(Port)};
+compile_generic_special(accept, #{tcp := Port, counter := Counter, limit := #{rate := Rate, burst := Burst}}) ->
+    {ok, nft_rules:tcp_accept_limited(Port, iolist_to_binary(Counter),
+                                       #{rate => Rate, burst => Burst})};
 compile_generic_special(_, _) -> false.
 
 -spec compile_generic_matches(map()) -> list().
@@ -952,6 +957,12 @@ compile_match_saddr(#{saddr := {A, B, C, D, Prefix}}) ->
                     nft_expr_ir:bitwise(1, 1, Mask, <<0, 0, 0, 0>>),
                     nft_expr_ir:cmp(eq, 1, MaskedNet)]}
     end;
+compile_match_saddr(#{saddr := IpStr}) when is_binary(IpStr); is_list(IpStr) ->
+    Ip = ensure_ip_binary(IpStr),
+    {true, [nft_expr_ir:meta(nfproto, 1),
+            nft_expr_ir:cmp(eq, 1, <<2>>),
+            nft_expr_ir:ip_saddr(1),
+            nft_expr_ir:cmp(eq, 1, Ip)]};
 compile_match_saddr(_) -> false.
 
 compile_match_daddr(#{daddr := {A, B, C, D, Prefix}}) ->
@@ -1015,16 +1026,13 @@ compile_generic_modifiers(Opts) ->
         _ -> Mods1
     end,
     Mods3 = case maps:find(log, Opts) of
-        {ok, Prefix} -> Mods2 ++ [nft_expr_ir:log(#{prefix => iolist_to_binary(Prefix)})];
+        {ok, Prefix} when is_binary(Prefix); is_list(Prefix) ->
+            Mods2 ++ [nft_expr_ir:log(#{prefix => iolist_to_binary(Prefix)})];
+        {ok, #{prefix := Prefix, group := Group}} ->
+            Mods2 ++ [nft_expr_ir:log(#{prefix => iolist_to_binary(Prefix), group => Group})];
         _ -> Mods2
     end,
-    Mods4 = case maps:find(nflog, Opts) of
-        {ok, #{prefix := NfPrefix, group := NfGroup}} ->
-            Mods3 ++ [nft_expr_ir:nflog(#{prefix => iolist_to_binary(NfPrefix),
-                                           group => NfGroup})];
-        _ -> Mods3
-    end,
-    Mods4.
+    Mods3.
 
 -spec compile_generic_verdict(atom(), map()) -> list().
 compile_generic_verdict(accept, _Opts) -> [nft_expr_ir:accept()];

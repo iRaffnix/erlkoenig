@@ -344,4 +344,20 @@ defmodule Erlkoenig.Stack do
         var!(ek_nft_table), unquote(name))
     end
   end
+
+  # set declaration at table level
+  defmacro nft_set(name, type, opts \\ []) do
+    quote do
+      var!(ek_nft_table) = Erlkoenig.Nft.TableBuilder.add_set(
+        var!(ek_nft_table), unquote(name), unquote(type), unquote(opts))
+    end
+  end
+
+  # vmap declaration at table level
+  defmacro nft_vmap(name, type, entries) do
+    quote do
+      var!(ek_nft_table) = Erlkoenig.Nft.TableBuilder.add_vmap(
+        var!(ek_nft_table), unquote(name), unquote(type), unquote(entries))
+    end
+  end
 end

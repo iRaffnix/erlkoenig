@@ -1,8 +1,9 @@
 defmodule Firewall.CtMarkMatch do
-  use ErlkoenigNft.Firewall
-  firewall "test" do
-    chain "input", hook: :input, policy: :drop do
-      match_mark 1, verdict: :accept
+  use Erlkoenig.Stack
+
+  nft_table :inet, "test" do
+    base_chain "input", hook: :input, type: :filter, priority: :filter, policy: :drop do
+      nft_rule :ct_mark_match, value: 1, verdict: :accept
     end
   end
 end

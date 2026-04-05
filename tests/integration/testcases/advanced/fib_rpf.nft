@@ -1,0 +1,6 @@
+table inet test {
+    chain prerouting {
+        type filter hook prerouting priority -200; policy accept;
+        fib saddr . iif oif eq 0 drop
+    }
+}

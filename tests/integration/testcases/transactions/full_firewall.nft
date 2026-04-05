@@ -1,0 +1,28 @@
+table inet test {
+    set blocklist_v4 {
+        type ipv4_addr
+        elements = { 198.51.100.1 }
+    }
+    set blocklist_v6 {
+        type ipv6_addr
+    }
+    counter ssh_cnt {
+        packets 0 bytes 0
+    }
+    counter icmp_cnt {
+        packets 0 bytes 0
+    }
+    counter dropped_cnt {
+        packets 0 bytes 0
+    }
+    chain input {
+        type filter hook input priority 0; policy drop;
+        ct state established,related accept
+        iifname "lo" accept
+        ip saddr @blocklist_v4 counter name "dropped_cnt" drop
+        ip6 saddr @blocklist_v6 counter name "dropped_cnt" drop
+        icmp type echo-request counter name "icmp_cnt" accept
+        tcp dport 22 counter name "ssh_cnt" accept
+        log prefix "DROP: " counter name "dropped_cnt" drop
+    }
+}

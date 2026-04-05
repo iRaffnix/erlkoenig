@@ -1,0 +1,12 @@
+table inet test {
+    set allowed {
+        type ipv4_addr
+        elements = { 10.0.0.1, 10.0.0.2 }
+    }
+    chain input {
+        type filter hook input priority 0; policy drop;
+        ct state established,related accept
+        ip saddr @allowed accept
+        tcp dport 22 accept
+    }
+}

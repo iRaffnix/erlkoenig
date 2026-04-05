@@ -1,0 +1,13 @@
+table inet test {
+    counter banned {
+        packets 0 bytes 0
+    }
+    set blocklist {
+        type ipv4_addr
+        elements = { 198.51.100.1 }
+    }
+    chain input {
+        type filter hook input priority 0; policy drop;
+        ip saddr @blocklist counter name "banned" drop
+    }
+}

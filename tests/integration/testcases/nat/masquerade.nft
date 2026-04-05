@@ -1,0 +1,6 @@
+table inet test {
+    chain postrouting {
+        type nat hook postrouting priority 0; policy accept;
+        masquerade
+    }
+}

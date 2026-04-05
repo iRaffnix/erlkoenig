@@ -1,0 +1,6 @@
+table inet test {
+    chain prerouting {
+        type nat hook prerouting priority -100; policy accept;
+        tcp dport 8080 dnat ip to 10.0.0.5:80
+    }
+}

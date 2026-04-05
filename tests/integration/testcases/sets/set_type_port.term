@@ -1,0 +1,1 @@
+#{table => <<"test">>, sets => [{<<"allowed_ports">>,inet_service,#{elements => [22,80,443,8080,8443]}}], chains => [#{name => <<"input">>, type => filter, hook => input, priority => 0, policy => drop, rules => [ct_established_accept,{set_lookup_accept_tcp,<<"allowed_ports">>}]}]}.

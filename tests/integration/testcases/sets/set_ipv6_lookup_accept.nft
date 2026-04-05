@@ -1,0 +1,12 @@
+table inet test {
+    set allowed_v6 {
+        type ipv6_addr
+        elements = { 2001:db8::1, 2001:db8::2 }
+    }
+    chain input {
+        type filter hook input priority 0; policy drop;
+        ct state established,related accept
+        ip6 saddr @allowed_v6 accept
+        tcp dport 22 accept
+    }
+}

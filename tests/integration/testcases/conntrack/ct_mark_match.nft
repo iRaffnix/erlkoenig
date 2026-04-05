@@ -1,0 +1,6 @@
+table inet test {
+    chain input {
+        type filter hook input priority 0; policy drop;
+        ct mark 0x00000001 accept
+    }
+}

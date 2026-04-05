@@ -1,0 +1,16 @@
+table inet test {
+    counter ssh { packets 0 bytes 0 }
+    counter http { packets 0 bytes 0 }
+    counter https { packets 0 bytes 0 }
+    counter dns { packets 0 bytes 0 }
+    counter dropped { packets 0 bytes 0 }
+    chain input {
+        type filter hook input priority 0; policy drop;
+        ct state established,related accept
+        tcp dport 22 counter name "ssh" accept
+        tcp dport 80 counter name "http" accept
+        tcp dport 443 counter name "https" accept
+        udp dport 53 counter name "dns" accept
+        log prefix "DROP: " counter name "dropped" drop
+    }
+}

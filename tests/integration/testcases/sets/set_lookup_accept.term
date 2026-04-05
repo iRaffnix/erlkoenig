@@ -1,0 +1,1 @@
+#{table => <<"test">>, sets => [{<<"allowed">>,ipv4_addr,#{elements => [<<"10.0.0.1">>,<<"10.0.0.2">>]}}], chains => [#{name => <<"input">>, type => filter, hook => input, priority => 0, policy => drop, rules => [ct_established_accept,{set_lookup_accept,<<"allowed">>},{tcp_accept,22}]}]}.

@@ -1,0 +1,9 @@
+table inet test {
+    set blocklist {
+        type ipv4_addr
+    }
+    chain input {
+        type filter hook input priority 0; policy drop;
+        ip saddr @blocklist drop
+    }
+}

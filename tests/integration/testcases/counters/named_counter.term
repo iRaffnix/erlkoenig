@@ -1,0 +1,1 @@
+#{table => <<"test">>, counters => [<<"ssh">>,<<"http">>], chains => [#{name => <<"input">>, type => filter, hook => input, priority => 0, policy => drop, rules => [{tcp_accept,22,<<"ssh">>},{tcp_accept,80,<<"http">>}]}]}.

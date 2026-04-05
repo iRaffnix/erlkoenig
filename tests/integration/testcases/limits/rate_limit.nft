@@ -1,0 +1,12 @@
+table inet test {
+    counter tcp_22 {
+        packets 0 bytes 0
+    }
+
+    chain input {
+        type filter hook input priority 0; policy drop;
+        ct state established,related accept
+        tcp dport 22 limit rate over 10/second burst 3 packets drop
+        tcp dport 22 counter name "tcp_22" accept
+    }
+}

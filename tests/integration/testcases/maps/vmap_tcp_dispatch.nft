@@ -1,0 +1,21 @@
+table inet test {
+    map svc_dispatch {
+        type inet_service : verdict
+        elements = { 22 : jump ssh_handler,
+                     80 : jump http_handler,
+                     443 : jump http_handler,
+                     53 : accept }
+    }
+    chain input {
+        type filter hook input priority 0; policy drop;
+        ct state established,related accept
+        tcp dport vmap @svc_dispatch
+        log prefix "UNMATCHED: " drop
+    }
+    chain ssh_handler {
+        accept
+    }
+    chain http_handler {
+        accept
+    }
+}

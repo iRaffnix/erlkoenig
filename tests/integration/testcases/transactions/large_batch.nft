@@ -1,0 +1,31 @@
+table inet test {
+    set blocklist {
+        type ipv4_addr
+        elements = { 10.0.0.1, 10.0.0.2, 10.0.0.3, 10.0.0.4, 10.0.0.5,
+                     10.0.0.6, 10.0.0.7, 10.0.0.8, 10.0.0.9, 10.0.0.10 }
+    }
+    counter c_ssh { packets 0 bytes 0 }
+    counter c_http { packets 0 bytes 0 }
+    counter c_dns { packets 0 bytes 0 }
+    counter c_drop { packets 0 bytes 0 }
+    chain input {
+        type filter hook input priority 0; policy drop;
+        ct state established,related accept
+        iifname "lo" accept
+        ip saddr @blocklist drop
+        icmp type echo-request accept
+        tcp dport 22 counter name "c_ssh" accept
+        tcp dport 80 counter name "c_http" accept
+        tcp dport 443 counter name "c_http" accept
+        udp dport 53 counter name "c_dns" accept
+        log prefix "DROP: " counter name "c_drop" drop
+    }
+    chain forward {
+        type filter hook forward priority 0; policy drop;
+        ct state established,related accept
+        ip saddr @blocklist drop
+    }
+    chain output {
+        type filter hook output priority 0; policy accept;
+    }
+}

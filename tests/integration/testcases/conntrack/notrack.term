@@ -1,0 +1,1 @@
+#{table => <<"test">>, chains => [#{name => <<"prerouting">>, type => filter, hook => prerouting, priority => -300, policy => accept, rules => [{notrack,53,udp},{notrack,123,udp}]}]}.

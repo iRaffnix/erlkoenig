@@ -1,0 +1,11 @@
+table inet test {
+    chain input {
+        type filter hook input priority 0; policy drop;
+        ct state established,related accept
+        tcp dport 22 accept
+        tcp dport 80 accept
+        tcp dport 443 accept
+        tcp dport 8080 accept
+        tcp dport 8443 accept
+    }
+}

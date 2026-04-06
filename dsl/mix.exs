@@ -14,6 +14,7 @@ defmodule Erlkoenig.DSL.MixProject do
         main: "overview",
         extras: [
           "guides/overview.md",
+          "guides/installation.md",
           "guides/containers.md",
           "guides/networking.md",
           "guides/firewall.md",

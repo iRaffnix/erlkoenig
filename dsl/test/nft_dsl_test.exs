@@ -663,7 +663,7 @@ defmodule NftDslTest do
     # host table
     host_table = Enum.find(config.nft_tables, & &1.name == "host")
     assert host_table.family == :inet
-    assert length(host_table.chains) == 1
+    assert length(host_table.chains) == 2  # input + prerouting (raw ban)
 
     # erlkoenig table
     ek_table = Enum.find(config.nft_tables, & &1.name == "erlkoenig")

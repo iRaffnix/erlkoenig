@@ -929,7 +929,12 @@ defmodule Erlkoenig.Stack do
   Each `nft_rule` maps 1:1 to a real `nft add rule` command.
   Rules are evaluated top-to-bottom — first match wins.
 
-  ## Actions
+  Syntax: `nft_rule :action, match_field: value, match_field: value, ...`
+
+  All match fields are AND-combined — all must match for the action to fire.
+  For OR logic, write separate rules.
+
+  ## Actions (first argument)
 
   | Action | nft equivalent | Required opts | Description |
   |--------|---------------|---------------|-------------|
@@ -948,44 +953,92 @@ defmodule Erlkoenig.Stack do
   | `:connlimit_drop` | `ct count over N drop` | `limit:` | Connection limit per source IP |
   | `:vmap_dispatch` | `vmap @name` | `vmap:` | Verdict map dispatch |
 
-  ## Match Fields
+  ## Match Fields (keyword options, all optional, combinable)
+
+  ### Identity (who)
 
   | Field | nft equivalent | Type | Example |
   |-------|---------------|------|---------|
   | `ct_state:` | `ct state` | `[atom]` | `[:established, :related]` |
+  | `ip_saddr:` | `ip saddr` | `ip_tuple` \\| `{:replica_ips, pod, ct}` | `{10,0,0,0,24}` |
+  | `ip_daddr:` | `ip daddr` | `ip_tuple` \\| `{:replica_ips, pod, ct}` | `{10,0,0,2}` |
+  | `ip_protocol:` | `ip protocol` | `atom` | `:icmp` |
+
+  ### Interface (where)
+
+  | Field | nft equivalent | Type | Example |
+  |-------|---------------|------|---------|
   | `iifname:` | `iifname` | `string` \\| `{:veth_of, pod, ct}` | `"eth0"` |
   | `oifname:` | `oifname` | `string` | `"br0"` |
   | `oifname_ne:` | `oifname !=` | `string` | `"dmz"` |
+
+  ### Port (what)
+
+  | Field | nft equivalent | Type | Example |
+  |-------|---------------|------|---------|
   | `tcp_dport:` | `tcp dport` | `integer` \\| `{min, max}` | `8080` or `{8000, 9000}` |
   | `udp_dport:` | `udp dport` | `integer` | `53` |
-  | `ip_saddr:` | `ip saddr` | `ip_tuple` \\| `{:replica_ips, pod, ct}` | `{10,0,0,0,24}` |
-  | `ip_daddr:` | `ip daddr` | `ip_tuple` \\| `{:replica_ips, pod, ct}` | `{10,0,0,2}` |
-  | `log_prefix:` | `log prefix` | `string` | `"FWD: "` |
-  | `counter:` | `counter` | `string` | `"forward_drop"` (must be declared with `nft_counter`) |
-  | `to:` | (jump target) | `string` | `"from-web-nginx"` |
-  | `mark:` | `ct mark` | `integer` | `1` |
-  | `snat_to:` | `snat to` | `ip_tuple` | `{192,168,1,1}` |
-  | `dnat_to:` | `dnat to` | `ip_tuple` \\| `{ip, port}` | `{10,0,0,2}` or `{10,0,0,2, 8080}` |
-  | `limit:` | `ct count over` | `integer` | `100` |
-  | `set:` | `@set_name` | `string` | `"blocklist"` |
-  | `vmap:` | `vmap @name` | `string` | `"dispatch"` |
+  | `set:` | `@set_name` | `string` | `"ban"` — match IP against named set |
+
+  ### Observability
+
+  | Field | nft equivalent | Type | Example |
+  |-------|---------------|------|---------|
+  | `counter:` | `counter` | `string` | `"forward_drop"` — must be declared with `nft_counter` |
+  | `log_prefix:` | `log prefix` | `string` | `"FWD: "` — triggers NFLOG with packet details |
+
+  ### Action-specific
+
+  | Field | Used with | Type | Example |
+  |-------|-----------|------|---------|
+  | `to:` | `:jump` | `string` | `"from-web-nginx"` |
+  | `mark:` | `:ct_mark_set`, `:ct_mark_match` | `integer` | `1` |
+  | `snat_to:` | `:snat` | `ip_tuple` | `{192,168,1,1}` |
+  | `dnat_to:` | `:dnat` | `ip_tuple` \\| `{ip, port}` | `{10,0,0,2, 8080}` |
+  | `limit:` | `:connlimit_drop` | `integer` | `100` |
+  | `vmap:` | `:vmap_dispatch` | `string` | `"dispatch"` |
 
   ## Deploy-Time Symbols
 
-  These are resolved when the config is loaded, not at compile time:
+  Resolved when the config is loaded, not at compile time:
 
-  - `{:veth_of, "pod", "container"}` — expands to the host veth name (e.g. `"vh.web0nginx"`)
-  - `{:replica_ips, "pod", "container"}` — expands to a list of container IPs across all replicas
+  - `{:veth_of, "pod", "container"}` — expands to host veth name (e.g. `"vh.web0nginx"`)
+  - `{:replica_ips, "pod", "container"}` — expands to list of container IPs across all replicas
+
+  With `replicas: 3`, `{:replica_ips, "web", "nginx"}` generates three
+  individual nft rules — one per IP.
 
   ## IP Tuple Format
 
-  - `{a, b, c, d}` — single IP address (e.g. `{10, 0, 0, 2}`)
+  - `{a, b, c, d}` — single IP (e.g. `{10, 0, 0, 2}`)
   - `{a, b, c, d, mask}` — CIDR subnet (e.g. `{10, 0, 0, 0, 24}`)
+
+  ## Combining Fields
+
+  All fields are AND-combined. Every field must match:
+
+      # TCP port 443 from eth0 to a specific IP — all three must match
+      nft_rule :accept,
+        iifname: "eth0",
+        ip_daddr: {:replica_ips, "web", "nginx"},
+        tcp_dport: 443
+
+  For OR logic, write separate rules:
+
+      # Accept port 80 OR port 443
+      nft_rule :accept, tcp_dport: 80
+      nft_rule :accept, tcp_dport: 443
 
   ## Examples
 
       # Accept established connections
       nft_rule :accept, ct_state: [:established, :related]
+
+      # Drop IPs in ban set (before conntrack in raw chain)
+      nft_rule :drop, set: "ban", counter: "input_ban"
+
+      # Accept ICMP (ping)
+      nft_rule :accept, ip_protocol: :icmp
 
       # Accept TCP on port 443 from eth0
       nft_rule :accept, iifname: "eth0", tcp_dport: 443
@@ -1000,7 +1053,7 @@ defmodule Erlkoenig.Stack do
         tcp_dport: 4000
 
       # Drop with counter and log
-      nft_rule :drop, log_prefix: "FWD: ", counter: "forward_drop"
+      nft_rule :drop, counter: "forward_drop", log_prefix: "FWD: "
 
       # Masquerade container subnet (NAT)
       nft_rule :masquerade, ip_saddr: {10, 0, 0, 0, 24}, oifname_ne: "br0"
@@ -1012,7 +1065,7 @@ defmodule Erlkoenig.Stack do
       nft_rule :fib_rpf
 
       # Connection limit: max 100 concurrent from one IP
-      nft_rule :connlimit_drop, limit: 100
+      nft_rule :connlimit_drop, tcp_dport: 80, limit: 100
   """
   defmacro nft_rule(action, opts \\ []) do
     quote do

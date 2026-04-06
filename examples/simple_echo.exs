@@ -54,17 +54,22 @@ defmodule SimpleEcho do
       nft_counter "input_drop"
       nft_counter "input_ban"
 
+      # ┌─────────────────────────────────────────────────┐
+      # │ RAW PREROUTING — vor conntrack (-300)          │
+      # │                                               │
+      # │ Gebannte IPs werden gedroppt BEVOR der Kernel │
+      # │ einen conntrack Entry anlegt. Null State,     │
+      # │ null CPU, null Memory pro gebanntem Paket.    │
+      # │ Der schnellstmögliche Weg ein Paket zu killen.│
+      # └───────────────────────────────────────────────┘
+      base_chain "prerouting", hook: :prerouting, type: :filter,
+        priority: :raw, policy: :accept do
+
+        nft_rule :drop, set: "ban", counter: "input_ban"
+      end
+
       base_chain "input", hook: :input, type: :filter,
         priority: :filter, policy: :drop do
-
-        # ┌─────────────────────────────────────────────────┐
-        # │ 1. BAN SET — vor allem anderen                  │
-        # │                                                 │
-        # │ Gebannte IPs erzeugen KEINEN conntrack Entry.   │
-        # │ Kein NAT Lookup, kein State, kein Log.          │
-        # │ Das ist der schnellste Weg ein Paket zu droppen.│
-        # └─────────────────────────────────────────────────┘
-        nft_rule :drop, set: "ban", counter: "input_ban"
 
         # ┌─────────────────────────────────────────────────┐
         # │ 2. CONNECTION TRACKING                          │

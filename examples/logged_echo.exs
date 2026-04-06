@@ -43,11 +43,17 @@ defmodule LoggedEcho do
     nft_table :inet, "host" do
       nft_set "ban", :ipv4_addr
       nft_counter "input_drop"
+      nft_counter "input_ban"
+
+      # Raw: drop gebannte IPs vor conntrack (priority -300)
+      base_chain "prerouting", hook: :prerouting, type: :filter,
+        priority: :raw, policy: :accept do
+        nft_rule :drop, set: "ban", counter: "input_ban"
+      end
 
       base_chain "input", hook: :input, type: :filter,
         priority: :filter, policy: :drop do
 
-        nft_rule :drop, set: "ban"
         nft_rule :accept, ct_state: [:established, :related]
         nft_rule :accept, iifname: "lo"
         nft_rule :accept, ip_protocol: :icmp

@@ -28,9 +28,8 @@ Handles the case where erlkoenig_fuse modules are NOT available
 
 -export([build/2, build/3]).
 
-%% Runtime-optional modules from sibling projects (erlkoenig_fuse, erlkoenig_elf).
-%% Called via try/catch to handle absence gracefully.
--dialyzer({no_missing_calls, [check_fuse_available/0, do_build/3, generate_seccomp/1]}).
+%% Runtime-optional modules (erlkoenig_fuse).
+-dialyzer({no_missing_calls, [check_fuse_available/0, do_build/3]}).
 
 %%====================================================================
 %% API
@@ -157,23 +156,13 @@ resolve_seccomp(Config, BinaryPath, Opts) ->
 generate_seccomp(undefined) ->
     #{};
 generate_seccomp(BinaryPath) ->
-    %% Try erlkoenig_elf if available
-    try
-        case erlkoenig_elf:parse(BinaryPath) of
-            {ok, Elf} ->
-                case erlkoenig_elf:seccomp_profile(Elf) of
-                    {ok, Profile} -> Profile;
-                    _ -> #{}
-                end;
-            _ -> #{}
-        end
-    catch
-        error:undef ->
-            %% erlkoenig_elf not available
-            logger:info("erlkoenig_elf not available, skipping seccomp generation"),
-            #{};
-        _:_ ->
-            #{}
+    case erlkoenig_elf:parse(BinaryPath) of
+        {ok, Elf} ->
+            case erlkoenig_elf:seccomp_profile(Elf) of
+                {ok, Profile} -> Profile;
+                _ -> #{}
+            end;
+        _ -> #{}
     end.
 
 -spec lookup_cached_seccomp(binary()) -> map().

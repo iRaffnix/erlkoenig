@@ -17,7 +17,8 @@ defmodule Erlkoenig.DSL.MixProject do
           "guides/containers.md",
           "guides/networking.md",
           "guides/firewall.md",
-          "guides/observability.md"
+          "guides/observability.md",
+          "guides/elf-analysis.md"
         ],
         groups_for_extras: [
           "Guides": Path.wildcard("guides/*.md")

@@ -176,10 +176,16 @@ defmodule ThreeTierNft do
       base_chain "prerouting_nat", hook: :prerouting, type: :nat,
         priority: :dstnat, policy: :accept do
 
-        nft_rule :dnat,
+        # Source-IP Hash Loadbalancing:
+        # jhash(ip saddr) mod N → DNAT auf eine von N Container-IPs.
+        # Gleiche Source-IP → immer gleicher Container (sticky).
+        # Bei replicas: 1 → degeneriert zu einfachem DNAT.
+        # Bei replicas: 3 → Kernel-native Verteilung, ~10ns pro Paket.
+        nft_rule :dnat_lb,
           iifname: "eth0",
           tcp_dport: 8443,
-          dnat_to: {:replica_ips, "web", "nginx", 8443}
+          targets: {:replica_ips, "web", "nginx"},
+          port: 8443
       end
 
       # ── 2. Egress-Chains: Jump-Targets ──────────────

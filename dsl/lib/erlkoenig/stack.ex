@@ -1005,6 +1005,7 @@ defmodule Erlkoenig.Stack do
   | `:fib_rpf` | `fib saddr . iif oif 0 drop` | — | Reverse path filter (BCP38) |
   | `:connlimit_drop` | `ct count over N drop` | `limit:` | Connection limit per source IP |
   | `:vmap_dispatch` | `vmap @name` | `vmap:` | Verdict map dispatch |
+  | `:dnat_lb` | `dnat to jhash ip saddr mod N map {...}` | `targets:`, `port:` | Source-IP hash loadbalancing |
 
   ## Match Fields (keyword options, all optional, combinable)
 
@@ -1050,6 +1051,8 @@ defmodule Erlkoenig.Stack do
   | `dnat_to:` | `:dnat` | `ip_tuple` \\| `{ip, port}` | `{10,0,0,2, 8080}` |
   | `limit:` | `:connlimit_drop` | `integer` | `100` |
   | `vmap:` | `:vmap_dispatch` | `string` | `"dispatch"` |
+  | `targets:` | `:dnat_lb` | `{:replica_ips, pod, ct}` | Loadbalancing targets |
+  | `port:` | `:dnat_lb` | `integer` | DNAT destination port |
 
   ## Deploy-Time Symbols
 
@@ -1119,6 +1122,15 @@ defmodule Erlkoenig.Stack do
 
       # Connection limit: max 100 concurrent from one IP
       nft_rule :connlimit_drop, tcp_dport: 80, limit: 100
+
+      # Source-IP hash loadbalancing across replicas
+      # jhash(ip saddr) mod N → DNAT to one of N container IPs
+      # Same source IP always lands on same backend (sticky)
+      nft_rule :dnat_lb,
+        iifname: "eth0",
+        tcp_dport: 8443,
+        targets: {:replica_ips, "web", "nginx"},
+        port: 8443
   """
   defmacro nft_rule(action, opts \\ []) do
     quote do

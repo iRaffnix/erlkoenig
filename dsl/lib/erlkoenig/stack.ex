@@ -841,36 +841,89 @@ defmodule Erlkoenig.Stack do
   @doc """
   Define a base chain — attached to a netfilter hook.
 
-  Base chains are entry points into the firewall. The kernel delivers
-  packets to the chain based on the hook point. The policy determines
-  what happens to packets that don't match any rule.
+  A base chain is an entry point into the firewall. The kernel delivers
+  packets to the chain based on the hook point. In contrast to `nft_chain`
+  (regular chain), which is only entered via `:jump` rules.
+
+  Syntax: `base_chain "name", hook: ..., type: ..., priority: ..., policy: ... do ... end`
+
+  The four parameters determine **when** (hook), **what it can do** (type),
+  **in which order** (priority), and **what happens when nothing matches** (policy).
 
   ## Options
 
-  | Option | Type | Values | Description |
-  |--------|------|--------|-------------|
-  | `hook:` | atom | `:input`, `:output`, `:forward`, `:prerouting`, `:postrouting` | Netfilter hook point |
-  | `type:` | atom | `:filter`, `:nat`, `:route` | Chain type |
-  | `priority:` | atom \\| integer | `:filter`, `:dstnat`, `:srcnat`, `:mangle`, `:security`, `:raw` | Evaluation order |
-  | `policy:` | atom | `:accept`, `:drop` | Default verdict for unmatched packets |
+  ### `hook:` — when does this chain see packets
+
+  | Hook | Packets | Typical use |
+  |------|---------|-------------|
+  | `:input` | Destined for the host itself | Host firewall (SSH, ICMP) |
+  | `:forward` | Routed through the host (container ↔ container) | Container firewall |
+  | `:output` | Sent by the host itself | Outbound restrictions |
+  | `:prerouting` | All incoming, before routing decision | Ban sets (raw), DNAT |
+  | `:postrouting` | All outgoing, after routing decision | SNAT, Masquerade |
+
+  ### `type:` — what can the chain do
+
+  | Type | Allowed actions | Typical with |
+  |------|----------------|--------------|
+  | `:filter` | accept, drop, jump, reject | input, forward, output, prerouting |
+  | `:nat` | snat, dnat, masquerade, redirect | prerouting (dnat), postrouting (snat) |
+  | `:route` | Mark-based rerouting | output |
+
+  ### `priority:` — evaluation order (lower = earlier)
+
+  | Priority | Value | When |
+  |----------|-------|------|
+  | `:raw` | -300 | Before conntrack — ban sets go here |
+  | `:mangle` | -150 | Before filter — packet manipulation |
+  | `:dstnat` | -100 | DNAT (port forwarding) |
+  | `:filter` | 0 | Standard filtering |
+  | `:security` | 50 | After filter — SELinux |
+  | `:srcnat` | 100 | SNAT/Masquerade (after routing) |
+
+  An integer can also be used directly (e.g. `priority: -200`).
+
+  ### `policy:` — default verdict
+
+  | Policy | Meaning |
+  |--------|---------|
+  | `:drop` | Drop everything that doesn't match a rule (secure, deny-by-default) |
+  | `:accept` | Accept everything that doesn't match (open, use for NAT chains) |
 
   ## Common Combinations
 
-  | Use Case | hook | type | priority |
-  |----------|------|------|----------|
-  | Input firewall | `:input` | `:filter` | `:filter` |
-  | Forward firewall | `:forward` | `:filter` | `:filter` |
-  | DNAT (port forward) | `:prerouting` | `:nat` | `:dstnat` |
-  | SNAT / Masquerade | `:postrouting` | `:nat` | `:srcnat` |
+  | Use Case | hook | type | priority | policy |
+  |----------|------|------|----------|--------|
+  | Host firewall | `:input` | `:filter` | `:filter` | `:drop` |
+  | Container firewall | `:forward` | `:filter` | `:filter` | `:drop` |
+  | Ban before conntrack | `:prerouting` | `:filter` | `:raw` | `:accept` |
+  | Port forwarding (DNAT) | `:prerouting` | `:nat` | `:dstnat` | `:accept` |
+  | Masquerade (SNAT) | `:postrouting` | `:nat` | `:srcnat` | `:accept` |
 
   ## Examples
 
-      # Drop everything except SSH and established
+      # Ban set in raw priority — before conntrack, zero kernel state
+      base_chain "prerouting", hook: :prerouting, type: :filter,
+        priority: :raw, policy: :accept do
+        nft_rule :drop, set: "ban", counter: "input_ban"
+      end
+
+      # Host input firewall — deny by default
       base_chain "input", hook: :input, type: :filter,
         priority: :filter, policy: :drop do
         nft_rule :accept, ct_state: [:established, :related]
         nft_rule :accept, iifname: "lo"
+        nft_rule :accept, ip_protocol: :icmp
         nft_rule :accept, tcp_dport: 22
+        nft_rule :drop, counter: "input_drop", log_prefix: "HOST: "
+      end
+
+      # Container forward firewall — deny by default
+      base_chain "forward", hook: :forward, type: :filter,
+        priority: :filter, policy: :drop do
+        nft_rule :accept, ct_state: [:established, :related]
+        nft_rule :jump, iifname: {:veth_of, "web", "nginx"}, to: "from-web"
+        nft_rule :drop, counter: "forward_drop"
       end
 
       # NAT: masquerade container traffic

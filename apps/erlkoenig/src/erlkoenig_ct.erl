@@ -937,10 +937,11 @@ round_2(F) ->
 -spec maybe_start_log_publisher(#ct_data{}) ->
     {pid(), atomics:atomics_ref()} | undefined.
 maybe_start_log_publisher(#ct_data{stream = undefined}) -> undefined;
-maybe_start_log_publisher(#ct_data{stream = #{channels := Channels},
+maybe_start_log_publisher(#ct_data{stream = #{channels := Channels} = StreamCfg,
                                     id = Id, name = Name}) ->
+    RetentionDays = maps:get(retention_days, StreamCfg, 7),
     InFlight = atomics:new(1, []),
-    case erlkoenig_log_publisher:start_link(Id, Name, Channels, InFlight) of
+    case erlkoenig_log_publisher:start_link(Id, Name, Channels, RetentionDays, InFlight) of
         {ok, Pid} ->
             {Pid, InFlight};
         {error, Reason} ->

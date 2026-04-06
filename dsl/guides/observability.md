@@ -40,6 +40,17 @@ event type, or wildcard.
 | | `system.firewall.failed` | nft table apply failed |
 | Security | `security.<name>.verified` | Binary signature valid |
 | | `security.<name>.rejected` | Binary signature invalid |
+| System | `system.log.overflow` | Log publisher dropped chunks |
+| | `system.log.disconnected` | Log publisher lost broker connection |
+
+### Container Logs (RabbitMQ Streams)
+
+Container stdout/stderr are streamed via RabbitMQ Streams (not the
+AMQP Topic Exchange above). See the [Logging Guide](logging.md) for details.
+
+| Stream Name | Description |
+|-------------|-------------|
+| `erlkoenig.log.<name>` | Container stdout + stderr (append-only, replayable) |
 
 ## Filtering Examples
 

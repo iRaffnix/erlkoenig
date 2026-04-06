@@ -311,6 +311,18 @@ encode_payload({firewall_failed, Table, Reason}) ->
         <<"reason">> => term_to_binary_string(Reason)
     }};
 
+encode_payload({log_drop, Name, Count, Bytes}) ->
+    {ok, <<"system.log.overflow">>, #{
+        <<"name">> => ensure_binary(Name),
+        <<"dropped_count">> => Count,
+        <<"dropped_bytes">> => Bytes
+    }};
+
+encode_payload({log_disconnected, Name}) ->
+    {ok, <<"system.log.disconnected">>, #{
+        <<"name">> => ensure_binary(Name)
+    }};
+
 encode_payload({signature_verified, Id, Name, Meta}) ->
     NameBin = ensure_binary(Name),
     {ok, <<"security.", NameBin/binary, ".verified">>, #{

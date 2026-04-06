@@ -23,7 +23,7 @@ The pipeline is at-most-once. Container I/O is never blocked.
 
 -include_lib("amqp_client/include/amqp_client.hrl").
 
--export([start_link/4, stop/1]).
+-export([start_link/5, stop/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -define(MAX_QUEUE_LEN, 1000).
@@ -64,10 +64,10 @@ The pipeline is at-most-once. Container I/O is never blocked.
 %% API
 %% ===================================================================
 
--spec start_link(binary(), binary(), [atom()], atomics:atomics_ref()) ->
+-spec start_link(binary(), binary(), [atom()], non_neg_integer(), atomics:atomics_ref()) ->
     {ok, pid()} | {error, term()}.
-start_link(ContainerId, ContainerName, Channels, InFlight) ->
-    gen_server:start_link(?MODULE, {ContainerId, ContainerName, Channels, InFlight}, []).
+start_link(ContainerId, ContainerName, Channels, RetentionDays, InFlight) ->
+    gen_server:start_link(?MODULE, {ContainerId, ContainerName, Channels, RetentionDays, InFlight}, []).
 
 -spec stop(pid()) -> ok.
 stop(Pid) ->
@@ -77,17 +77,31 @@ stop(Pid) ->
 %% gen_server callbacks
 %% ===================================================================
 
-init({ContainerId, ContainerName, Channels, InFlight}) ->
+init({ContainerId, ContainerName, Channels, RetentionDays, InFlight}) ->
     proc_lib:set_label({erlkoenig_log_publisher, ContainerName}),
     Instance = binary:part(ContainerId, 0, min(8, byte_size(ContainerId))),
     StreamName = <<"erlkoenig.log.", ContainerName/binary>>,
-    %% Try to connect
-    Channel = try_open_channel(),
-    Connected = Channel =/= undefined,
-    if Connected ->
-        ensure_stream(Channel, StreamName);
-       true -> ok
+    %% Try to connect — stream declare may fail and kill the channel,
+    %% so we open a separate channel for declare, then open the publish channel.
+    RetentionStr = list_to_binary(integer_to_list(RetentionDays) ++ "D"),
+    DeclareOk = try
+        case try_open_channel() of
+            undefined -> false;
+            DeclCh ->
+                ensure_stream(DeclCh, StreamName, RetentionStr),
+                %% Close declare channel (we'll use a separate one for publishing)
+                try amqp_channel:close(DeclCh) catch _:_ -> ok end,
+                true
+        end
+    catch _:_ -> false
     end,
+    Channel = case DeclareOk of
+        true -> try_open_channel();
+        false ->
+            erlang:send_after(5000, self(), try_reconnect),
+            undefined
+    end,
+    Connected = Channel =/= undefined,
     {ok, #state{
         container_name = ContainerName,
         container_id = ContainerId,
@@ -181,7 +195,7 @@ handle_info(try_reconnect, State) ->
             erlang:send_after(5000, self(), try_reconnect),
             {noreply, State};
         Channel ->
-            ensure_stream(Channel, State#state.stream_name),
+            ensure_stream(Channel, State#state.stream_name, <<"90D">>),
             self() ! drain,
             {noreply, State#state{channel = Channel, connected = true}}
     end;
@@ -327,17 +341,21 @@ try_open_channel() ->
     catch _:_ -> undefined
     end.
 
-ensure_stream(Channel, StreamName) ->
+ensure_stream(Channel, StreamName, RetentionStr) ->
     try
-        amqp_channel:call(Channel, #'queue.declare'{
+        Res = amqp_channel:call(Channel, #'queue.declare'{
             queue = StreamName,
             durable = true,
             arguments = [
                 {<<"x-queue-type">>, longstr, <<"stream">>},
-                {<<"x-max-age">>, longstr, <<"90d">>}
+                {<<"x-max-age">>, longstr, RetentionStr}
             ]
-        })
-    catch _:_ -> ok
+        }),
+        logger:info("erlkoenig_log_publisher: stream ~s declared (retention=~s): ~p",
+                    [StreamName, RetentionStr, Res])
+    catch C:R ->
+        logger:warning("erlkoenig_log_publisher: stream ~s declare failed: ~p:~p",
+                       [StreamName, C, R])
     end.
 
 notify_drop(#state{container_name = Name}, Count, Bytes) ->

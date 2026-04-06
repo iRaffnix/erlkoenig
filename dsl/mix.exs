@@ -19,7 +19,8 @@ defmodule Erlkoenig.DSL.MixProject do
           "guides/firewall.md",
           "guides/observability.md",
           "guides/elf-analysis.md",
-          "guides/pki-signatures.md"
+          "guides/pki-signatures.md",
+          "guides/logging.md"
         ],
         groups_for_extras: [
           "Guides": Path.wildcard("guides/*.md")

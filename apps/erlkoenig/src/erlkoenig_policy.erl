@@ -91,6 +91,9 @@ unregister_policy(ContainerId) ->
 init([]) ->
     {ok, #{}}.
 
+handle_event({container_metrics, Id, _Name, Event}, State) ->
+    handle_event({container_metrics, Id, Event}, State);
+
 handle_event({container_metrics, Id, Event}, State) ->
     case ets:lookup(?TABLE, Id) of
         [Pol] -> evaluate(Id, Event, Pol);

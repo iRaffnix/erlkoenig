@@ -254,6 +254,42 @@ def format_event(rk, payload):
         action = payload.get("action", "?")
         return f"{RED(f'{name:>20s}')}  POLICY {vtype} action={action}"
 
+    # Metrics (BPF: fork/exec/exit/oom)
+    if rk.startswith("metrics."):
+        name = payload.get("name", rk.split(".")[1])
+        mtype = payload.get("type", "?")
+        comm = payload.get("comm", "")
+        extra = f" comm={comm}" if comm else ""
+        return f"{CYAN(f'{name:>20s}')}  {mtype}{extra}"
+
+    # System
+    if rk.startswith("system."):
+        if rk.endswith(".loaded"):
+            pods = payload.get("pods", 0)
+            zones = payload.get("zones", 0)
+            return f"{BLUE('system'):>20s}  CONFIG LOADED pods={pods} zones={zones}"
+        if rk.endswith(".failed"):
+            reason = payload.get("reason", "?")
+            return f"{BLUE('system'):>20s}  {RED('CONFIG FAILED')} {reason}"
+        if rk.endswith(".applied"):
+            table = payload.get("table", "?")
+            return f"{BLUE('system'):>20s}  FIREWALL APPLIED {table}"
+        if rk.endswith("firewall.failed"):
+            table = payload.get("table", "?")
+            return f"{BLUE('system'):>20s}  {RED('FIREWALL FAILED')} {table}"
+        return f"{BLUE('system'):>20s}  {rk}"
+
+    # Security
+    if rk.startswith("security."):
+        name = rk.split(".")[1]
+        if rk.endswith(".verified"):
+            signer = payload.get("signer", "?")
+            return f"{GREEN(f'{name:>20s}')}  {GREEN('SIG OK')} signer={signer}"
+        if rk.endswith(".rejected"):
+            reason = payload.get("reason", "?")
+            return f"{RED(f'{name:>20s}')}  {RED('SIG REJECTED')} {reason}"
+        return None
+
     # Unknown
     return f"{'?':>20s}  {rk}"
 

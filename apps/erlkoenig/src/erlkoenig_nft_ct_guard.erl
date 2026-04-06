@@ -271,8 +271,8 @@ handle_info({unban, SrcIP}, #{bans_expired := Exp} = State) ->
     case ets:lookup(?GUARD_BANS, SrcIP) of
         [{_, _, _, _}] ->
             ets:delete(?GUARD_BANS, SrcIP),
-            %% Unban in firewall
             _ = try_unban(SrcIP),
+            broadcast({ct_guard_unban, #{ip => SrcIP}}),
             logger:notice("[ct_guard] Auto-unban ~s (expired)", [erlkoenig_nft_ip:format(SrcIP)]),
             {noreply, State#{bans_expired := Exp + 1}};
         [] ->
@@ -484,6 +484,7 @@ cleanup_bans(Now) ->
                 true ->
                     ets:delete(?GUARD_BANS, IP),
                     _ = try_unban(IP),
+                    broadcast({ct_guard_unban, #{ip => IP}}),
                     Count + 1;
                 false ->
                     Count

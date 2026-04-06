@@ -108,6 +108,9 @@ reset(ContainerId) ->
 init([]) ->
     {ok, #{}}.
 
+handle_event({container_metrics, Id, _Name, Ev}, State) ->
+    handle_event({container_metrics, Id, Ev}, State);
+
 handle_event({container_metrics, Id, #{type := fork} = Ev}, State) ->
     update_metrics(Id, fun(M) ->
         M#metrics{fork_count  = M#metrics.fork_count + 1,

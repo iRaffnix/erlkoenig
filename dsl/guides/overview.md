@@ -1,8 +1,8 @@
 # Overview
 
-erlkoenig is a zero-trust container runtime built on Erlang/OTP 28.
-No Docker, no containerd, no runc — a 168KB static C binary spawns
-Linux namespaces, an Erlang BEAM orchestrates everything above.
+**Erlkoenig — Speed and Control.**
+
+Container Runtime auf Erlang/OTP 28. Ein 168KB C-Binary spawnt Linux-Namespaces, der BEAM orchestriert den Rest: Netzwerk via Netlink, Firewall via nftables (pure Erlang, kein CLI), cgroups v2 mit PSI-Metriken, Ed25519-Signaturen, AMQP-Events. Elixir DSL kompiliert zu Erlang-Termen, kein YAML. 50ms pro Container.
 
 ## Architecture
 

@@ -80,9 +80,12 @@ load(TermFile) ->
         OldConfig = get_stored_config(TermFile),
         Result = apply_config_with_reconciliation(OldConfig, Config),
         store_config(TermFile, Config),
+        erlkoenig_events:notify({config_loaded, TermFile, Config}),
         Result
     else
-        {error, _} = Err -> Err
+        {error, _} = Err ->
+            erlkoenig_events:notify({config_failed, TermFile, Err}),
+            Err
     end.
 
 -doc "Reload a config file. Alias for load/1 (both are idempotent).".
@@ -708,11 +711,13 @@ apply_nft_table(#{name := TableName, chains := Chains} = Table, VethMap, Replica
             case nfnl_server:apply_msgs(erlkoenig_nft_srv, AllMsgs) of
                 ok ->
                     logger:info("erlkoenig_config: nft_table ~s: ~p chains, ~p counters applied",
-                                [TableName, length(Chains), length(Counters)]);
+                                [TableName, length(Chains), length(Counters)]),
+                    erlkoenig_events:notify({firewall_applied, TableName});
                 {error, Reason} ->
                     %% Atomic batch failed — try per-chain for error isolation
                     logger:warning("erlkoenig_config: nft_table ~s batch failed (~p), retrying per-chain",
                                    [TableName, Reason]),
+                    erlkoenig_events:notify({firewall_failed, TableName, Reason}),
                     %% Counters first
                     _ = nfnl_server:apply_msgs(erlkoenig_nft_srv, CounterMsgs),
                     %% Then chains individually

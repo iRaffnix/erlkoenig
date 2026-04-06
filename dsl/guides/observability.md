@@ -30,6 +30,16 @@ event type, or wildcard.
 | Control | `control.nft.ban` | Manual ban |
 | | `control.set.add` | Set element added |
 | Policy | `policy.<name>.violation` | Policy violation |
+| Metrics | `metrics.<name>.fork` | Process forked (from BPF) |
+| | `metrics.<name>.exec` | Process exec'd (from BPF) |
+| | `metrics.<name>.exit` | Process exited (from BPF) |
+| | `metrics.<name>.oom` | Process OOM killed (from BPF) |
+| System | `system.config.loaded` | Config successfully applied |
+| | `system.config.failed` | Config load failed |
+| | `system.firewall.applied` | nft table applied |
+| | `system.firewall.failed` | nft table apply failed |
+| Security | `security.<name>.verified` | Binary signature valid |
+| | `security.<name>.rejected` | Binary signature invalid |
 
 ## Filtering Examples
 

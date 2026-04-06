@@ -566,7 +566,8 @@ running_handle_data(Reply, Data) ->
             keep_state_and_data;
         {ok, reply_metrics_event, Event} ->
             erlkoenig_events:notify({container_metrics,
-                                     Data#ct_data.id, Event}),
+                                     Data#ct_data.id,
+                                     Data#ct_data.name, Event}),
             keep_state_and_data;
         _Other ->
             keep_state_and_data
@@ -1916,6 +1917,8 @@ maybe_verify_signature(Data) ->
                     }),
                     case erlkoenig_pki:verify_chain(maps:get(chain, Meta)) of
                         ok ->
+                            erlkoenig_events:notify({signature_verified,
+                                Data#ct_data.id, Data#ct_data.name, Meta}),
                             {ok, Data#ct_data{sig_verified = true, sig_meta = Meta}};
                         {error, ChainErr} when Mode =:= warn ->
                             logger:warning("[~s] chain verification failed: ~p (warn mode)",
@@ -1928,6 +1931,9 @@ maybe_verify_signature(Data) ->
                             }),
                             {ok, Data};
                         {error, ChainErr} ->
+                            erlkoenig_events:notify({signature_rejected,
+                                Data#ct_data.id, Data#ct_data.name,
+                                {chain_invalid, ChainErr}}),
                             erlkoenig_audit:log(#{
                                 type => binary_reject,
                                 subject => Data#ct_data.id,
@@ -1947,6 +1953,8 @@ maybe_verify_signature(Data) ->
                     }),
                     {ok, Data};
                 {error, Err} ->
+                    erlkoenig_events:notify({signature_rejected,
+                        Data#ct_data.id, Data#ct_data.name, Err}),
                     erlkoenig_audit:log(#{
                         type => binary_reject,
                         subject => Data#ct_data.id,

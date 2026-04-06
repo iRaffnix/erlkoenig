@@ -1,175 +1,126 @@
-# Erlkoenig
+# Erlkoenig — Speed and Control
 
-A container runtime for **static binaries** that starts in 67ms, uses 68 KB
-on disk, and needs zero infrastructure.
+Container Runtime auf Erlang/OTP 28. Ein 168KB C-Binary spawnt Linux-Namespaces, der BEAM orchestriert den Rest: Netzwerk via Netlink, Firewall via nftables (pure Erlang, kein CLI), cgroups v2 mit PSI-Metriken, Ed25519-Signaturen, AMQP-Events. Elixir DSL kompiliert zu Erlang-Termen, kein YAML. 50ms pro Container.
 
-Nothing runs unless cryptographically authorized. Every binary signed.
-Every action audited. Every port a trap.
+**Documentation:** https://iraffnix.github.io/erlkoenig/
 
-```text
-  Browser :80 ──► Reverse Proxy ──► API Server ──► SQLite DB
-                  10.0.0.10         10.0.0.20      10.0.0.30
-```
-
-Three containers. Three isolated namespaces. Firewall, DNS, health checks.
-Total startup: 200ms. Total RAM: 20 MB. No Docker. No Kubernetes. No YAML.
-
-## Benchmarks
-
-Measured on a Hetzner CX22 (2 vCPU, 4 GB RAM, Debian Trixie):
-
-| Metric | Erlkoenig | Docker | Kubernetes |
-|--------|-----------|--------|------------|
-| Container startup | **67 ms** | 300-500 ms | 1-3 s |
-| 50 containers | **3.3 s** | ~20 s | minutes |
-| 3-tier stack | **215 ms** | ~2 s | ~10 s |
-| Control plane RAM | **30 MB** | ~200 MB | ~500 MB |
-| Runtime binary | **68 KB** | ~50 MB | — |
-
-## Security
-
-Erlkoenig combines a **68 KB C runtime** with an **Erlang/OTP control plane**.
-
-- **Ed25519 binary signing** — every binary verified at `exec()`, not just at deployment.
-  Certificate chain from Root CA to signing cert. Unsigned binaries are rejected.
-- **Honeypot firewall** — every port except the one you open is a trap.
-  One packet at the wrong port = instant 24h ban. Detected in milliseconds
-  via kernel conntrack, not polling.
-- **5 Linux namespaces** (PID, NET, MNT, UTS, IPC) per container.
-  Full isolation — no shared namespaces like Kubernetes pods.
-- **Seccomp-BPF** syscall filtering — ~60 of 300+ syscalls allowed.
-  Violations kill the process immediately (`SECCOMP_RET_KILL_PROCESS`).
-- **Capabilities: all 41 dropped** — even root inside the container has no power.
-- **Per-container nftables firewall** — rules added atomically via Netlink.
-  The firewall engine ([`erlkoenig_nft`](https://github.com/iRaffnix/erlkoenig_nft))
-  is pure Erlang, talking directly to the kernel. No C code, no shelling out.
-- **Read-only rootfs** with `/proc` masking (OCI-compliant).
-- **Audit log** — every security event in JSON Lines. Binary verified,
-  binary rejected, container started, container stopped.
-- **Crash recovery in microseconds** — Erlang/OTP supervision, not 30s healthchecks.
-- **Zero external dependencies** — no libcap, no libseccomp, no libnetlink.
-
-## Deploy
-
-Define your stack in a single file. Deploy with one command.
+## Example
 
 ```elixir
-defmodule MyStack do
-  use Erlkoenig.DSL
+defmodule ThreeTier do
+  use Erlkoenig.Stack
 
-  container :web do
-    binary "/opt/erlkoenig/rt/demo/web"
-    signature :required
-    ip {10, 0, 0, 10}
-    args ["8080", "http://10.0.0.20:8081"]
-    ports [{8080, 8080}]
-    seccomp :network
-    caps []
-    limits memory: "64M", pids: 20
+  host do
+    interface "eth0", zone: :wan
+    bridge "dmz", subnet: {10, 0, 0, 0, 24}, uplink: "eth0"
+    bridge "app", subnet: {10, 0, 1, 0, 24}
 
-    firewall do
-      counters [:http, :trap]
-      accept :established
-      accept :loopback
-      connlimit_drop 100
-      accept_tcp 8080, counter: :http
-      accept :icmp
-      log_and_drop "TRAP: ", counter: :trap
-    end
+    nft_table :inet, "erlkoenig" do
+      nft_counter "forward_drop"
 
-    guard do
-      detect :conn_flood, threshold: 50, window: 10
-      detect :port_scan, threshold: 1, window: 60
-      ban_duration 86400
+      base_chain "forward", hook: :forward, type: :filter,
+        priority: :filter, policy: :drop do
+        nft_rule :accept, ct_state: [:established, :related]
+        nft_rule :jump, iifname: {:veth_of, "web", "nginx"}, to: "from-web"
+        nft_rule :accept,
+          ip_saddr: {:replica_ips, "web", "nginx"},
+          ip_daddr: {:replica_ips, "app", "api"},
+          tcp_dport: 4000
+        nft_rule :drop, counter: "forward_drop"
+      end
+
+      nft_chain "from-web" do
+        nft_rule :accept, ct_state: [:established, :related]
+        nft_rule :accept, tcp_dport: 4000
+        nft_rule :drop
+      end
+
+      base_chain "postrouting", hook: :postrouting, type: :nat,
+        priority: :srcnat, policy: :accept do
+        nft_rule :masquerade, ip_saddr: {10, 0, 0, 0, 24}, oifname_ne: "dmz"
+      end
     end
   end
+
+  pod "web", strategy: :one_for_one do
+    container "nginx",
+      binary: "/opt/nginx",
+      args: ["8443"],
+      limits: %{memory: 268_435_456, pids: 100},
+      restart: :always do
+
+      publish interval: 2000 do
+        metric :memory
+        metric :cpu
+        metric :pids
+      end
+    end
+  end
+
+  pod "app", strategy: :one_for_all do
+    container "api",
+      binary: "/opt/api",
+      args: ["4000"],
+      restart: :always
+  end
+
+  attach "web", to: "dmz", replicas: 3
+  attach "app", to: "app", replicas: 2
 end
 ```
 
 ```bash
-erlkoenig deploy stack.exs
+# Compile + deploy
+erlkoenig compile stack.exs -o stack.term
+erlkoenig eval 'erlkoenig_config:load("/opt/stack.term").'
 ```
 
-```
-Compiling stack.exs ...
-  3 container(s) found
+## What It Does
 
-Deploying archive (10.0.0.30) ...
-  Started: archive
-Deploying signer (10.0.0.20) ...
-  Started: signer
-Deploying web (10.0.0.10) ...
-  Started: web
+- **Containers**: Linux namespaces (PID, NET, MNT, UTS, IPC, CGROUP), 50ms spawn, OTP supervision per pod
+- **Firewall**: nftables via pure Erlang Netlink — egress chains, counters, NFLOG, NAT, conntrack
+- **cgroups v2**: Memory, CPU, PIDs limits + PSI pressure metrics + OOM detection
+- **Observability**: 28 event types over AMQP (container lifecycle, stats, firewall, conntrack, guard, security)
+- **PKI**: Ed25519 binary signing, X.509 chain validation, reject unsigned containers
+- **ELF Analysis**: Syscall extraction, seccomp-BPF generation, language detection (Go/Rust/Zig/C)
+- **Guard**: Conntrack-based threat detection, automatic IP banning
 
-3/3 containers running.
+## Build
+
+```bash
+make              # full build (Erlang + C runtime + tests + release)
+make check        # eunit + dialyzer + DSL tests (no root)
+make release      # OTP release tarball
+make integration  # integration tests (needs sudo)
 ```
+
+Requires: Linux, Erlang/OTP 28+, Elixir 1.18+, musl-gcc (for C runtime).
 
 ## CLI
 
-All management via Unix socket. No TCP, no epmd, no network exposure.
-
 ```bash
-erlkoenig deploy stack.exs       # deploy all containers
-erlkoenig ps                     # list running containers
-erlkoenig stop <id>              # stop a container
-erlkoenig inspect <id>           # container details
-erlkoenig status                 # daemon info
-erlkoenig audit                  # security event log
+erlkoenig compile <file.exs> -o <out.term>   # compile DSL
+erlkoenig validate <file.exs>                # check for errors
+erlkoenig ps                                 # list containers
+erlkoenig stop <id>                          # stop container
+erlkoenig status                             # firewall status
+erlkoenig counters                           # drop counter rates
 
-erlkoenig sign <binary> --cert <cert> --key <key>
-erlkoenig verify <binary> --trust-root <ca.pem>
+erlkoenig sign <binary> --cert <pem> --key <key>
+erlkoenig verify <binary>
 erlkoenig pki create-root-ca --cn <name> --out <cert> --key-out <key>
 ```
 
-## Try it: Secure Document Signing
+## Performance
 
-A complete tutorial with three Go binaries, PKI setup, binary signing,
-and a document signing service. See [**stories/secure-doc-sign/**](stories/secure-doc-sign/).
+| Containers | Time | Per Container |
+|------------|------|---------------|
+| 10 | 335ms | 33ms |
+| 50 | 1.2s | 24ms |
+| 200 | 4.7s | 23ms |
+| 500 | 31s | 62ms |
 
-```bash
-cd stories/secure-doc-sign
-sh build.sh                          # build 3 static Go binaries
-erlkoenig sign web --cert ...        # sign each binary
-erlkoenig deploy stack.exs           # deploy 3 containers
-curl http://10.0.0.10:8080/sign \
-  -d '{"document":"Kaufvertrag","signer":"Dr. Schmidt"}'
-```
-
-## Architecture
-
-For a deep dive into the supervision tree, container lifecycle state machine,
-port protocol wire format, zone networking, and crash semantics, see
-[**docs/ARCHITECTURE.md**](docs/ARCHITECTURE.md).
-
-## Quick Start
-
-### Requirements
-- Linux >= 5.2 (cgroups v2, nf_tables batch API, eBPF cgroup device filter)
-- Erlang/OTP >= 27
-
-### Install from Release
-
-Download, review, run:
-
-```bash
-curl -fsSL -o install.sh \
-  https://github.com/iRaffnix/erlkoenig/releases/latest/download/install.sh
-less install.sh
-sudo sh install.sh --version v0.2.0
-```
-
-See [**docs/INSTALL.md**](docs/INSTALL.md) for options and details.
-
-### Build from Source
-
-```bash
-make rt          # C runtime (static musl binary, 68 KB)
-make erl         # Erlang control plane
-make check       # all tests without root (eunit + dialyzer + DSL)
-make release     # OTP release tarball
-```
-
-See [**docs/BUILD.md**](docs/BUILD.md), [**docs/STATIC_BINARIES.md**](docs/STATIC_BINARIES.md), and [**docs/CONTRIBUTING.md**](docs/CONTRIBUTING.md).
+Measured on Hetzner CX22 (2 vCPU, 4 GB RAM).
 
 ## License
 

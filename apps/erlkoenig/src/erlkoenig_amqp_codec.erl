@@ -280,14 +280,62 @@ encode_payload({ct_guard_unban, #{ip := Ip}}) ->
 encode_payload({ct_guard_unban, Details}) when is_map(Details) ->
     {ok, <<"guard.threat.unban">>, encode_map(Details)};
 
-%% ── Legacy metrics (kept for transition) ────────────────────────
+%% ── System events ──────────────────────────────────────────────
+%% Routing: system.<scope>.<event>
 
-encode_payload({container_metrics, Id, #{type := Type} = M}) ->
-    IdBin = ensure_binary(Id),
+encode_payload({config_loaded, File, Config}) ->
+    Pods = length(maps:get(pods, Config, [])),
+    Zones = length(maps:get(zones, Config, [])),
+    Tables = length(maps:get(nft_tables, Config, [])),
+    {ok, <<"system.config.loaded">>, #{
+        <<"file">> => ensure_binary(File),
+        <<"pods">> => Pods,
+        <<"zones">> => Zones,
+        <<"nft_tables">> => Tables
+    }};
+
+encode_payload({config_failed, File, {error, Reason}}) ->
+    {ok, <<"system.config.failed">>, #{
+        <<"file">> => ensure_binary(File),
+        <<"reason">> => term_to_binary_string(Reason)
+    }};
+
+encode_payload({firewall_applied, Table}) ->
+    {ok, <<"system.firewall.applied">>, #{
+        <<"table">> => ensure_binary(Table)
+    }};
+
+encode_payload({firewall_failed, Table, Reason}) ->
+    {ok, <<"system.firewall.failed">>, #{
+        <<"table">> => ensure_binary(Table),
+        <<"reason">> => term_to_binary_string(Reason)
+    }};
+
+encode_payload({signature_verified, Id, Name, Meta}) ->
+    NameBin = ensure_binary(Name),
+    {ok, <<"security.", NameBin/binary, ".verified">>, #{
+        <<"id">> => ensure_binary(Id),
+        <<"name">> => NameBin,
+        <<"signer">> => ensure_binary(maps:get(signer_cn, Meta, <<>>))
+    }};
+
+encode_payload({signature_rejected, Id, Name, Reason}) ->
+    NameBin = ensure_binary(Name),
+    {ok, <<"security.", NameBin/binary, ".rejected">>, #{
+        <<"id">> => ensure_binary(Id),
+        <<"name">> => NameBin,
+        <<"reason">> => term_to_binary_string(Reason)
+    }};
+
+%% ── BPF process metrics (fork/exec/exit/oom from C runtime) ─────
+%% Routing: metrics.<name>.<type>
+
+encode_payload({container_metrics, Id, Name, #{type := Type} = M}) ->
+    NameBin = ensure_binary(Name),
     TypeBin = atom_to_binary(Type),
-    RoutingKey = <<"stats.", IdBin/binary, ".", TypeBin/binary>>,
     Payload = #{
-        <<"id">> => IdBin,
+        <<"id">> => ensure_binary(Id),
+        <<"name">> => NameBin,
         <<"type">> => TypeBin
     },
     Payload2 = case maps:find(timestamp_ns, M) of
@@ -298,14 +346,19 @@ encode_payload({container_metrics, Id, #{type := Type} = M}) ->
         {ok, Comm} -> Payload2#{<<"comm">> => ensure_binary(Comm)};
         error -> Payload2
     end,
-    {ok, RoutingKey, Payload3};
+    {ok, <<"metrics.", NameBin/binary, ".", TypeBin/binary>>, Payload3};
 
-encode_payload({container_metrics, Id, _}) ->
+%% Legacy 3-arg form (no name)
+encode_payload({container_metrics, Id, #{type := Type}}) ->
     IdBin = ensure_binary(Id),
-    {ok, <<"stats.", IdBin/binary, ".unknown">>, #{
+    TypeBin = atom_to_binary(Type),
+    {ok, <<"metrics.", IdBin/binary, ".", TypeBin/binary>>, #{
         <<"id">> => IdBin,
-        <<"type">> => <<"unknown">>
+        <<"type">> => TypeBin
     }};
+
+encode_payload({container_metrics, _Id, _}) ->
+    skip;
 
 %% Unknown
 encode_payload(Event) ->

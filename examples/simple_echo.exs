@@ -27,52 +27,102 @@ defmodule SimpleEcho do
   host do
     bridge "echo", subnet: {10, 0, 0, 0, 24}
 
-    # ── Host-Firewall ──────────────────────────────────────
+    # ── Host-Firewall (Referenz) ─────────────────────────────
     #
-    # nft_set "ban": IP-Adressen die sofort gedroppt werden —
-    # BEVOR connection tracking. Gebannte IPs erzeugen null
-    # Kernel-State (kein conntrack Entry, kein NAT Lookup).
-    # Der Guard füllt das Set automatisch bei Flood/Scan.
-
-    # ── Host-Firewall ──────────────────────────────────────
+    # Schützt den Host selbst — nicht die Container (die haben
+    # eigene Forward-Regeln im "erlkoenig" Table).
     #
-    # Schützt den Host (nicht die Container — die haben
-    # eigene Forward-Regeln). Reihenfolge ist wichtig:
+    # hook: :input — Pakete die AN den Host adressiert sind
+    #                (nicht forwarded, nicht an Container)
+    # policy: :drop — alles was keine Regel matcht → verworfen
+    # priority: :filter — Standard-Priorität (0)
     #
-    #   1. Ban-Set: gebannte IPs sofort droppen (vor ct)
-    #   2. ct established: Antworten auf eigene Verbindungen
-    #   3. Loopback: localhost, epmd, Erlang Distribution
-    #   4. ICMP: Ping erlauben (Monitoring, Debugging)
-    #   5. SSH: Fernzugriff
-    #   6. Prometheus: Node-Exporter Metriken (optional)
-    #   7. Default Drop + Log
+    # Reihenfolge ist entscheidend: nft evaluiert top-to-bottom,
+    # erste matchende Regel gewinnt.
 
     nft_table :inet, "host" do
+
+      # ── Sets ─────────────────────────────────────────────
+      # Ban-Set: wird vom Guard automatisch gefüllt.
+      # IPs hier drin werden VOR connection tracking gedroppt —
+      # null conntrack Entries, null NAT Lookups, null CPU.
       nft_set "ban", :ipv4_addr
+
+      # ── Counters ─────────────────────────────────────────
+      # Jeder Counter wird alle 2s gepollt.
+      # Rate > 0 → AMQP Event: firewall.input.drop
       nft_counter "input_drop"
+      nft_counter "input_ban"
 
       base_chain "input", hook: :input, type: :filter,
         priority: :filter, policy: :drop do
 
-        # Gebannte IPs: sofort weg, null Kernel-State
-        nft_rule :drop, set: "ban"
+        # ┌─────────────────────────────────────────────────┐
+        # │ 1. BAN SET — vor allem anderen                  │
+        # │                                                 │
+        # │ Gebannte IPs erzeugen KEINEN conntrack Entry.   │
+        # │ Kein NAT Lookup, kein State, kein Log.          │
+        # │ Das ist der schnellste Weg ein Paket zu droppen.│
+        # └─────────────────────────────────────────────────┘
+        nft_rule :drop, set: "ban", counter: "input_ban"
 
-        # Bestehende Verbindungen: Antworten durchlassen
+        # ┌─────────────────────────────────────────────────┐
+        # │ 2. CONNECTION TRACKING                          │
+        # │                                                 │
+        # │ Antworten auf Verbindungen die der Host selbst  │
+        # │ initiiert hat (AMQP → RabbitMQ, DNS, apt, NTP).│
+        # │ Ohne diese Regel sterben Antworten am Drop.    │
+        # │                                                 │
+        # │ :established — TCP ACK/PSH/FIN auf offene Conn  │
+        # │ :related — ICMP errors die zu einer Conn gehören│
+        # └─────────────────────────────────────────────────┘
         nft_rule :accept, ct_state: [:established, :related]
 
-        # Loopback: BEAM-interne Kommunikation
+        # ┌─────────────────────────────────────────────────┐
+        # │ 3. LOOPBACK                                     │
+        # │                                                 │
+        # │ localhost, epmd (4369), Erlang Distribution,    │
+        # │ BEAM-interne Kommunikation. Ohne das geht       │
+        # │ erlkoenig eval / ping / remote_console nicht.   │
+        # └─────────────────────────────────────────────────┘
         nft_rule :accept, iifname: "lo"
 
-        # ICMP: Ping für Monitoring
+        # ┌─────────────────────────────────────────────────┐
+        # │ 4. ICMP — Ping                                  │
+        # │                                                 │
+        # │ Monitoring (Nagios/Zabbix/Uptime), Debugging,   │
+        # │ Path-MTU-Discovery. ICMP komplett zu blocken    │
+        # │ bricht Netzwerk-Diagnostik.                     │
+        # └─────────────────────────────────────────────────┘
         nft_rule :accept, ip_protocol: :icmp
 
-        # SSH: Fernzugriff
+        # ┌─────────────────────────────────────────────────┐
+        # │ 5. SSH — Fernzugriff                            │
+        # │                                                 │
+        # │ Port 22. Für stärkere Absicherung:              │
+        # │ - Key-only (PasswordAuthentication no)          │
+        # │ - fail2ban oder Guard mit conn_flood Detection  │
+        # │ - Optional: ip_saddr für IP-Whitelist           │
+        # └─────────────────────────────────────────────────┘
         nft_rule :accept, tcp_dport: 22
 
-        # Prometheus Node-Exporter (Port 9100)
+        # ┌─────────────────────────────────────────────────┐
+        # │ 6. PROMETHEUS — Node-Exporter                   │
+        # │                                                 │
+        # │ Port 9100. Prometheus scrapt CPU, RAM, Disk.    │
+        # │ Wenn kein Prometheus: Zeile entfernen.          │
+        # └─────────────────────────────────────────────────┘
         nft_rule :accept, tcp_dport: 9100
 
-        # Alles andere: droppen + zählen
+        # ┌─────────────────────────────────────────────────┐
+        # │ 7. DEFAULT DROP                                 │
+        # │                                                 │
+        # │ Alles was bis hier nicht gematcht hat.           │
+        # │ Counter zählt Drops (sichtbar über AMQP).       │
+        # │ Log-Prefix für NFLOG Paket-Details.             │
+        # │                                                 │
+        # │ In Production: log_prefix weglassen wenn laut.  │
+        # └─────────────────────────────────────────────────┘
         nft_rule :drop, counter: "input_drop", log_prefix: "HOST: "
       end
     end

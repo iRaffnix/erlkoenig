@@ -34,16 +34,46 @@ defmodule SimpleEcho do
     # Kernel-State (kein conntrack Entry, kein NAT Lookup).
     # Der Guard füllt das Set automatisch bei Flood/Scan.
 
+    # ── Host-Firewall ──────────────────────────────────────
+    #
+    # Schützt den Host (nicht die Container — die haben
+    # eigene Forward-Regeln). Reihenfolge ist wichtig:
+    #
+    #   1. Ban-Set: gebannte IPs sofort droppen (vor ct)
+    #   2. ct established: Antworten auf eigene Verbindungen
+    #   3. Loopback: localhost, epmd, Erlang Distribution
+    #   4. ICMP: Ping erlauben (Monitoring, Debugging)
+    #   5. SSH: Fernzugriff
+    #   6. Prometheus: Node-Exporter Metriken (optional)
+    #   7. Default Drop + Log
+
     nft_table :inet, "host" do
       nft_set "ban", :ipv4_addr
+      nft_counter "input_drop"
 
       base_chain "input", hook: :input, type: :filter,
         priority: :filter, policy: :drop do
 
+        # Gebannte IPs: sofort weg, null Kernel-State
         nft_rule :drop, set: "ban"
+
+        # Bestehende Verbindungen: Antworten durchlassen
         nft_rule :accept, ct_state: [:established, :related]
+
+        # Loopback: BEAM-interne Kommunikation
         nft_rule :accept, iifname: "lo"
+
+        # ICMP: Ping für Monitoring
+        nft_rule :accept, ip_protocol: :icmp
+
+        # SSH: Fernzugriff
         nft_rule :accept, tcp_dport: 22
+
+        # Prometheus Node-Exporter (Port 9100)
+        nft_rule :accept, tcp_dport: 9100
+
+        # Alles andere: droppen + zählen
+        nft_rule :drop, counter: "input_drop", log_prefix: "HOST: "
       end
     end
   end

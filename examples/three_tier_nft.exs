@@ -88,6 +88,7 @@ defmodule ThreeTierNft do
       # Ban-Set: gebannte IPs werden VOR connection tracking
       # gedroppt — null Kernel-State, kein conntrack Entry.
       nft_set "ban", :ipv4_addr
+      nft_counter "input_drop"
 
       base_chain "input",
         hook: :input, type: :filter,
@@ -102,11 +103,17 @@ defmodule ThreeTierNft do
         # Loopback (localhost, epmd, Erlang Distribution)
         nft_rule :accept, iifname: "lo"
 
+        # ICMP: Ping für Monitoring
+        nft_rule :accept, ip_protocol: :icmp
+
         # SSH-Zugang
         nft_rule :accept, tcp_dport: 22
 
-        # Alles andere loggen und droppen
-        nft_rule :drop, log_prefix: "HOST: "
+        # Prometheus Node-Exporter
+        nft_rule :accept, tcp_dport: 9100
+
+        # Alles andere loggen + zählen + droppen
+        nft_rule :drop, counter: "input_drop", log_prefix: "HOST: "
       end
     end
 

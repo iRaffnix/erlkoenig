@@ -53,6 +53,7 @@ defmodule SignedDeployment do
 
     nft_table :inet, "host" do
       nft_set "ban", :ipv4_addr
+      nft_counter "input_drop"
 
       base_chain "input", hook: :input, type: :filter,
         priority: :filter, policy: :drop do
@@ -60,7 +61,10 @@ defmodule SignedDeployment do
         nft_rule :drop, set: "ban"
         nft_rule :accept, ct_state: [:established, :related]
         nft_rule :accept, iifname: "lo"
+        nft_rule :accept, ip_protocol: :icmp
         nft_rule :accept, tcp_dport: 22
+        nft_rule :accept, tcp_dport: 9100
+        nft_rule :drop, counter: "input_drop", log_prefix: "HOST: "
       end
     end
 

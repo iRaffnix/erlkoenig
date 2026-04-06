@@ -1310,7 +1310,7 @@ run_action(Unknown, WatchName, _Counter, _Metric, _Value, _Threshold) ->
 -spec build_spawn_opts(map()) -> map().
 build_spawn_opts(Ct) ->
     Keys = [ip, ports, args, env, firewall, limits, seccomp,
-            restart, name, files, zone, volumes, image_path, publish],
+            restart, name, files, zone, volumes, image_path, publish, stream],
     lists:foldl(fun(K, Acc) -> copy_if(K, Ct, Acc) end, #{}, Keys).
 
 -spec copy_if(atom(), map(), map()) -> map().

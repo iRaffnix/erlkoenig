@@ -113,7 +113,9 @@ States:
     pod_supervised = false     :: boolean(),
     publish       = []         :: [map()],
     stats_timers  = []         :: [reference()],
-    last_cpu_usec = undefined  :: non_neg_integer() | undefined
+    last_cpu_usec = undefined  :: non_neg_integer() | undefined,
+    stream        = undefined  :: map() | undefined,
+    log_publisher = undefined  :: {pid(), atomics:atomics_ref()} | undefined
 }).
 
 -define(SPAWN_TIMEOUT, application:get_env(erlkoenig, spawn_timeout, 30_000)).
@@ -195,11 +197,12 @@ init({normal, BinaryPath, Opts}) ->
         volumes     = maps:get(volumes, Opts, []),
         pod_supervised = maps:get(pod_supervised, Opts, false),
         publish     = maps:get(publish, Opts, []),
+        stream      = maps:get(stream, Opts, undefined),
         extra_opts  = maps:without([args, env, uid, gid, ip, restart,
                                     limits, seccomp, caps, output, name,
                                     files, zone, pty, firewall, sig_path,
                                     signature_required, volumes,
-                                    pod_supervised, publish], Opts)
+                                    pod_supervised, publish, stream], Opts)
     },
     {ok, creating, Data};
 
@@ -445,8 +448,10 @@ running(enter, _OldState, Data) ->
     dets_register(Data),
     audit_volumes_mounted(Data),
     Timers = start_stats_timers(Data#ct_data.publish),
+    LogPub = maybe_start_log_publisher(Data),
     {keep_state, Data#ct_data{started_at = erlang:monotonic_time(millisecond),
-                              stats_timers = Timers}};
+                              stats_timers = Timers,
+                              log_publisher = LogPub}};
 
 running(info, {tcp, Sock, Reply}, #ct_data{sock = Sock} = Data) ->
     running_handle_data(Reply, Data);
@@ -595,6 +600,7 @@ stopping_handle_data(Reply, Data) ->
 stopped(enter, _OldState, Data) ->
     pg:leave(erlkoenig_pg, erlkoenig_cts, self()),
     cancel_stats_timers(Data#ct_data.stats_timers),
+    maybe_stop_log_publisher(Data#ct_data.log_publisher),
     firewall_remove(Data#ct_data.id),
     cleanup_fuse(Data),
 
@@ -605,7 +611,7 @@ stopped(enter, _OldState, Data) ->
     audit_volumes_released(Data),
     notify_stopped(Data),
     Data2 = Data#ct_data{sock = undefined, fuse_mount = undefined,
-                         stats_timers = []},
+                         stats_timers = [], log_publisher = undefined},
     case Data2#ct_data.pod_supervised of
         true ->
             %% Pod supervisor handles restart — propagate exit reason.
@@ -926,17 +932,58 @@ publish_each_metric([_ | Rest], Raw, Id, Name, Data) ->
 round_2(F) ->
     round(F * 100) / 100.
 
+%% -- Log publisher (SPEC-EK-011) ----------------------------------
+
+-spec maybe_start_log_publisher(#ct_data{}) ->
+    {pid(), atomics:atomics_ref()} | undefined.
+maybe_start_log_publisher(#ct_data{stream = undefined}) -> undefined;
+maybe_start_log_publisher(#ct_data{stream = #{channels := Channels},
+                                    id = Id, name = Name}) ->
+    InFlight = atomics:new(1, []),
+    case erlkoenig_log_publisher:start_link(Id, Name, Channels, InFlight) of
+        {ok, Pid} ->
+            {Pid, InFlight};
+        {error, Reason} ->
+            logger:warning("container ~s: log publisher failed: ~p", [Name, Reason]),
+            undefined
+    end.
+
+-spec maybe_stop_log_publisher({pid(), atomics:atomics_ref()} | undefined) -> ok.
+maybe_stop_log_publisher(undefined) -> ok;
+maybe_stop_log_publisher({Pid, _InFlight}) ->
+    try erlkoenig_log_publisher:stop(Pid)
+    catch _:_ -> ok
+    end.
+
 %% -- Output forwarding --------------------------------------------
 
+-define(LOG_HIGH_WATERMARK, 2000).
+
 -spec forward_output(stdout | stderr, binary(), #ct_data{}) -> ok.
-forward_output(_Stream, _Chunk, #ct_data{output = undefined}) ->
-    ok;
-forward_output(Stream, Chunk, #ct_data{output = Pid, id = Id}) when is_pid(Pid) ->
-    Tag = case Stream of
-              stdout -> container_stdout;
-              stderr -> container_stderr
-          end,
-    Pid ! {Tag, self(), Id, Chunk},
+forward_output(Stream, Chunk, #ct_data{output = OutputPid,
+                                        log_publisher = LogPub} = Data) ->
+    %% 1. Attached pid (interactive consumer)
+    case OutputPid of
+        undefined -> ok;
+        Pid ->
+            Tag = case Stream of
+                      stdout -> container_stdout;
+                      stderr -> container_stderr
+                  end,
+            Pid ! {Tag, self(), Data#ct_data.id, Chunk}
+    end,
+    %% 2. Log publisher (stream to RabbitMQ, if configured)
+    case LogPub of
+        undefined -> ok;
+        {Pub, InFlight} ->
+            case atomics:get(InFlight, 1) >= ?LOG_HIGH_WATERMARK of
+                true ->
+                    ok; %% drop — admission control before message alloc
+                false ->
+                    atomics:add(InFlight, 1, 1),
+                    gen_server:cast(Pub, {log, Stream, Chunk})
+            end
+    end,
     ok.
 
 %% -- Restart logic ------------------------------------------------

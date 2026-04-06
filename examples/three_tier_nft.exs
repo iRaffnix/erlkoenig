@@ -34,16 +34,28 @@ defmodule ThreeTierNft do
   #   │  Lauscht auf :5432 (PostgreSQL)  │
   #   └─────────────────────────────────┘
   #
-  # Paketfluss (Forward-Chain):
+  # Paketfluss (eingehend von Internet):
   #
-  #   1. Paket kommt auf dem Host an (Bridge Forwarding)
-  #   2. Wenn es VON einem Container-Veth kommt (iifname "vh.*"):
-  #      → Jump in die Egress-Chain des Containers
-  #      → Dort wird geprüft ob der Container diesen Traffic senden darf
-  #      → Wenn nicht: drop + counter
-  #   3. Wenn es an einen Container adressiert ist (ip daddr):
-  #      → Explizite accept-Regeln pro erlaubtem Pfad
-  #   4. Alles andere: drop + counter + log
+  #   1. Paket an PUBLIC_IP:8443 kommt auf eth0 an
+  #   2. Prerouting/raw (priority -300): Ban-Set Check
+  #   3. Prerouting/dstnat (priority -100): DNAT schreibt
+  #      Ziel-IP um: PUBLIC_IP:8443 → 10.0.0.2:8443 (nginx Container)
+  #   4. Kernel-Routing: Paket geht in Forward-Chain (nicht Input)
+  #   5. Forward-Chain (priority 0):
+  #      - ct established? → ja bei Folgepaketen
+  #      - Egress-Jump? → nein (kommt von eth0, nicht vom Container)
+  #      - iifname eth0 + daddr 10.0.0.2 + dport 8443? → ACCEPT
+  #   6. Paket wird an nginx via Bridge "dmz" + Veth zugestellt
+  #
+  # Paketfluss (Container → Container):
+  #
+  #   1. nginx sendet SYN an 10.0.1.2:4000 (api)
+  #   2. Forward-Chain:
+  #      - ct established? → nein (neues SYN)
+  #      - iifname vh.web0nginx? → ja → JUMP "from-web-nginx"
+  #        - Egress: tcp_dport 4000? → ACCEPT
+  #      - saddr nginx + daddr api + dport 4000? → ACCEPT
+  #   3. Paket wird an api via Bridge "app" + Veth zugestellt
   #
   # Monitoring über AMQP (erlkoenig.events exchange):
   #
@@ -256,7 +268,32 @@ defmodule ThreeTierNft do
         nft_rule :drop, counter: "data_postgres_drop"
       end
 
-      # ── NAT ──────────────────────────────────────────
+      # ── NAT: DNAT (eingehend) ─────────────────────────
+      #
+      # Prerouting/DNAT: schreibt die Ziel-IP um.
+      # Pakete an die PUBLIC_IP:8443 werden umgeschrieben auf
+      # die Container-IP 10.0.0.2:8443 (nginx).
+      # Ohne DNAT erreicht Internet-Traffic den Container nicht —
+      # der Kernel denkt die Public IP gehört zum Host (input).
+      #
+      # Priority :dstnat (-100) — evaluiert vor :filter (0),
+      # also vor der Forward-Chain. Wenn das Paket die Forward-Chain
+      # erreicht, hat es bereits die Container-IP als Ziel.
+
+      base_chain "prerouting_nat", hook: :prerouting, type: :nat,
+        priority: :dstnat, policy: :accept do
+
+        # Internet → Nginx: DNAT auf Container-IP
+        # {:replica_ips, ...} expandiert zur Deploy-Zeit.
+        # Bei replicas: 1 → eine DNAT Regel.
+        # Bei replicas: 3 → braucht Loadbalancing (jhash, future).
+        nft_rule :dnat,
+          iifname: "eth0",
+          tcp_dport: 8443,
+          dnat_to: {:replica_ips, "web", "nginx", 8443}
+      end
+
+      # ── NAT: Masquerade (ausgehend) ─────────────────
       #
       # Masquerade: Container-Traffic der das Host-Interface
       # verlässt bekommt die Host-IP als Absender (SNAT).

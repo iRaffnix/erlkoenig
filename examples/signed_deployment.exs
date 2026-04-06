@@ -78,13 +78,20 @@ defmodule SignedDeployment do
       nft_counter "forward_drop"
       nft_counter "api_drop"
 
+      # DNAT: Internet → API Container
+      base_chain "prerouting_nat", hook: :prerouting, type: :nat,
+        priority: :dstnat, policy: :accept do
+        nft_rule :dnat, iifname: "eth0", tcp_dport: 8443,
+          dnat_to: {:replica_ips, "api", "server", 8443}
+      end
+
       base_chain "forward", hook: :forward, type: :filter,
         priority: :filter, policy: :drop do
 
         nft_rule :accept, ct_state: [:established, :related]
         nft_rule :jump, iifname: {:veth_of, "api", "server"}, to: "from-api"
 
-        # Internet → API: nur HTTPS
+        # Internet → API: nach DNAT hat das Paket die Container-IP als Ziel
         nft_rule :accept,
           iifname: "eth0",
           ip_daddr: {:replica_ips, "api", "server"},

@@ -313,7 +313,11 @@ ok "Artifacts verified"
 # ── Service user ─────────────────────────────────────────
 
 if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
-    useradd --system --no-create-home --shell /usr/sbin/nologin "$SERVICE_USER"
+    if getent group "$SERVICE_USER" >/dev/null 2>&1; then
+        useradd --system --no-create-home --shell /usr/sbin/nologin -g "$SERVICE_USER" "$SERVICE_USER"
+    else
+        useradd --system --no-create-home --shell /usr/sbin/nologin "$SERVICE_USER"
+    fi
     ok "Service user '$SERVICE_USER' created"
 fi
 

@@ -28,6 +28,94 @@ defmodule StackTest do
       netmask: 24, gateway: {10, 0, 0, 1}, uplink: "eth0"}]
   end
 
+  test "bridge generates gateway .1 and IP pool .2-.254" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestStack.BridgePool do
+      use Erlkoenig.Stack
+
+      host do
+        bridge "net", subnet: {192, 168, 5, 0, 24}
+      end
+
+      pod "x" do
+        container "c", binary: "/opt/c"
+      end
+
+      attach "x", to: "net", replicas: 1
+    end
+    """)
+
+    config = mod.config()
+    bridge = hd(config.host.bridges)
+    assert bridge.gateway == {192, 168, 5, 1}
+    assert bridge.netmask == 24
+
+    zone = hd(config.zones)
+    assert zone.pool == %{start: {192, 168, 5, 2}, stop: {192, 168, 5, 254}}
+  end
+
+  test "bridge without uplink has no uplink key" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestStack.NoUplink do
+      use Erlkoenig.Stack
+      host do
+        bridge "internal", subnet: {10, 0, 0, 0, 24}
+      end
+    end
+    """)
+
+    bridge = hd(mod.config().host.bridges)
+    assert bridge.uplink == nil
+  end
+
+  test "interface zone preserved in config" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestStack.InterfaceZone do
+      use Erlkoenig.Stack
+      host do
+        interface "eth0", zone: :wan
+        interface "eth1", zone: :lan
+        bridge "br0", subnet: {10, 0, 0, 0, 24}
+      end
+    end
+    """)
+
+    ifaces = mod.config().host.interfaces
+    assert length(ifaces) == 2
+    eth0 = Enum.find(ifaces, & &1.name == "eth0")
+    assert eth0.zone == :wan
+    eth1 = Enum.find(ifaces, & &1.name == "eth1")
+    assert eth1.zone == :lan
+  end
+
+  test "attach replica naming: pod-index-container" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestStack.ReplicaNaming do
+      use Erlkoenig.Stack
+
+      host do
+        bridge "br0", subnet: {10, 0, 0, 0, 24}
+      end
+
+      pod "web" do
+        container "nginx", binary: "/opt/nginx"
+        container "sidecar", binary: "/opt/sidecar"
+      end
+
+      attach "web", to: "br0", replicas: 2
+    end
+    """)
+
+    zone = hd(mod.config().zones)
+    assert zone.deployments == [%{pod: "web", replicas: 2}]
+    # Pod has 2 containers → 2 replicas = 4 total containers:
+    # web-0-nginx, web-0-sidecar, web-1-nginx, web-1-sidecar
+    pod = hd(mod.config().pods)
+    assert length(pod.containers) == 2
+    names = Enum.map(pod.containers, & &1.name)
+    assert names == ["nginx", "sidecar"]
+  end
+
   test "pod + attach compiles" do
     [{mod, _}] = Code.compile_string(~S"""
     defmodule TestStack.HostAttach do
@@ -310,5 +398,161 @@ defmodule StackTest do
       end
       """)
     end
+  end
+
+  # ═══════════════════════════════════════════════════════════
+  # publish block tests (SPEC-EK-007)
+  # ═══════════════════════════════════════════════════════════
+
+  test "publish block with single interval" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestStack.PublishSingle do
+      use Erlkoenig.Stack
+      pod "web" do
+        container "nginx", binary: "/opt/nginx" do
+          publish interval: 2000 do
+            metric :memory
+            metric :cpu
+          end
+        end
+      end
+    end
+    """)
+
+    pod = hd(mod.config().pods)
+    ct = hd(pod.containers)
+    assert ct.publish == [%{interval: 2000, metrics: [:memory, :cpu]}]
+  end
+
+  test "publish block with multiple intervals" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestStack.PublishMulti do
+      use Erlkoenig.Stack
+      pod "web" do
+        container "nginx", binary: "/opt/nginx" do
+          publish interval: 1000 do
+            metric :memory
+            metric :cpu
+            metric :pids
+          end
+          publish interval: 30_000 do
+            metric :pressure
+            metric :oom_events
+          end
+        end
+      end
+    end
+    """)
+
+    pod = hd(mod.config().pods)
+    ct = hd(pod.containers)
+    assert length(ct.publish) == 2
+    [fast, slow] = ct.publish
+    assert fast == %{interval: 1000, metrics: [:memory, :cpu, :pids]}
+    assert slow == %{interval: 30_000, metrics: [:pressure, :oom_events]}
+  end
+
+  test "container without publish has no publish key" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestStack.NoPublish do
+      use Erlkoenig.Stack
+      pod "web" do
+        container "nginx", binary: "/opt/nginx"
+      end
+    end
+    """)
+
+    pod = hd(mod.config().pods)
+    ct = hd(pod.containers)
+    refute Map.has_key?(ct, :publish)
+  end
+
+  test "publish interval below 1000ms raises" do
+    assert_raise CompileError, ~r/interval must be >= 1000ms/, fn ->
+      Code.compile_string(~S"""
+      defmodule TestStack.PublishTooFast do
+        use Erlkoenig.Stack
+        pod "web" do
+          container "nginx", binary: "/opt/nginx" do
+            publish interval: 500 do
+              metric :memory
+            end
+          end
+        end
+      end
+      """)
+    end
+  end
+
+  test "publish with unknown metric raises" do
+    assert_raise CompileError, ~r/unknown metric.*:bandwidth/, fn ->
+      Code.compile_string(~S"""
+      defmodule TestStack.PublishBadMetric do
+        use Erlkoenig.Stack
+        pod "web" do
+          container "nginx", binary: "/opt/nginx" do
+            publish interval: 1000 do
+              metric :bandwidth
+            end
+          end
+        end
+      end
+      """)
+    end
+  end
+
+  test "publish with duplicate metric raises" do
+    assert_raise CompileError, ~r/duplicate metric.*:memory/, fn ->
+      Code.compile_string(~S"""
+      defmodule TestStack.PublishDupMetric do
+        use Erlkoenig.Stack
+        pod "web" do
+          container "nginx", binary: "/opt/nginx" do
+            publish interval: 1000 do
+              metric :memory
+              metric :memory
+            end
+          end
+        end
+      end
+      """)
+    end
+  end
+
+  test "publish with empty block raises" do
+    assert_raise CompileError, ~r/at least one metric/, fn ->
+      Code.compile_string(~S"""
+      defmodule TestStack.PublishEmpty do
+        use Erlkoenig.Stack
+        pod "web" do
+          container "nginx", binary: "/opt/nginx" do
+            publish interval: 1000 do
+            end
+          end
+        end
+      end
+      """)
+    end
+  end
+
+  test "mixed containers with and without publish" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestStack.PublishMixed do
+      use Erlkoenig.Stack
+      pod "stack" do
+        container "nginx", binary: "/opt/nginx" do
+          publish interval: 2000 do
+            metric :memory
+          end
+        end
+        container "worker", binary: "/opt/worker"
+      end
+    end
+    """)
+
+    pod = hd(mod.config().pods)
+    [nginx, worker] = pod.containers
+    assert nginx.publish == [%{interval: 2000, metrics: [:memory]}]
+    refute Map.has_key?(worker, :publish)
   end
 end

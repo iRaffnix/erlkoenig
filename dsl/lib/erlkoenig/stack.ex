@@ -162,6 +162,32 @@ defmodule Erlkoenig.Stack do
   # host — the machine, its interfaces, bridges, firewall
   # ═══════════════════════════════════════════════════════════
 
+  @doc """
+  Define the host machine — its interfaces, bridges, and firewall tables.
+
+  The `host` block is the top-level physical machine configuration.
+  Everything inside describes what the host looks like *before* any
+  containers are deployed: which network interfaces exist, which
+  bridges to create, and which nft tables to apply.
+
+  There can be at most one `host` block per stack.
+
+  ## Contains
+
+  - `interface` — physical network interfaces
+  - `bridge` — virtual bridges (L2 segments for containers)
+  - `nft_table` — firewall tables (can also be outside `host`)
+
+  ## Examples
+
+      host do
+        interface "eth0", zone: :wan
+        interface "eth1", zone: :lan
+        bridge "dmz",  subnet: {10, 0, 0, 0, 24}, uplink: "eth0"
+        bridge "app",  subnet: {10, 0, 1, 0, 24}
+        bridge "data", subnet: {10, 0, 2, 0, 24}
+      end
+  """
   defmacro host(do: block) do
     Module.register_attribute(__CALLER__.module, :__ek_context__, accumulate: false)
     Module.put_attribute(__CALLER__.module, :__ek_context__, :host)
@@ -173,6 +199,27 @@ defmodule Erlkoenig.Stack do
     end
   end
 
+  @doc """
+  Declare a physical network interface on the host.
+
+  Interfaces are informational — they tell the DSL which physical
+  NICs exist and what zone they belong to. Zone labels are used in
+  nft rules (e.g. `iifname: "eth0"`) and in bridge uplink configuration.
+
+  ## Options
+
+  | Option | Type | Default | Description |
+  |--------|------|---------|-------------|
+  | `zone:` | atom | none | Zone classification: `:wan`, `:lan`, `:dmz`, etc. |
+
+  ## Examples
+
+      host do
+        interface "eth0", zone: :wan    # internet-facing
+        interface "eth1", zone: :lan    # internal network
+        interface "lo"                  # loopback (no zone)
+      end
+  """
   defmacro interface(name, opts \\ []) do
     quote do
       var!(ek_host_builder) = Erlkoenig.Host.Builder.add_interface(
@@ -180,6 +227,43 @@ defmodule Erlkoenig.Stack do
     end
   end
 
+  @doc """
+  Create a virtual bridge — an isolated Layer 2 network segment.
+
+  Each bridge is a separate broadcast domain. Containers attached to
+  a bridge get an IP from its subnet pool. Traffic between bridges
+  must pass through the forward chain (no implicit routing).
+
+  ## Options
+
+  | Option | Type | Description |
+  |--------|------|-------------|
+  | `subnet:` | `{a, b, c, d, mask}` | IPv4 subnet in CIDR notation |
+  | `uplink:` | `string` | Physical interface for internet access (optional) |
+
+  ## Network Details
+
+  - **Gateway**: automatically assigned as `.1` of the subnet (e.g. `10.0.0.1`)
+  - **IP Pool**: `.2` through `.254` allocated to containers
+  - **Bridge name**: same as the declared name (e.g. bridge `"dmz"` creates Linux bridge `dmz`)
+  - **Without uplink**: bridge is isolated (inter-container only)
+  - **With uplink**: bridge is connected to the physical interface for outbound traffic (requires masquerade NAT rule)
+
+  ## Examples
+
+      host do
+        interface "eth0", zone: :wan
+
+        # DMZ: internet-facing, connected to eth0
+        bridge "dmz", subnet: {10, 0, 0, 0, 24}, uplink: "eth0"
+
+        # App: internal only, no internet
+        bridge "app", subnet: {10, 0, 1, 0, 24}
+
+        # Data: isolated database tier
+        bridge "data", subnet: {10, 0, 2, 0, 24}
+      end
+  """
   defmacro bridge(name, opts) do
     quote do
       var!(ek_host_builder) = Erlkoenig.Host.Builder.add_bridge(
@@ -418,6 +502,47 @@ defmodule Erlkoenig.Stack do
   # attach — connect pod to bridge
   # ═══════════════════════════════════════════════════════════
 
+  @doc """
+  Deploy a pod to a bridge with a number of replicas.
+
+  `attach` connects a pod template to a network segment. Each replica
+  gets its own IP, veth pair, network namespace, and cgroup. Container
+  names are generated as `<pod>-<index>-<container>`:
+
+  - `attach "web", to: "dmz", replicas: 3` creates:
+    - `web-0-nginx` (IP 10.0.0.2)
+    - `web-1-nginx` (IP 10.0.0.3)
+    - `web-2-nginx` (IP 10.0.0.4)
+
+  ## Options
+
+  | Option | Type | Default | Description |
+  |--------|------|---------|-------------|
+  | `to:` | `string` | (required) | Bridge name to deploy on |
+  | `replicas:` | `integer` | `1` | Number of pod instances |
+
+  ## Validation
+
+  - Pod name must reference a declared `pod` → `CompileError`
+  - Bridge name must reference a declared `bridge` → `CompileError`
+
+  ## Deploy-Time Expansion
+
+  In nft rules, `{:veth_of, "pod", "container"}` and
+  `{:replica_ips, "pod", "container"}` are resolved based on `attach`
+  configuration. With `replicas: 3`, `{:replica_ips, "web", "nginx"}`
+  expands to three IP addresses.
+
+  ## Examples
+
+      attach "web",  to: "dmz",  replicas: 3   # 3 nginx instances
+      attach "app",  to: "app",  replicas: 2   # 2 API instances
+      attach "data", to: "data", replicas: 1   # 1 database
+
+      # Same pod on multiple bridges
+      attach "worker", to: "region_eu", replicas: 5
+      attach "worker", to: "region_us", replicas: 3
+  """
   defmacro attach(pod_name, opts) do
     bridge = Keyword.fetch!(opts, :to)
     replicas = Keyword.get(opts, :replicas, 1)
@@ -447,6 +572,33 @@ defmodule Erlkoenig.Stack do
   # guard / watch — Erlang runtime
   # ═══════════════════════════════════════════════════════════
 
+  @doc """
+  Configure the threat detection guard.
+
+  The guard monitors conntrack events and automatically bans source IPs
+  that exceed detection thresholds. Bans are enforced via nft sets —
+  banned IPs are dropped at the kernel level before reaching containers.
+
+  ## Contains
+
+  - `detect` — detection rules (flood, port scan)
+  - `ban_duration` — how long to ban (seconds)
+  - `whitelist` — IPs that are never banned
+
+  ## AMQP Events
+
+  - `guard.threat.ban` — IP banned (includes reason and duration)
+  - `guard.threat.unban` — ban expired
+
+  ## Examples
+
+      guard do
+        detect :conn_flood, threshold: 50, window: 10
+        detect :port_scan, threshold: 20, window: 60
+        ban_duration 3600
+        whitelist {127, 0, 0, 1}
+      end
+  """
   defmacro guard(do: block) do
     quote do
       var!(ek_guard_builder) = ErlkoenigNft.Guard.Builder.new()
@@ -455,6 +607,32 @@ defmodule Erlkoenig.Stack do
     end
   end
 
+  @doc """
+  Add a detection rule to the guard.
+
+  Each detector monitors conntrack events for a specific pattern
+  and triggers a ban when the threshold is exceeded within the window.
+
+  ## Arguments
+
+  | Argument | Type | Description |
+  |----------|------|-------------|
+  | `type` | atom | Detection type |
+  | `threshold:` | `integer` | Max events before ban |
+  | `window:` | `integer` | Time window in seconds |
+
+  ## Detection Types
+
+  | Type | Monitors | Triggers when |
+  |------|----------|---------------|
+  | `:conn_flood` | New connections per source IP | > `threshold` new connections in `window` seconds |
+  | `:port_scan` | Distinct destination ports per source IP | > `threshold` different ports in `window` seconds |
+
+  ## Examples
+
+      detect :conn_flood, threshold: 50, window: 10   # 50 new conns in 10s → ban
+      detect :port_scan, threshold: 20, window: 60    # 20 ports in 60s → ban
+  """
   defmacro detect(type, opts) do
     threshold = Keyword.fetch!(opts, :threshold)
     window = Keyword.fetch!(opts, :window)
@@ -464,6 +642,17 @@ defmodule Erlkoenig.Stack do
     end
   end
 
+  @doc """
+  Set the duration of automatic bans in seconds.
+
+  When a detection rule triggers, the source IP is banned for this
+  duration. After expiry, the IP is automatically unbanned.
+
+  ## Examples
+
+      ban_duration 3600     # 1 hour
+      ban_duration 86400    # 24 hours
+  """
   defmacro ban_duration(seconds) do
     quote do
       var!(ek_guard_builder) = ErlkoenigNft.Guard.Builder.set_ban_duration(
@@ -471,6 +660,14 @@ defmodule Erlkoenig.Stack do
     end
   end
 
+  @doc """
+  Add an IP to the guard whitelist. Whitelisted IPs are never banned.
+
+  ## Examples
+
+      whitelist {127, 0, 0, 1}        # localhost
+      whitelist {10, 20, 30, 2}       # management host
+  """
   defmacro whitelist(ip) do
     quote do
       var!(ek_guard_builder) = ErlkoenigNft.Guard.Builder.add_whitelist(
@@ -478,6 +675,18 @@ defmodule Erlkoenig.Stack do
     end
   end
 
+  @doc """
+  Configure a conntrack/nflog watcher.
+
+  Watchers subscribe to kernel events (connection tracking, logged packets)
+  and forward them to the erlkoenig event bus for AMQP publishing.
+
+  ## Examples
+
+      watch "connections" do
+        # watcher configuration
+      end
+  """
   defmacro watch(name, do: block) do
     quote do
       var!(ek_watch_builder) = ErlkoenigNft.Watch.Builder.new(unquote(name))
@@ -490,6 +699,64 @@ defmodule Erlkoenig.Stack do
   # nft_table / base_chain / chain — nft-transparent DSL (ADR-0015)
   # ═══════════════════════════════════════════════════════════
 
+  @doc """
+  Define an nftables table — the top-level container for chains, counters, sets, and vmaps.
+
+  Tables are the foundation of the nft-transparent DSL (ADR-0015). Each table
+  maps 1:1 to a real nftables table. Multiple tables per stack are allowed
+  (e.g. one for host protection, one for container firewall).
+
+  ## Arguments
+
+  | Argument | Type | Description |
+  |----------|------|-------------|
+  | `family` | `:inet` \\| `:ip` \\| `:ip6` | Address family. `:inet` handles both IPv4 and IPv6 |
+  | `name` | `string` | Table name (e.g. `"host"`, `"erlkoenig"`, `"filter"`) |
+
+  ## Contains
+
+  - `base_chain` — chain attached to a netfilter hook
+  - `nft_chain` — regular chain (jump target)
+  - `nft_counter` — named counter object
+  - `nft_set` — named set (IP blocklists, etc.)
+  - `nft_vmap` — verdict map for dispatch
+
+  ## Validation
+
+  - Table must contain at least one chain → `CompileError`
+  - Duplicate table names in one stack → `CompileError`
+  - Duplicate chain names within a table → `CompileError`
+  - Counter referenced in rules must be declared → `CompileError`
+
+  ## Examples
+
+      # Host firewall
+      nft_table :inet, "host" do
+        base_chain "input", hook: :input, type: :filter,
+          priority: :filter, policy: :drop do
+          nft_rule :accept, ct_state: [:established, :related]
+          nft_rule :accept, iifname: "lo"
+          nft_rule :accept, tcp_dport: 22
+        end
+      end
+
+      # Container firewall with counters and egress chains
+      nft_table :inet, "erlkoenig" do
+        nft_counter "forward_drop"
+
+        base_chain "forward", hook: :forward, type: :filter,
+          priority: :filter, policy: :drop do
+          nft_rule :accept, ct_state: [:established, :related]
+          nft_rule :jump, iifname: {:veth_of, "web", "nginx"}, to: "from-web"
+          nft_rule :drop, counter: "forward_drop"
+        end
+
+        nft_chain "from-web" do
+          nft_rule :accept, ct_state: [:established, :related]
+          nft_rule :drop
+        end
+      end
+  """
   defmacro nft_table(family, name, do: block) do
     Module.register_attribute(__CALLER__.module, :__ek_context__, accumulate: false)
     Module.put_attribute(__CALLER__.module, :__ek_context__, :nft_table)
@@ -501,6 +768,47 @@ defmodule Erlkoenig.Stack do
     end
   end
 
+  @doc """
+  Define a base chain — attached to a netfilter hook.
+
+  Base chains are entry points into the firewall. The kernel delivers
+  packets to the chain based on the hook point. The policy determines
+  what happens to packets that don't match any rule.
+
+  ## Options
+
+  | Option | Type | Values | Description |
+  |--------|------|--------|-------------|
+  | `hook:` | atom | `:input`, `:output`, `:forward`, `:prerouting`, `:postrouting` | Netfilter hook point |
+  | `type:` | atom | `:filter`, `:nat`, `:route` | Chain type |
+  | `priority:` | atom \\| integer | `:filter`, `:dstnat`, `:srcnat`, `:mangle`, `:security`, `:raw` | Evaluation order |
+  | `policy:` | atom | `:accept`, `:drop` | Default verdict for unmatched packets |
+
+  ## Common Combinations
+
+  | Use Case | hook | type | priority |
+  |----------|------|------|----------|
+  | Input firewall | `:input` | `:filter` | `:filter` |
+  | Forward firewall | `:forward` | `:filter` | `:filter` |
+  | DNAT (port forward) | `:prerouting` | `:nat` | `:dstnat` |
+  | SNAT / Masquerade | `:postrouting` | `:nat` | `:srcnat` |
+
+  ## Examples
+
+      # Drop everything except SSH and established
+      base_chain "input", hook: :input, type: :filter,
+        priority: :filter, policy: :drop do
+        nft_rule :accept, ct_state: [:established, :related]
+        nft_rule :accept, iifname: "lo"
+        nft_rule :accept, tcp_dport: 22
+      end
+
+      # NAT: masquerade container traffic
+      base_chain "postrouting", hook: :postrouting, type: :nat,
+        priority: :srcnat, policy: :accept do
+        nft_rule :masquerade, ip_saddr: {10, 0, 0, 0, 24}, oifname_ne: "br0"
+      end
+  """
   defmacro base_chain(name, opts, do: block) do
     quote do
       var!(ek_nft_chain) = Erlkoenig.Nft.ChainBuilder.new_base(unquote(name), unquote(opts))
@@ -513,6 +821,29 @@ defmodule Erlkoenig.Stack do
   # Override: chain inside nft_table context (regular chain, no hook/policy)
   # The existing chain/3 macro handles host/pod contexts via @__ek_context__
   # This version is for nft_table context only
+  @doc """
+  Define a regular chain — a jump target with no hook.
+
+  Regular chains are not attached to netfilter. They are entered
+  via `:jump` rules from base chains or other regular chains.
+  At the end of a regular chain, execution returns to the caller
+  (implicit `return`).
+
+  Used for **egress filtering**: one chain per container that controls
+  what outbound traffic the container may send.
+
+  ## Examples
+
+      # Egress: nginx may only connect to API on port 4000
+      nft_chain "from-web-nginx" do
+        nft_rule :accept, ct_state: [:established, :related]
+        nft_rule :accept, tcp_dport: 4000
+        nft_rule :drop, counter: "nginx_drop"
+      end
+
+      # Called from forward chain via:
+      #   nft_rule :jump, iifname: {:veth_of, "web", "nginx"}, to: "from-web-nginx"
+  """
   defmacro nft_chain(name, do: block) do
     quote do
       var!(ek_nft_chain) = Erlkoenig.Nft.ChainBuilder.new_regular(unquote(name))
@@ -522,7 +853,97 @@ defmodule Erlkoenig.Stack do
     end
   end
 
-  # rule inside nft_table context — uses nft field names
+  @doc """
+  Define a single nftables rule inside a chain.
+
+  Each `nft_rule` maps 1:1 to a real `nft add rule` command.
+  Rules are evaluated top-to-bottom — first match wins.
+
+  ## Actions
+
+  | Action | nft equivalent | Required opts | Description |
+  |--------|---------------|---------------|-------------|
+  | `:accept` | `accept` | — | Accept the packet |
+  | `:drop` | `drop` | — | Silently drop the packet |
+  | `:return` | `return` | — | Return to the calling chain |
+  | `:jump` | `jump <chain>` | `to:` | Jump to a named chain |
+  | `:reject` | `reject` | — | Drop + send ICMP unreachable |
+  | `:masquerade` | `masquerade` | — | SNAT to outgoing interface IP |
+  | `:snat` | `snat to <ip>` | `snat_to:` | Source NAT to fixed IP |
+  | `:dnat` | `dnat to <ip[:port]>` | `dnat_to:` | Destination NAT |
+  | `:notrack` | `notrack` | — | Skip connection tracking |
+  | `:ct_mark_set` | `ct mark set` | `mark:` | Set conntrack mark |
+  | `:ct_mark_match` | `ct mark` | `mark:` | Match conntrack mark |
+  | `:fib_rpf` | `fib saddr . iif oif 0 drop` | — | Reverse path filter (BCP38) |
+  | `:connlimit_drop` | `ct count over N drop` | `limit:` | Connection limit per source IP |
+  | `:vmap_dispatch` | `vmap @name` | `vmap:` | Verdict map dispatch |
+
+  ## Match Fields
+
+  | Field | nft equivalent | Type | Example |
+  |-------|---------------|------|---------|
+  | `ct_state:` | `ct state` | `[atom]` | `[:established, :related]` |
+  | `iifname:` | `iifname` | `string` \\| `{:veth_of, pod, ct}` | `"eth0"` |
+  | `oifname:` | `oifname` | `string` | `"br0"` |
+  | `oifname_ne:` | `oifname !=` | `string` | `"dmz"` |
+  | `tcp_dport:` | `tcp dport` | `integer` \\| `{min, max}` | `8080` or `{8000, 9000}` |
+  | `udp_dport:` | `udp dport` | `integer` | `53` |
+  | `ip_saddr:` | `ip saddr` | `ip_tuple` \\| `{:replica_ips, pod, ct}` | `{10,0,0,0,24}` |
+  | `ip_daddr:` | `ip daddr` | `ip_tuple` \\| `{:replica_ips, pod, ct}` | `{10,0,0,2}` |
+  | `log_prefix:` | `log prefix` | `string` | `"FWD: "` |
+  | `counter:` | `counter` | `string` | `"forward_drop"` (must be declared with `nft_counter`) |
+  | `to:` | (jump target) | `string` | `"from-web-nginx"` |
+  | `mark:` | `ct mark` | `integer` | `1` |
+  | `snat_to:` | `snat to` | `ip_tuple` | `{192,168,1,1}` |
+  | `dnat_to:` | `dnat to` | `ip_tuple` \\| `{ip, port}` | `{10,0,0,2}` or `{10,0,0,2, 8080}` |
+  | `limit:` | `ct count over` | `integer` | `100` |
+  | `set:` | `@set_name` | `string` | `"blocklist"` |
+  | `vmap:` | `vmap @name` | `string` | `"dispatch"` |
+
+  ## Deploy-Time Symbols
+
+  These are resolved when the config is loaded, not at compile time:
+
+  - `{:veth_of, "pod", "container"}` — expands to the host veth name (e.g. `"vh.web0nginx"`)
+  - `{:replica_ips, "pod", "container"}` — expands to a list of container IPs across all replicas
+
+  ## IP Tuple Format
+
+  - `{a, b, c, d}` — single IP address (e.g. `{10, 0, 0, 2}`)
+  - `{a, b, c, d, mask}` — CIDR subnet (e.g. `{10, 0, 0, 0, 24}`)
+
+  ## Examples
+
+      # Accept established connections
+      nft_rule :accept, ct_state: [:established, :related]
+
+      # Accept TCP on port 443 from eth0
+      nft_rule :accept, iifname: "eth0", tcp_dport: 443
+
+      # Jump to egress chain based on container veth
+      nft_rule :jump, iifname: {:veth_of, "web", "nginx"}, to: "from-web-nginx"
+
+      # Allow traffic between pods (expanded at deploy time)
+      nft_rule :accept,
+        ip_saddr: {:replica_ips, "web", "nginx"},
+        ip_daddr: {:replica_ips, "app", "api"},
+        tcp_dport: 4000
+
+      # Drop with counter and log
+      nft_rule :drop, log_prefix: "FWD: ", counter: "forward_drop"
+
+      # Masquerade container subnet (NAT)
+      nft_rule :masquerade, ip_saddr: {10, 0, 0, 0, 24}, oifname_ne: "br0"
+
+      # DNAT: forward port 8080 to container
+      nft_rule :dnat, tcp_dport: 8080, dnat_to: {10, 0, 0, 2, 8080}
+
+      # Reverse path filter (anti-spoofing)
+      nft_rule :fib_rpf
+
+      # Connection limit: max 100 concurrent from one IP
+      nft_rule :connlimit_drop, limit: 100
+  """
   defmacro nft_rule(action, opts \\ []) do
     quote do
       var!(ek_nft_chain) = Erlkoenig.Nft.ChainBuilder.add_rule(
@@ -530,7 +951,31 @@ defmodule Erlkoenig.Stack do
     end
   end
 
-  # counter declaration at table level
+  @doc """
+  Declare a named counter at table level.
+
+  Named counters are table-level objects that track packet and byte counts.
+  They must be declared before being referenced in rules via `counter:`.
+
+  erlkoenig polls counter rates periodically and publishes them as AMQP
+  events (`firewall.<chain>.drop`) when the packet rate is > 0.
+
+  ## Validation
+
+  - Counter referenced in `nft_rule` but not declared → `CompileError`
+
+  ## Examples
+
+      nft_table :inet, "erlkoenig" do
+        nft_counter "forward_drop"
+        nft_counter "web_nginx_drop"
+
+        base_chain "forward", hook: :forward, type: :filter,
+          priority: :filter, policy: :drop do
+          nft_rule :drop, counter: "forward_drop"
+        end
+      end
+  """
   defmacro nft_counter(name) do
     quote do
       var!(ek_nft_table) = Erlkoenig.Nft.TableBuilder.add_counter(
@@ -538,7 +983,37 @@ defmodule Erlkoenig.Stack do
     end
   end
 
-  # set declaration at table level
+  @doc """
+  Declare a named set at table level.
+
+  Sets are collections of values (IPs, ports, etc.) that can be matched
+  against in rules. Used for dynamic blocklists, allowlists, and
+  group-based filtering.
+
+  ## Arguments
+
+  | Argument | Type | Description |
+  |----------|------|-------------|
+  | `name` | `string` | Set name |
+  | `type` | `atom` | Element type: `:ipv4_addr`, `:ipv6_addr`, `:inet_service` |
+
+  ## Options
+
+  | Option | Type | Default | Description |
+  |--------|------|---------|-------------|
+  | `flags:` | `[atom]` | `[]` | Set flags: `:interval`, `:timeout`, `:constant` |
+
+  ## Examples
+
+      nft_table :inet, "erlkoenig" do
+        nft_set "blocklist", :ipv4_addr
+
+        base_chain "input", hook: :input, type: :filter,
+          priority: :filter, policy: :drop do
+          nft_rule :drop, set: "blocklist"
+        end
+      end
+  """
   defmacro nft_set(name, type, opts \\ []) do
     quote do
       var!(ek_nft_table) = Erlkoenig.Nft.TableBuilder.add_set(
@@ -546,7 +1021,34 @@ defmodule Erlkoenig.Stack do
     end
   end
 
-  # vmap declaration at table level
+  @doc """
+  Declare a verdict map (vmap) at table level.
+
+  Verdict maps associate keys with verdicts (accept/drop/jump). Used for
+  efficient multi-target dispatch — one lookup instead of N sequential rules.
+
+  ## Arguments
+
+  | Argument | Type | Description |
+  |----------|------|-------------|
+  | `name` | `string` | Vmap name |
+  | `type` | `atom` | Key type: `:ipv4_addr`, `:inet_service`, etc. |
+  | `entries` | `[{key, action}]` | Static entries: `[{{10,0,0,2}, :accept}]` |
+
+  ## Examples
+
+      nft_table :inet, "erlkoenig" do
+        nft_vmap "dispatch", :ipv4_addr, [
+          {{10, 0, 0, 2}, {:jump, "handle-web"}},
+          {{10, 0, 0, 3}, {:jump, "handle-api"}}
+        ]
+
+        base_chain "forward", hook: :forward, type: :filter,
+          priority: :filter, policy: :drop do
+          nft_rule :vmap_dispatch, vmap: "dispatch"
+        end
+      end
+  """
   defmacro nft_vmap(name, type, entries) do
     quote do
       var!(ek_nft_table) = Erlkoenig.Nft.TableBuilder.add_vmap(

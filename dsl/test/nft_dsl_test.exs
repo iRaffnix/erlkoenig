@@ -441,6 +441,217 @@ defmodule NftDslTest do
   # Full three-tier example compiles
   # ═══════════════════════════════════════════════════════
 
+  # ═══════════════════════════════════════════════════════
+  # Advanced actions (docs verification)
+  # ═══════════════════════════════════════════════════════
+
+  test "reject action compiles" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestNft.Reject do
+      use Erlkoenig.Stack
+      host do
+        nft_table :inet, "fw" do
+          base_chain "input", hook: :input, type: :filter, priority: :filter, policy: :drop do
+            nft_rule :reject
+          end
+        end
+      end
+    end
+    """)
+    {action, _} = hd(hd(hd(mod.config().nft_tables).chains).rules)
+    assert action == :reject
+  end
+
+  test "notrack action compiles" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestNft.Notrack do
+      use Erlkoenig.Stack
+      host do
+        nft_table :inet, "fw" do
+          base_chain "prerouting", hook: :prerouting, type: :filter, priority: :raw, policy: :accept do
+            nft_rule :notrack, tcp_dport: 8080
+          end
+        end
+      end
+    end
+    """)
+    {action, opts} = hd(hd(hd(mod.config().nft_tables).chains).rules)
+    assert action == :notrack
+    assert opts.tcp_dport == 8080
+  end
+
+  test "ct_mark_set and ct_mark_match compile" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestNft.CtMark do
+      use Erlkoenig.Stack
+      host do
+        nft_table :inet, "fw" do
+          base_chain "forward", hook: :forward, type: :filter, priority: :filter, policy: :drop do
+            nft_rule :ct_mark_set, iifname: "eth0", mark: 1
+            nft_rule :ct_mark_match, mark: 1
+          end
+        end
+      end
+    end
+    """)
+    rules = hd(hd(mod.config().nft_tables).chains).rules
+    {a1, o1} = Enum.at(rules, 0)
+    assert a1 == :ct_mark_set
+    assert o1.mark == 1
+    {a2, o2} = Enum.at(rules, 1)
+    assert a2 == :ct_mark_match
+    assert o2.mark == 1
+  end
+
+  test "snat action compiles" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestNft.Snat do
+      use Erlkoenig.Stack
+      host do
+        nft_table :inet, "fw" do
+          base_chain "postrouting", hook: :postrouting, type: :nat, priority: :srcnat, policy: :accept do
+            nft_rule :snat, ip_saddr: {10, 0, 0, 0, 24}, snat_to: {192, 168, 1, 1}
+          end
+        end
+      end
+    end
+    """)
+    {action, opts} = hd(hd(hd(mod.config().nft_tables).chains).rules)
+    assert action == :snat
+    assert opts.snat_to == {192, 168, 1, 1}
+  end
+
+  test "dnat action compiles" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestNft.Dnat do
+      use Erlkoenig.Stack
+      host do
+        nft_table :inet, "fw" do
+          base_chain "prerouting", hook: :prerouting, type: :nat, priority: :dstnat, policy: :accept do
+            nft_rule :dnat, tcp_dport: 8080, dnat_to: {10, 0, 0, 2, 8080}
+          end
+        end
+      end
+    end
+    """)
+    {action, opts} = hd(hd(hd(mod.config().nft_tables).chains).rules)
+    assert action == :dnat
+    assert opts.dnat_to == {10, 0, 0, 2, 8080}
+    assert opts.tcp_dport == 8080
+  end
+
+  test "fib_rpf action compiles" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestNft.FibRpf do
+      use Erlkoenig.Stack
+      host do
+        nft_table :inet, "fw" do
+          base_chain "prerouting", hook: :prerouting, type: :filter, priority: :filter, policy: :accept do
+            nft_rule :fib_rpf
+          end
+        end
+      end
+    end
+    """)
+    {action, _} = hd(hd(hd(mod.config().nft_tables).chains).rules)
+    assert action == :fib_rpf
+  end
+
+  test "connlimit_drop action compiles" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestNft.Connlimit do
+      use Erlkoenig.Stack
+      host do
+        nft_table :inet, "fw" do
+          base_chain "input", hook: :input, type: :filter, priority: :filter, policy: :drop do
+            nft_rule :connlimit_drop, tcp_dport: 80, limit: 100
+          end
+        end
+      end
+    end
+    """)
+    {action, opts} = hd(hd(hd(mod.config().nft_tables).chains).rules)
+    assert action == :connlimit_drop
+    assert opts.limit == 100
+    assert opts.tcp_dport == 80
+  end
+
+  test "nft_set compiles" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestNft.Set do
+      use Erlkoenig.Stack
+      host do
+        nft_table :inet, "fw" do
+          nft_set "blocklist", :ipv4_addr
+
+          base_chain "input", hook: :input, type: :filter, priority: :filter, policy: :drop do
+            nft_rule :drop, set: "blocklist"
+          end
+        end
+      end
+    end
+    """)
+    table = hd(mod.config().nft_tables)
+    assert table.sets == [{"blocklist", :ipv4_addr}]
+    {_, opts} = hd(hd(table.chains).rules)
+    assert opts.set == "blocklist"
+  end
+
+  test "nft_vmap compiles" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestNft.Vmap do
+      use Erlkoenig.Stack
+      host do
+        nft_table :inet, "fw" do
+          nft_vmap "dispatch", :ipv4_addr, [
+            {{10, 0, 0, 2}, {:jump, "handle-web"}},
+            {{10, 0, 0, 3}, {:jump, "handle-api"}}
+          ]
+
+          nft_chain "handle-web" do
+            nft_rule :accept
+          end
+
+          nft_chain "handle-api" do
+            nft_rule :accept
+          end
+
+          base_chain "forward", hook: :forward, type: :filter, priority: :filter, policy: :drop do
+            nft_rule :vmap_dispatch, vmap: "dispatch"
+          end
+        end
+      end
+    end
+    """)
+    table = hd(mod.config().nft_tables)
+    assert length(table.vmaps) == 1
+    vmap = hd(table.vmaps)
+    assert vmap.name == "dispatch"
+    assert vmap.type == :ipv4_addr
+    assert length(vmap.entries) == 2
+  end
+
+  test "tcp_dport range compiles" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestNft.PortRange do
+      use Erlkoenig.Stack
+      host do
+        nft_table :inet, "fw" do
+          base_chain "input", hook: :input, type: :filter, priority: :filter, policy: :drop do
+            nft_rule :accept, tcp_dport: {8000, 9000}
+          end
+        end
+      end
+    end
+    """)
+    {_, opts} = hd(hd(hd(mod.config().nft_tables).chains).rules)
+    assert opts.tcp_dport == {8000, 9000}
+  end
+
+  # ═══════════════════════════════════════════════════════
+  # Full examples (docs verification)
+  # ═══════════════════════════════════════════════════════
+
   test "three_tier_nft example compiles" do
     [{mod, _}] = Code.compile_file("../examples/three_tier_nft.exs")
 

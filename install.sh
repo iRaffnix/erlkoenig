@@ -332,7 +332,7 @@ fi
 
 # ── Create directories ───────────────────────────────────
 
-mkdir -p "$PREFIX" "$RT_DIR" "$RT_DIR/demo" /etc/erlkoenig /var/lib/erlkoenig/volumes /var/log/erlkoenig
+mkdir -p "$PREFIX" "$RT_DIR" "$RT_DIR/demo" /etc/erlkoenig /var/lib/erlkoenig/volumes /var/log/erlkoenig /run/erlkoenig/containers
 
 # ── Extract OTP release ──────────────────────────────────
 
@@ -347,6 +347,27 @@ if ! tar xzf "$TMPDIR/erlkoenig-release.tar.gz" -C "$PREFIX"; then
 fi
 
 ok "OTP release extracted"
+
+# ── Remove stale versioned scripts ──────────────────────
+# The release tarball may contain scripts from old versions
+# (e.g. erlkoenig-0.4.0 alongside erlkoenig-0.5.0). Keep only
+# the current version.
+
+REL_VSN=$(awk '{print $2}' "$PREFIX/releases/start_erl.data" 2>/dev/null || true)
+if [ -n "$REL_VSN" ]; then
+    for f in "$PREFIX"/bin/erlkoenig-*; do
+        base=$(basename "$f")
+        case "$base" in
+            erlkoenig-"$REL_VSN") ;; # keep current
+            erlkoenig-dsl)         ;; # keep DSL
+            erlkoenig-dsl-*)       ;; # keep DSL variants
+            erlkoenig-*)
+                info "Removing stale script: $base"
+                rm -f "$f"
+                ;;
+        esac
+    done
+fi
 
 # ── Install C runtime ────────────────────────────────────
 
@@ -448,6 +469,27 @@ if [ -d /etc/systemd/system ] && [ -f "$PREFIX/dist/erlkoenig.service" ]; then
     ln -sf "$PREFIX/dist/erlkoenig.service" /etc/systemd/system/erlkoenig.service
     systemctl daemon-reload
     ok "Systemd unit: erlkoenig.service (symlinked)"
+fi
+
+# ── Generate cookie if missing ──────────────────────────
+
+COOKIE_FILE="$PREFIX/cookie"
+if [ ! -f "$COOKIE_FILE" ]; then
+    head -c 32 /dev/urandom | base64 | tr -d '/+=' | head -c 32 > "$COOKIE_FILE"
+    chmod 440 "$COOKIE_FILE"
+    chown root:"$SERVICE_USER" "$COOKIE_FILE"
+    ok "Cookie generated: $COOKIE_FILE"
+fi
+
+# ── Fix hostname resolution for epmd ────────────────────
+# Debian cloud images set hostname to 127.0.1.1 in /etc/hosts.
+# epmd binds to 127.0.0.1 — the mismatch prevents CLI from
+# connecting to the running node. Fix if needed.
+
+HOSTNAME=$(hostname)
+if grep -q "127\.0\.1\.1.*$HOSTNAME" /etc/hosts 2>/dev/null; then
+    sed -i "s/127\.0\.1\.1\(.*$HOSTNAME\)/127.0.0.1\1/" /etc/hosts
+    ok "Fixed /etc/hosts: $HOSTNAME → 127.0.0.1 (was 127.0.1.1)"
 fi
 
 # ── Restart daemon if it was running ─────────────────────

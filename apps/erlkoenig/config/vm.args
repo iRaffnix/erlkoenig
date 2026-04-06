@@ -1,8 +1,0 @@
-## No Erlang distribution — standalone daemon.
-## Management via Unix socket (/run/erlkoenig/ctl.sock).
-## Lifecycle managed by systemd (SIGTERM for shutdown).
--start_epmd false
--erl_epmd_port 0
-
-## Scheduler busy-wait threshold
-+sbwt very_short

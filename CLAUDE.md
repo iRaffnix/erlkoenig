@@ -1,6 +1,6 @@
 # erlkoenig
 
-Zero-trust container runtime for Linux, built on Erlang/OTP 28+ with a 68KB static C runtime.
+Erlkoenig — Speed and Control. Container runtime for Linux, built on Erlang/OTP 28+ with a 168KB static C runtime.
 
 ## Build & Test
 
@@ -57,6 +57,6 @@ Full design docs: `/home/dev/code/erlkoenigin/systems/erlkoenig.md`
 ## Constraints
 
 - OTP 28+ required (`minimum_otp_vsn "28"`)
-- `erlkoenig_nft` must be available (git dep, branch `main`)
+- erlkoenig_nft is merged in-tree (no separate dep)
 - Integration tests and C runtime tests require root/sudo
 - Apache-2.0 licensed

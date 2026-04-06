@@ -695,15 +695,19 @@ apply_nft_table(#{name := TableName, chains := Chains} = Table, VethMap, Replica
     OrderedChains = lists:sort(fun(A, _B) ->
         not maps:is_key(hook, A)
     end, Chains),
-    AllChainMsgs = lists:flatmap(fun(Chain) ->
-        {ChainMsg, RuleMsgs} = compile_nft_chain_split(
-            FamilyNum, TableBin, Chain, VethMap, ReplicaIpMap),
-        ChainMsg ++ RuleMsgs
-    end, OrderedChains),
+    %% Compile all chains → {ChainCreates, MapCreates, RuleCreates}
+    {AllChainCreates, AllMapCreates, AllRuleCreates} = lists:foldl(
+        fun(Chain, {CAcc, MAcc, RAcc}) ->
+            {ChainMsg, MapMsgs, RuleMsgs} = compile_nft_chain_split(
+                FamilyNum, TableBin, Chain, VethMap, ReplicaIpMap),
+            {CAcc ++ ChainMsg, MAcc ++ MapMsgs, RAcc ++ RuleMsgs}
+        end, {[], [], []}, OrderedChains),
 
-    %% Apply everything in ONE atomic batch:
-    %% table flush + counters + chains + rules
-    AllMsgs = CounterMsgs ++ AllChainMsgs,
+    %% Apply in correct order:
+    %% counters → maps → chains → rules
+    %% Maps MUST come before rules that reference them.
+    %% Chains MUST come before rules that belong to them.
+    AllMsgs = CounterMsgs ++ AllMapCreates ++ AllChainCreates ++ AllRuleCreates,
     case AllMsgs of
         [] ->
             logger:info("erlkoenig_config: nft_table ~s: empty (no chains)", [TableName]);
@@ -718,11 +722,11 @@ apply_nft_table(#{name := TableName, chains := Chains} = Table, VethMap, Replica
                     logger:warning("erlkoenig_config: nft_table ~s batch failed (~p), retrying per-chain",
                                    [TableName, Reason]),
                     erlkoenig_events:notify({firewall_failed, TableName, Reason}),
-                    %% Counters first
-                    _ = nfnl_server:apply_msgs(erlkoenig_nft_srv, CounterMsgs),
+                    %% Counters + maps first
+                    _ = nfnl_server:apply_msgs(erlkoenig_nft_srv, CounterMsgs ++ AllMapCreates),
                     %% Then chains individually
                     lists:foreach(fun(Chain) ->
-                        {ChainMsg, RuleMsgs} = compile_nft_chain_split(
+                        {ChainMsg, _MapMsgs, RuleMsgs} = compile_nft_chain_split(
                             FamilyNum, TableBin, Chain, VethMap, ReplicaIpMap),
                         case nfnl_server:apply_msgs(erlkoenig_nft_srv, ChainMsg ++ RuleMsgs) of
                             ok ->
@@ -777,7 +781,7 @@ compile_nft_chain_split(Family, Table, #{name := Name, rules := Rules} = Chain,
         {NewRules, NewMaps}
     end, {[], []}, Rules),
 
-    {ChainMsg, lists:reverse(MapMsgs) ++ lists:reverse(RuleMsgs)}.
+    {ChainMsg, lists:reverse(MapMsgs), lists:reverse(RuleMsgs)}.
 
 %% Expand a single nft rule, resolving {:veth_of,...} and {:replica_ips,...}.
 %% Returns a list of rules (one per replica IP when expanded).
@@ -808,7 +812,7 @@ expand_nft_rule(dnat_lb, Opts, VethMap, ReplicaIpMap) ->
     Targets = case maps:get(targets, Opts, undefined) of
         {replica_ips, Pod, Ct} ->
             IpList = maps:get({Pod, Ct}, ReplicaIpMap, []),
-            [erlkoenig_firewall_nft:ensure_ip_binary(Ip) || Ip <- IpList];
+            [ip_to_binary(Ip) || Ip <- IpList];
         _ -> []
     end,
     BaseOpts = maps:fold(fun
@@ -883,6 +887,10 @@ build_rule_opts(Base, Saddr, Daddr) ->
 ip_to_cidr({A,B,C,D}) -> {A,B,C,D,32};
 ip_to_cidr({A,B,C,D,P}) -> {A,B,C,D,P};
 ip_to_cidr(Other) -> Other.
+
+ip_to_binary({A,B,C,D}) -> <<A,B,C,D>>;
+ip_to_binary({A,B,C,D,_Prefix}) -> <<A,B,C,D>>;
+ip_to_binary(B) when is_binary(B) -> B.
 
 %% Safely flush a table: delete+add in one atomic netlink batch.
 %% The table is gone and back in one kernel operation — no window

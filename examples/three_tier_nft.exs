@@ -149,166 +149,120 @@ defmodule ThreeTierNft do
 
     nft_table :inet, "erlkoenig" do
 
-      # Ban-Set nicht nötig hier — die Raw-Prerouting-Chain in
-      # der host-Tabelle droppt gebannte IPs bereits vor dem
-      # Forward-Hook (priority -300 < priority 0).
-
-      # Named Counters — Table-Level Objekte.
-      # Werden in Regeln referenziert via counter: "name".
-      # erlkoenig_nft_watch pollt sie periodisch und sendet
-      # Rate-Events über AMQP wenn packets > 0.
+      # ── Table-Level Objekte ──────────────────────────
       nft_counter "forward_drop"
       nft_counter "web_nginx_drop"
       nft_counter "app_api_drop"
       nft_counter "data_postgres_drop"
 
-      # ── Forward-Chain ────────────────────────────────
+      # ════════════════════════════════════════════════════
+      # Chains geordnet nach Kernel-Evaluierungsreihenfolge:
       #
-      # Base-Chain: am Netfilter Forward-Hook.
-      # Policy drop: alles was keine Regel matcht wird verworfen.
+      #   Priority -100  prerouting/dstnat  (DNAT)
+      #   Priority   0   forward/filter     (Firewall)
+      #                   + Egress-Chains    (Jump-Targets)
+      #   Priority +100  postrouting/srcnat  (Masquerade)
       #
-      # Reihenfolge ist wichtig — nft evaluiert top-to-bottom:
-      #   1. ct established (Antworten durchlassen)
-      #   2. Egress-Jumps (Container-Outbound prüfen)
-      #   3. Ingress-Allows (erlaubte Pfade zwischen Tiers)
-      #   4. Default drop + counter + log
+      # Ban-Set (-300) ist in der host-Tabelle.
+      # ════════════════════════════════════════════════════
+
+      # ── 1. DNAT: priority -100 ──────────────────────
       #
-      # Ban-Set nicht hier — prerouting/raw droppt schon vorher.
-
-      base_chain "forward",
-        hook: :forward, type: :filter,
-        priority: :filter, policy: :drop do
-
-        # Schritt 1: Bestehende Verbindungen durchlassen.
-        # Wenn ein TCP-Handshake einmal akzeptiert wurde,
-        # fließen alle Folgepakete (ACK, PSH, FIN) hier durch.
-        nft_rule :accept, ct_state: [:established, :related]
-
-        # Schritt 2: Container-Egress prüfen.
-        # Pakete die VON einem Container-Veth kommen werden
-        # in die jeweilige Egress-Chain gejumpt.
-        # {:veth_of, "pod", "container"} wird zur Deploy-Zeit
-        # zum konkreten Veth-Namen expandiert (z.B. "vh.web0nginx").
-        # Bei replicas > 1 werden mehrere Jump-Regeln erzeugt.
-        nft_rule :jump, iifname: {:veth_of, "web", "nginx"}, to: "from-web-nginx"
-        nft_rule :jump, iifname: {:veth_of, "app", "api"}, to: "from-app-api"
-        nft_rule :jump, iifname: {:veth_of, "data", "postgres"}, to: "from-data-postgres"
-
-        # Schritt 3: Erlaubte Pfade zwischen Tiers.
-        # Nur explizit gelistete Kombinationen sind erlaubt.
-        # {:replica_ips, ...} wird zur Deploy-Zeit expandiert.
-        # Bei replicas > 1 entsteht ein kartesisches Produkt
-        # (jede Quell-IP × jede Ziel-IP).
-
-        # Internet → Nginx: nur HTTPS (:8443)
-        nft_rule :accept,
-          iifname: "eth0",
-          ip_daddr: {:replica_ips, "web", "nginx"},
-          tcp_dport: 8443
-
-        # Nginx → API: nur API-Port (:4000)
-        nft_rule :accept,
-          ip_saddr: {:replica_ips, "web", "nginx"},
-          ip_daddr: {:replica_ips, "app", "api"},
-          tcp_dport: 4000
-
-        # API → Postgres: nur DB-Port (:5432)
-        nft_rule :accept,
-          ip_saddr: {:replica_ips, "app", "api"},
-          ip_daddr: {:replica_ips, "data", "postgres"},
-          tcp_dport: 5432
-
-        # DMZ-Container dürfen ins Internet (Updates, DNS, etc.)
-        nft_rule :accept, iifname: "dmz", oifname: "eth0"
-
-        # Schritt 4: Alles was bis hier nicht gematcht hat → drop.
-        # Counter zählt Drops, Log schreibt Prefix für NFLOG.
-        nft_rule :drop, log_prefix: "FWD: ", counter: "forward_drop"
-      end
-
-      # ── Egress-Chains ────────────────────────────────
-      #
-      # Reguläre Chains (kein Hook, kein Policy).
-      # Werden via "jump" aus der Forward-Chain betreten.
-      # Am Chain-Ende ist implizit "return" (zurück zur Forward-Chain).
-      # Aber wir droppen explizit + zählen — so sehen wir
-      # illegale Egress-Versuche im Counter.
-      #
-      # Warum Egress und nicht Ingress?
-      # Die Jump-Regel matcht auf iifname (= Input-Interface im
-      # Forward-Kontext). Für Bridge-Forwarding ist iifname das
-      # Interface von dem das Paket KOMMT — also das Container-Veth.
-      # Das bedeutet: Diese Chain filtert was der Container SENDEN darf.
-      # Eingehender Traffic zum Container wird über die Forward-Regeln
-      # (Schritt 3) kontrolliert, nicht über diese Chains.
-
-      # Nginx: darf nur zum API (:4000) senden.
-      # Antworten auf eingehende HTTPS-Verbindungen (:8443)
-      # gehen über ct established durch — keine extra Regel nötig.
-      nft_chain "from-web-nginx" do
-        nft_rule :accept, ct_state: [:established, :related]
-        nft_rule :accept, tcp_dport: 4000
-        nft_rule :drop, counter: "web_nginx_drop"
-      end
-
-      # API: darf nur zur DB (:5432) senden.
-      # Antworten auf eingehende API-Calls (:4000) gehen
-      # über ct established.
-      nft_chain "from-app-api" do
-        nft_rule :accept, ct_state: [:established, :related]
-        nft_rule :accept, tcp_dport: 5432
-        nft_rule :drop, counter: "app_api_drop"
-      end
-
-      # DB: darf NUR antworten. Kein aktiver Outbound.
-      # Jeder Versuch der DB nach draußen zu senden wird
-      # gedroppt und gezählt — ein Alarm-Signal.
-      nft_chain "from-data-postgres" do
-        nft_rule :accept, ct_state: [:established, :related]
-        nft_rule :drop, counter: "data_postgres_drop"
-      end
-
-      # ── NAT: DNAT (eingehend) ─────────────────────────
-      #
-      # Prerouting/DNAT: schreibt die Ziel-IP um.
-      # Pakete an die PUBLIC_IP:8443 werden umgeschrieben auf
-      # die Container-IP 10.0.0.2:8443 (nginx).
-      # Ohne DNAT erreicht Internet-Traffic den Container nicht —
-      # der Kernel denkt die Public IP gehört zum Host (input).
-      #
-      # Priority :dstnat (-100) — evaluiert vor :filter (0),
-      # also vor der Forward-Chain. Wenn das Paket die Forward-Chain
-      # erreicht, hat es bereits die Container-IP als Ziel.
+      # Schreibt die Ziel-IP um BEVOR das Routing entscheidet.
+      # Paket an PUBLIC_IP:8443 → 10.0.0.2:8443 (nginx).
+      # Ohne DNAT landet das Paket in der Input-Chain (Host),
+      # nicht in der Forward-Chain (Container).
 
       base_chain "prerouting_nat", hook: :prerouting, type: :nat,
         priority: :dstnat, policy: :accept do
 
-        # Internet → Nginx: DNAT auf Container-IP
-        # {:replica_ips, ...} expandiert zur Deploy-Zeit.
-        # Bei replicas: 1 → eine DNAT Regel.
-        # Bei replicas: 3 → braucht Loadbalancing (jhash, future).
         nft_rule :dnat,
           iifname: "eth0",
           tcp_dport: 8443,
           dnat_to: {:replica_ips, "web", "nginx", 8443}
       end
 
-      # ── NAT: Masquerade (ausgehend) ─────────────────
+      # ── 2. Egress-Chains: Jump-Targets ──────────────
       #
-      # Masquerade: Container-Traffic der das Host-Interface
-      # verlässt bekommt die Host-IP als Absender (SNAT).
-      # Ohne das können Container nicht ins Internet.
+      # Reguläre Chains (kein Hook, kein Policy).
+      # Werden via :jump aus der Forward-Chain betreten.
+      # Filtern was ein Container SENDEN darf.
+      # Am Ende: expliziter Drop + Counter (kein return).
+
+      # Nginx: darf nur zum API (:4000)
+      nft_chain "from-web-nginx" do
+        nft_rule :accept, ct_state: [:established, :related]
+        nft_rule :accept, tcp_dport: 4000
+        nft_rule :drop, counter: "web_nginx_drop"
+      end
+
+      # API: darf nur zur DB (:5432)
+      nft_chain "from-app-api" do
+        nft_rule :accept, ct_state: [:established, :related]
+        nft_rule :accept, tcp_dport: 5432
+        nft_rule :drop, counter: "app_api_drop"
+      end
+
+      # DB: darf NUR antworten — jeder aktive Outbound ist Alarm
+      nft_chain "from-data-postgres" do
+        nft_rule :accept, ct_state: [:established, :related]
+        nft_rule :drop, counter: "data_postgres_drop"
+      end
+
+      # ── 3. Forward: priority 0 ──────────────────────
+      #
+      # Evaluiert NACH DNAT — Pakete haben bereits die
+      # Container-IP als Ziel.
+
+      base_chain "forward",
+        hook: :forward, type: :filter,
+        priority: :filter, policy: :drop do
+
+        # Bestehende Verbindungen durchlassen
+        nft_rule :accept, ct_state: [:established, :related]
+
+        # Egress-Prüfung: was darf der Container senden?
+        nft_rule :jump, iifname: {:veth_of, "web", "nginx"}, to: "from-web-nginx"
+        nft_rule :jump, iifname: {:veth_of, "app", "api"}, to: "from-app-api"
+        nft_rule :jump, iifname: {:veth_of, "data", "postgres"}, to: "from-data-postgres"
+
+        # Internet → Nginx (nach DNAT: daddr ist Container-IP)
+        nft_rule :accept,
+          iifname: "eth0",
+          ip_daddr: {:replica_ips, "web", "nginx"},
+          tcp_dport: 8443
+
+        # Nginx → API
+        nft_rule :accept,
+          ip_saddr: {:replica_ips, "web", "nginx"},
+          ip_daddr: {:replica_ips, "app", "api"},
+          tcp_dport: 4000
+
+        # API → Postgres
+        nft_rule :accept,
+          ip_saddr: {:replica_ips, "app", "api"},
+          ip_daddr: {:replica_ips, "data", "postgres"},
+          tcp_dport: 5432
+
+        # DMZ → Internet (Updates, DNS)
+        nft_rule :accept, iifname: "dmz", oifname: "eth0"
+
+        # Default Drop
+        nft_rule :drop, log_prefix: "FWD: ", counter: "forward_drop"
+      end
+
+      # ── 4. Masquerade: priority +100 ────────────────
+      #
+      # SNAT: Container-Traffic bekommt die Host-IP als
+      # Absender wenn es das Host-Interface verlässt.
 
       base_chain "postrouting",
         hook: :postrouting, type: :nat,
         priority: :srcnat, policy: :accept do
 
-        # Container-Subnets → Masquerade wenn sie die Bridge verlassen
         nft_rule :masquerade, ip_saddr: {10, 0, 0, 0, 24}, oifname_ne: "dmz"
         nft_rule :masquerade, ip_saddr: {10, 0, 1, 0, 24}, oifname_ne: "app"
         nft_rule :masquerade, ip_saddr: {10, 0, 2, 0, 24}, oifname_ne: "data"
-
-        # DMZ → Internet: explizite Masquerade-Regel
         nft_rule :masquerade, iifname: "dmz", oifname: "eth0"
       end
     end

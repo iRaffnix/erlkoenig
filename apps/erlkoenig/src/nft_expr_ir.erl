@@ -72,6 +72,7 @@ Example:
     range/4,
     bitwise/4,
     lookup/2,
+    lookup_data/3,
     lookup_inv/2,
     vmap_lookup/2,
     concat_lookup/3,
@@ -287,7 +288,11 @@ bitwise(SReg, DReg, Mask, Xor) ->
 lookup(SReg, SetName) ->
     {lookup, #{sreg => SReg, set => SetName}}.
 
--doc "Check if register value is NOT in a named set. BREAKs if found.".
+-doc "Data map lookup: load value from map into DReg (for jhash DNAT).".
+-spec lookup_data(non_neg_integer(), binary(), non_neg_integer()) -> expr().
+lookup_data(SReg, SetName, DReg) ->
+    {lookup, #{sreg => SReg, set => SetName, dreg => DReg}}.
+
 -spec lookup_inv(non_neg_integer(), binary()) -> expr().
 lookup_inv(SReg, SetName) ->
     {lookup, #{sreg => SReg, set => SetName, flags => 1}}.

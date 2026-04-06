@@ -914,6 +914,9 @@ compile_generic_special(reject, #{tcp := Port}) ->
 compile_generic_special(accept, #{tcp := Port, counter := Counter, limit := #{rate := Rate, burst := Burst}}) ->
     {ok, nft_rules:tcp_accept_limited(Port, iolist_to_binary(Counter),
                                        #{rate => Rate, burst => Burst})};
+compile_generic_special(dnat_lb, #{targets := Targets, dport := Port, map_name := MapName})
+  when is_list(Targets), length(Targets) > 0 ->
+    {ok, nft_rules:dnat_lb_rule(Targets, Port, MapName)};
 compile_generic_special(_, _) -> false.
 
 -spec compile_generic_matches(map()) -> list().

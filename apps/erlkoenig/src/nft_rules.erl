@@ -76,6 +76,7 @@ wrap each rule separately:
     masq_rule/0,
     oifname_neq_masq/1,
     dnat_rule/2,
+    dnat_lb_rule/3,
     snat_rule/2,
     tcp_dnat/3,
     %% Per-source-IP rate limiting (meters)
@@ -632,10 +633,41 @@ oifname_neq_masq(IfName) ->
     ].
 
 -doc """
-Destination NAT: forward traffic to an internal IP and port.
-IP is a 4 or 16 byte binary, Port is 0..65535.
-Loads the address and port into registers, then applies DNAT.
+DNAT with source-IP hash loadbalancing (jhash).
+
+For 1 target: degenerates to simple DNAT (no hash).
+For N targets: jhash(ip saddr) mod N → lookup data map → DNAT.
+Same source IP always maps to the same backend (sticky sessions).
+
+Expression chain:
+  1. payload: load ip saddr into REG1 (4 bytes)
+  2. hash: jhash(REG1, len=4, mod=N) → REG1 (result: 0..N-1)
+  3. lookup: REG1 in named data map → REG1 (result: container IP)
+  4. immediate: load port into REG2
+  5. dnat: REG1 (IP) + REG2 (port)
+
+The named data map must be created separately before this rule
+(nft_set:add_data_map + nft_set_elem:add_data_map_elems).
 """.
+-spec dnat_lb_rule([binary()], 0..65535, binary()) -> rule().
+dnat_lb_rule([SingleIp], Port, _MapName) ->
+    %% Degenerate case: 1 target = simple DNAT
+    dnat_rule(SingleIp, Port);
+dnat_lb_rule(Targets, Port, MapName) when length(Targets) > 1 ->
+    N = length(Targets),
+    [
+        %% 1. Load source IP into REG1
+        nft_expr_ir:ip_saddr(?REG1),
+        %% 2. Jenkins hash mod N → REG1 (0..N-1)
+        nft_expr_ir:hash(?REG1, 4, N, ?REG1),
+        %% 3. Lookup hash result in named data map → REG1 (container IP)
+        nft_expr_ir:lookup_data(?REG1, MapName, ?REG1),
+        %% 4. Load port into REG2
+        nft_expr_ir:immediate_data(?REG2, <<Port:16/big>>),
+        %% 5. DNAT to REG1:REG2 (IP:Port)
+        nft_expr_ir:dnat(?REG1, ?REG2, 2)  %% 2 = AF_INET
+    ].
+
 -spec dnat_rule(binary(), 0..65535) -> rule().
 dnat_rule(IP, Port) when byte_size(IP) =:= 4; byte_size(IP) =:= 16 ->
     Family = ip_family(IP),

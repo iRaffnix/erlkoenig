@@ -45,7 +45,7 @@ be unique within a batch.
 Corresponds to libnftnl src/set.c.
 """.
 
--export([add/3, add_meter/3, add_vmap/4, add_concat/3]).
+-export([add/3, add_meter/3, add_vmap/4, add_data_map/4, add_concat/3]).
 
 -export_type([set_opts/0, set_type/0, concat_opts/0]).
 
@@ -184,6 +184,53 @@ add_vmap(Family, Opts, Id, Seq) when is_map(Opts), is_integer(Seq), Seq >= 0 ->
             nfnl_attr:encode_u32(?NFTA_SET_KEY_TYPE, KeyType),
             nfnl_attr:encode_u32(?NFTA_SET_KEY_LEN, KeyLen),
             nfnl_attr:encode_u32(?NFTA_SET_DATA_TYPE, ?NFT_DATA_VERDICT),
+            nfnl_attr:encode_u32(?NFTA_SET_ID, Id)
+        ])
+    ),
+
+    NlFlags = ?NLM_F_REQUEST bor ?NLM_F_ACK bor ?NLM_F_CREATE,
+    nfnl_msg:build_hdr(?NFT_MSG_NEWSET, Family, NlFlags, Seq, Attrs).
+
+-doc """
+Build a NEWSET message for a data map (key → data value).
+
+Unlike verdict maps (key → accept/drop/jump), data maps store
+actual values (e.g., IP addresses) that can be loaded into registers
+for subsequent expressions like DNAT.
+
+Used for jhash loadbalancing: hash result (integer) → container IP.
+
+Example:
+    Msg = nft_set:add_data_map(1, #{
+        table     => <<"erlkoenig">>,
+        name      => <<"__lb_web_nginx">>,
+        key_type  => 0,       %% integer (NFT_TYPE_UNKNOWN works for plain u32)
+        key_len   => 4,       %% u32
+        data_type => ipv4_addr,
+        id        => 3
+    }, 3, Seq).
+""".
+-spec add_data_map(0..255, map(), non_neg_integer(), non_neg_integer()) ->
+    nfnl_msg:nl_msg().
+add_data_map(Family, Opts, Id, Seq) when is_map(Opts), is_integer(Seq), Seq >= 0 ->
+    Table = maps:get(table, Opts),
+    Name = maps:get(name, Opts),
+    KeyType = maps:get(key_type, Opts, 0),
+    KeyLen = maps:get(key_len, Opts, 4),
+    DataType = maps:get(data_type, Opts),
+    {DataTypeVal, DataLen} = type_info(DataType),
+
+    FlagVal = ?NFT_SET_MAP,
+
+    Attrs = iolist_to_binary(
+        lists:flatten([
+            nfnl_attr:encode_str(?NFTA_SET_TABLE, Table),
+            nfnl_attr:encode_str(?NFTA_SET_NAME, Name),
+            nfnl_attr:encode_u32(?NFTA_SET_FLAGS, FlagVal),
+            nfnl_attr:encode_u32(?NFTA_SET_KEY_TYPE, KeyType),
+            nfnl_attr:encode_u32(?NFTA_SET_KEY_LEN, KeyLen),
+            nfnl_attr:encode_u32(?NFTA_SET_DATA_TYPE, DataTypeVal),
+            nfnl_attr:encode_u32(?NFTA_SET_DATA_LEN, DataLen),
             nfnl_attr:encode_u32(?NFTA_SET_ID, Id)
         ])
     ),

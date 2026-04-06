@@ -39,6 +39,7 @@ Corresponds to libnftnl src/set_elem.c.
     add/5, add/6,
     add_elems/5,
     add_vmap_elems/5,
+    add_data_map_elems/5,
     del/5
 ]).
 
@@ -173,6 +174,41 @@ add_vmap_elems(Family, Table, Set, Elements, Seq) ->
             ])
         )
      || {Key, Verdict} <- Elements
+    ]),
+    Attrs = iolist_to_binary([
+        nfnl_attr:encode_str(?NFTA_SET_ELEM_LIST_TABLE, Table),
+        nfnl_attr:encode_str(?NFTA_SET_ELEM_LIST_SET, Set),
+        nfnl_attr:encode_nested(?NFTA_SET_ELEM_LIST_ELEMENTS, ElemList)
+    ]),
+    NlFlags = ?NLM_F_REQUEST bor ?NLM_F_ACK bor ?NLM_F_CREATE,
+    nfnl_msg:build_hdr(?NFT_MSG_NEWSETELEM, Family, NlFlags, Seq, Attrs).
+
+-doc """
+Add elements to a data map (key → data value).
+
+Unlike vmap elements (key → verdict), data map elements store
+raw values (e.g., IP addresses) that can be loaded into registers.
+
+Used for jhash loadbalancing: {<<0:32>> → <<10,0,0,2>>}, ...
+""".
+-spec add_data_map_elems(0..255, binary(), binary(),
+    [{binary(), binary()}], non_neg_integer()) -> nfnl_msg:nl_msg().
+add_data_map_elems(Family, Table, Set, Elements, Seq) ->
+    ElemList = iolist_to_binary([
+        nfnl_attr:encode_nested(
+            ?NFTA_LIST_ELEM,
+            iolist_to_binary([
+                nfnl_attr:encode_nested(
+                    ?NFTA_SET_ELEM_KEY,
+                    nfnl_attr:encode(?NFTA_DATA_VALUE, Key)
+                ),
+                nfnl_attr:encode_nested(
+                    ?NFTA_SET_ELEM_DATA,
+                    nfnl_attr:encode(?NFTA_DATA_VALUE, Value)
+                )
+            ])
+        )
+     || {Key, Value} <- Elements
     ]),
     Attrs = iolist_to_binary([
         nfnl_attr:encode_str(?NFTA_SET_ELEM_LIST_TABLE, Table),

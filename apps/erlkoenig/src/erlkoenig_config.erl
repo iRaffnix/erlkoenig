@@ -758,22 +758,26 @@ compile_nft_chain_split(Family, Table, #{name := Name, rules := Rules} = Chain,
             }, S) end]
     end,
 
-    %% Compile rules
-    RuleMsgs = lists:flatmap(fun({Action, Opts}) ->
+    %% Compile rules — collect Map messages for dnat_lb rules
+    {RuleMsgs, MapMsgs} = lists:foldl(fun({Action, Opts}, {RAcc, MAcc}) ->
         ExpandedRules = expand_nft_rule(Action, Opts, VethMap, ReplicaIpMap),
-        lists:filtermap(fun(Rule) ->
+        {NewRules, NewMaps} = lists:foldl(fun(Rule, {RA, MA}) ->
             try
-                Compiled = erlkoenig_firewall_nft:compile_rule(Rule),
-                {true, nft_encode:rule_fun(Family, Table, ChainBin, Compiled)}
+                %% For dnat_lb: create data map before rule
+                {Rule2, ExtraMaps} = maybe_create_lb_map(Rule, Family, Table),
+                Compiled = erlkoenig_firewall_nft:compile_rule(Rule2),
+                RuleMsg = nft_encode:rule_fun(Family, Table, ChainBin, Compiled),
+                {[RuleMsg | RA], ExtraMaps ++ MA}
             catch C:Err ->
                 logger:warning("erlkoenig_config: nft rule compile error: ~p:~p for ~p",
                                [C, Err, Rule]),
-                false
+                {RA, MA}
             end
-        end, ExpandedRules)
-    end, Rules),
+        end, {RAcc, MAcc}, ExpandedRules),
+        {NewRules, NewMaps}
+    end, {[], []}, Rules),
 
-    {ChainMsg, RuleMsgs}.
+    {ChainMsg, lists:reverse(MapMsgs) ++ lists:reverse(RuleMsgs)}.
 
 %% Expand a single nft rule, resolving {:veth_of,...} and {:replica_ips,...}.
 %% Returns a list of rules (one per replica IP when expanded).
@@ -797,6 +801,30 @@ expand_nft_rule(jump, #{to := Target} = Opts, VethMap, _ReplicaIpMap) ->
         _ ->
             [{rule, jump, #{chain => TargetBin}}]
     end;
+
+%% dnat_lb: collect ALL replica IPs into one rule (not expanded to N rules)
+expand_nft_rule(dnat_lb, Opts, VethMap, ReplicaIpMap) ->
+    Port = maps:get(port, Opts, 0),
+    Targets = case maps:get(targets, Opts, undefined) of
+        {replica_ips, Pod, Ct} ->
+            IpList = maps:get({Pod, Ct}, ReplicaIpMap, []),
+            [erlkoenig_firewall_nft:ensure_ip_binary(Ip) || Ip <- IpList];
+        _ -> []
+    end,
+    BaseOpts = maps:fold(fun
+        (iifname, {veth_of, P, C}, Acc) ->
+            case maps:find({P, C}, VethMap) of
+                {ok, Veth} -> Acc#{iif => Veth};
+                error -> Acc
+            end;
+        (iifname, V, Acc) -> Acc#{iif => iolist_to_binary(V)};
+        (tcp_dport, P, Acc) -> Acc#{tcp => P};
+        (counter, N, Acc) -> Acc#{counter => iolist_to_binary(N)};
+        (targets, _, Acc) -> Acc;
+        (port, _, Acc) -> Acc;
+        (K, V, Acc) -> Acc#{K => V}
+    end, #{}, Opts),
+    [{rule, dnat_lb, BaseOpts#{targets => Targets, dport => Port}}];
 
 expand_nft_rule(Action, Opts, VethMap, ReplicaIpMap) ->
     %% Resolve all {:veth_of,...} and {:replica_ips,...} in opts
@@ -1380,6 +1408,43 @@ wait_for_ips_loop(Remaining, IpMap, Deadline) ->
                     wait_for_ips_loop(Still, NewIps, Deadline)
             end
     end.
+
+%% For dnat_lb rules: create a named data map and inject map_name into rule opts.
+%% Returns {UpdatedRule, [MapMessages]}.
+-spec maybe_create_lb_map(term(), non_neg_integer(), binary()) ->
+    {term(), [fun()]}.
+maybe_create_lb_map({rule, dnat_lb, #{targets := Targets, dport := Port} = Opts}, Family, Table)
+  when is_list(Targets), length(Targets) > 1 ->
+    %% Generate deterministic map name from rule opts
+    MapName = <<"__lb_", (integer_to_binary(erlang:phash2({Targets, Port})))/binary>>,
+    MapId = erlang:phash2(MapName) band 16#FFFF,
+
+    %% 1. Create the data map: integer → ipv4_addr
+    CreateMap = fun(S) ->
+        nft_set:add_data_map(Family, #{
+            table => Table,
+            name => MapName,
+            key_type => 0,     %% integer
+            key_len => 4,      %% u32
+            data_type => ipv4_addr
+        }, MapId, S)
+    end,
+
+    %% 2. Add elements: {<<0:32>> → IP1, <<1:32>> → IP2, ...}
+    Elements = lists:zip(
+        [<<Idx:32/big>> || Idx <- lists:seq(0, length(Targets) - 1)],
+        Targets
+    ),
+    AddElems = fun(S) ->
+        nft_set_elem:add_data_map_elems(Family, Table, MapName, Elements, S)
+    end,
+
+    %% 3. Inject map_name into the rule opts
+    Rule2 = {rule, dnat_lb, Opts#{map_name => MapName}},
+    {Rule2, [CreateMap, AddElems]};
+
+maybe_create_lb_map(Rule, _Family, _Table) ->
+    {Rule, []}.
 
 -spec force_stop_zone_containers(atom()) -> ok.
 force_stop_zone_containers(ZoneName) ->

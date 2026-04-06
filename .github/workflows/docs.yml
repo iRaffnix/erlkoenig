@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'dsl/lib/**'
+      - 'dsl/guides/**'
       - 'dsl/mix.exs'
       - '.github/workflows/docs.yml'
   workflow_dispatch:

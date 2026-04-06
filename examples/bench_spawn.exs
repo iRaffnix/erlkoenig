@@ -32,7 +32,7 @@ defmodule BenchSpawn do
     bridge "bench", subnet: {10, 99, 0, 0, 24}
   end
 
-  pod "w" do
+  pod "w", strategy: :one_for_one do
     container "c",
       binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
       args: ["9000"],

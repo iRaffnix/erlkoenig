@@ -47,12 +47,14 @@ defmodule ThreeTierNft do
   #
   # Monitoring über AMQP (erlkoenig.events exchange):
   #
-  #   nft.counter.forward_drop       — Drops in der Forward-Chain (rate)
-  #   nft.counter.web_nginx_drop     — Illegale Egress-Versuche vom Nginx
-  #   nft.counter.app_api_drop       — Illegale Egress-Versuche von der API
-  #   nft.counter.data_postgres_drop — Illegale Egress-Versuche von der DB
-  #   nft.drop.zone_erlkoenig        — NFLOG mit Paket-Details bei Drops
-  #   nft.ct.new / nft.ct.destroy    — Conntrack (neue/beendete Verbindungen)
+  #   firewall.forward.drop            — Drops in der Forward-Chain (rate)
+  #   firewall.from-web-nginx.drop    — Illegale Egress-Versuche vom Nginx
+  #   firewall.from-app-api.drop      — Illegale Egress-Versuche von der API
+  #   firewall.from-data-postgres.drop — Illegale Egress-Versuche von der DB
+  #   firewall.forward.packet         — NFLOG mit Paket-Details bei Drops
+  #   conntrack.flow.new / .destroy   — Conntrack (neue/beendete Verbindungen)
+  #   stats.web-0-nginx.memory        — cgroup Memory Stats (alle 2s)
+  #   stats.data-0-postgres.pressure  — PSI Pressure (alle 30s)
   #
   # Testen:
   #

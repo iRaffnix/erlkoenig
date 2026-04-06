@@ -51,13 +51,15 @@ defmodule Erlkoenig.Pod.Builder do
 
   @valid_strategies [:one_for_one, :one_for_all, :rest_for_one]
   @valid_metrics [:memory, :cpu, :pids, :pressure, :oom_events]
+  @valid_channels [:stdout, :stderr]
   @min_interval 1000
 
   defstruct name: nil,
             strategy: :one_for_one,
             containers: [],
             current_ct: nil,
-            current_publish: nil
+            current_publish: nil,
+            current_stream: nil
 
   def new(name, opts \\ []) when is_binary(name) do
     strategy = Keyword.get(opts, :strategy, :one_for_one)
@@ -84,13 +86,15 @@ defmodule Erlkoenig.Pod.Builder do
       gid: opts[:gid] || 65534,
       args: opts[:args] || [],
       caps: opts[:caps] || [],
-      publish: []
+      publish: [],
+      stream: nil
     }
     %{pod | current_ct: ct}
   end
 
   def end_container(%__MODULE__{current_ct: ct, containers: cts} = pod) do
-    %{pod | containers: cts ++ [ct], current_ct: nil, current_publish: nil}
+    %{pod | containers: cts ++ [ct], current_ct: nil, current_publish: nil,
+            current_stream: nil}
   end
 
   # --- Publish block lifecycle ---
@@ -135,6 +139,65 @@ defmodule Erlkoenig.Pod.Builder do
     end
     ct = %{ct | publish: ct.publish ++ [pub]}
     %{pod | current_ct: ct, current_publish: nil}
+  end
+
+  # --- Stream block lifecycle (SPEC-EK-011) ---
+
+  def begin_stream(%__MODULE__{current_ct: nil}, _opts) do
+    raise CompileError,
+      description: "stream must be inside a container block"
+  end
+
+  def begin_stream(%__MODULE__{current_ct: %{stream: existing}}, _opts) when existing != nil do
+    raise CompileError,
+      description: "only one stream block per container allowed"
+  end
+
+  def begin_stream(%__MODULE__{} = pod, opts) do
+    retention_days = case Keyword.get(opts, :retention) do
+      nil -> 7
+      {n, :days} when is_integer(n) and n > 0 -> n
+      other ->
+        raise CompileError,
+          description: "stream retention must be {N, :days}, got: #{inspect(other)}"
+    end
+    max_bytes = case Keyword.get(opts, :max_bytes) do
+      nil -> nil
+      {n, :gb} when is_number(n) and n > 0 -> trunc(n * 1_073_741_824)
+      {n, :mb} when is_number(n) and n > 0 -> trunc(n * 1_048_576)
+      other ->
+        raise CompileError,
+          description: "stream max_bytes must be {N, :gb} or {N, :mb}, got: #{inspect(other)}"
+    end
+    %{pod | current_stream: %{channels: [], retention_days: retention_days, max_bytes: max_bytes}}
+  end
+
+  def add_channel(%__MODULE__{current_stream: nil}, _channel) do
+    raise CompileError,
+      description: "channel must be inside a stream block"
+  end
+
+  def add_channel(%__MODULE__{current_stream: stream} = pod, channel) when is_atom(channel) do
+    unless channel in @valid_channels do
+      raise CompileError,
+        description: "unknown channel #{inspect(channel)}. Allowed: #{inspect(@valid_channels)}"
+    end
+    if channel in stream.channels do
+      raise CompileError,
+        description: "duplicate channel #{inspect(channel)} in stream block"
+    end
+    %{pod | current_stream: %{stream | channels: stream.channels ++ [channel]}}
+  end
+
+  def end_stream(%__MODULE__{current_stream: nil} = pod), do: pod
+
+  def end_stream(%__MODULE__{current_stream: stream, current_ct: ct} = pod) do
+    if stream.channels == [] do
+      raise CompileError,
+        description: "stream block must contain at least one channel"
+    end
+    ct = %{ct | stream: stream}
+    %{pod | current_ct: ct, current_stream: nil}
   end
 
   # --- Validation ---
@@ -186,6 +249,14 @@ defmodule Erlkoenig.Pod.Builder do
           %{interval: pub.interval, metrics: pub.metrics}
         end)
         Map.put(ct_term, :publish, publish_term)
+      else
+        ct_term
+      end
+
+      ct_term = if ct[:stream] != nil do
+        stream_term = %{channels: ct.stream.channels, retention_days: ct.stream.retention_days}
+        stream_term = if ct.stream.max_bytes, do: Map.put(stream_term, :max_bytes, ct.stream.max_bytes), else: stream_term
+        Map.put(ct_term, :stream, stream_term)
       else
         ct_term
       end

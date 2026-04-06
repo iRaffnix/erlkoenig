@@ -555,4 +555,175 @@ defmodule StackTest do
     assert nginx.publish == [%{interval: 2000, metrics: [:memory]}]
     refute Map.has_key?(worker, :publish)
   end
+
+  # ═══════════════════════════════════════════════════════════
+  # stream block tests (SPEC-EK-011)
+  # ═══════════════════════════════════════════════════════════
+
+  test "stream block with both channels" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestStack.StreamBoth do
+      use Erlkoenig.Stack
+      pod "web", strategy: :one_for_one do
+        container "api", binary: "/opt/api" do
+          stream retention: {90, :days} do
+            channel :stdout
+            channel :stderr
+          end
+        end
+      end
+    end
+    """)
+
+    pod = hd(mod.config().pods)
+    ct = hd(pod.containers)
+    assert ct.stream == %{channels: [:stdout, :stderr], retention_days: 90}
+  end
+
+  test "stream block stderr only with max_bytes" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestStack.StreamStderr do
+      use Erlkoenig.Stack
+      pod "web", strategy: :one_for_one do
+        container "api", binary: "/opt/api" do
+          stream retention: {30, :days}, max_bytes: {5, :gb} do
+            channel :stderr
+          end
+        end
+      end
+    end
+    """)
+
+    ct = hd(hd(mod.config().pods).containers)
+    assert ct.stream.channels == [:stderr]
+    assert ct.stream.retention_days == 30
+    assert ct.stream.max_bytes == 5_368_709_120
+  end
+
+  test "stream block default retention 7 days" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestStack.StreamDefault do
+      use Erlkoenig.Stack
+      pod "web", strategy: :one_for_one do
+        container "api", binary: "/opt/api" do
+          stream do
+            channel :stdout
+          end
+        end
+      end
+    end
+    """)
+
+    ct = hd(hd(mod.config().pods).containers)
+    assert ct.stream.retention_days == 7
+    assert ct.stream.channels == [:stdout]
+  end
+
+  test "container without stream has no stream key" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestStack.NoStream do
+      use Erlkoenig.Stack
+      pod "web", strategy: :one_for_one do
+        container "api", binary: "/opt/api"
+      end
+    end
+    """)
+
+    ct = hd(hd(mod.config().pods).containers)
+    refute Map.has_key?(ct, :stream)
+  end
+
+  test "stream with unknown channel raises" do
+    assert_raise CompileError, ~r/unknown channel.*:stdin/, fn ->
+      Code.compile_string(~S"""
+      defmodule TestStack.StreamBadChannel do
+        use Erlkoenig.Stack
+        pod "web", strategy: :one_for_one do
+          container "api", binary: "/opt/api" do
+            stream do
+              channel :stdin
+            end
+          end
+        end
+      end
+      """)
+    end
+  end
+
+  test "stream with duplicate channel raises" do
+    assert_raise CompileError, ~r/duplicate channel.*:stderr/, fn ->
+      Code.compile_string(~S"""
+      defmodule TestStack.StreamDupChannel do
+        use Erlkoenig.Stack
+        pod "web", strategy: :one_for_one do
+          container "api", binary: "/opt/api" do
+            stream do
+              channel :stderr
+              channel :stderr
+            end
+          end
+        end
+      end
+      """)
+    end
+  end
+
+  test "stream with empty block raises" do
+    assert_raise CompileError, ~r/at least one channel/, fn ->
+      Code.compile_string(~S"""
+      defmodule TestStack.StreamEmpty do
+        use Erlkoenig.Stack
+        pod "web", strategy: :one_for_one do
+          container "api", binary: "/opt/api" do
+            stream do
+            end
+          end
+        end
+      end
+      """)
+    end
+  end
+
+  test "two stream blocks per container raises" do
+    assert_raise CompileError, ~r/only one stream block/, fn ->
+      Code.compile_string(~S"""
+      defmodule TestStack.StreamDouble do
+        use Erlkoenig.Stack
+        pod "web", strategy: :one_for_one do
+          container "api", binary: "/opt/api" do
+            stream do
+              channel :stdout
+            end
+            stream do
+              channel :stderr
+            end
+          end
+        end
+      end
+      """)
+    end
+  end
+
+  test "stream with publish in same container" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestStack.StreamAndPublish do
+      use Erlkoenig.Stack
+      pod "web", strategy: :one_for_one do
+        container "api", binary: "/opt/api" do
+          publish interval: 2000 do
+            metric :memory
+          end
+          stream retention: {90, :days} do
+            channel :stdout
+            channel :stderr
+          end
+        end
+      end
+    end
+    """)
+
+    ct = hd(hd(mod.config().pods).containers)
+    assert ct.publish == [%{interval: 2000, metrics: [:memory]}]
+    assert ct.stream == %{channels: [:stdout, :stderr], retention_days: 90}
+  end
 end

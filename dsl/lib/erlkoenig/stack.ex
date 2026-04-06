@@ -499,6 +499,76 @@ defmodule Erlkoenig.Stack do
   end
 
   # ═══════════════════════════════════════════════════════════
+  # stream — container log streaming (SPEC-EK-011)
+  # ═══════════════════════════════════════════════════════════
+
+  @doc """
+  Configure log streaming for a container via RabbitMQ Streams.
+
+  stdout and stderr land in a single append-only RabbitMQ Stream per
+  container. Retention is a stream-level property — both channels
+  share the same retention.
+
+  ## Options
+
+  | Option | Type | Default | Description |
+  |--------|------|---------|-------------|
+  | `retention:` | `{integer, :days}` | `{7, :days}` | How long data stays in the stream |
+  | `max_bytes:` | `{number, :gb \\| :mb}` | unlimited | Optional size cap |
+
+  ## Contains
+
+  - `channel :stdout` — stream container stdout
+  - `channel :stderr` — stream container stderr
+
+  Without a `stream` block, no log streaming occurs (like today).
+
+  ## Examples
+
+      # Stream both channels, 90 day retention
+      stream retention: {90, :days} do
+        channel :stdout
+        channel :stderr
+      end
+
+      # stderr only, with size cap
+      stream retention: {30, :days}, max_bytes: {5, :gb} do
+        channel :stderr
+      end
+  """
+  defmacro stream(do: block) do
+    quote do
+      var!(ek_pod_builder) = Erlkoenig.Pod.Builder.begin_stream(
+        var!(ek_pod_builder), [])
+      unquote(block)
+      var!(ek_pod_builder) = Erlkoenig.Pod.Builder.end_stream(
+        var!(ek_pod_builder))
+    end
+  end
+
+  defmacro stream(opts, do: block) do
+    quote do
+      var!(ek_pod_builder) = Erlkoenig.Pod.Builder.begin_stream(
+        var!(ek_pod_builder), unquote(opts))
+      unquote(block)
+      var!(ek_pod_builder) = Erlkoenig.Pod.Builder.end_stream(
+        var!(ek_pod_builder))
+    end
+  end
+
+  @doc """
+  Select a channel for log streaming. Must be inside a `stream` block.
+
+  Available channels: `:stdout`, `:stderr`.
+  """
+  defmacro channel(name) do
+    quote do
+      var!(ek_pod_builder) = Erlkoenig.Pod.Builder.add_channel(
+        var!(ek_pod_builder), unquote(name))
+    end
+  end
+
+  # ═══════════════════════════════════════════════════════════
   # attach — connect pod to bridge
   # ═══════════════════════════════════════════════════════════
 

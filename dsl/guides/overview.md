@@ -79,22 +79,27 @@ defmodule MyStack do
     bridge "net", subnet: {10, 0, 0, 0, 24}
   end
 
-  pod "app", strategy: :one_for_one do
-    container "web",
-      binary: "/opt/myapp",
-      args: ["--port", "8080"],
+  # Two tightly coupled containers — if one crashes, both restart
+  pod "backend", strategy: :one_for_all do
+    container "api",
+      binary: "/opt/api",
+      args: ["--port", "4000"],
       limits: %{memory: 536_870_912, pids: 100},
-      restart: {:on_failure, 5} do
+      restart: :always do
 
       publish interval: 2000 do
         metric :memory
         metric :cpu
-        metric :pids
       end
     end
+
+    container "cache",
+      binary: "/opt/cache",
+      args: ["6379"],
+      restart: :always
   end
 
-  attach "app", to: "net", replicas: 3
+  attach "backend", to: "net", replicas: 2
 end
 ```
 

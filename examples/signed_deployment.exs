@@ -52,9 +52,12 @@ defmodule SignedDeployment do
     bridge "secure", subnet: {10, 0, 0, 0, 24}, uplink: "eth0"
 
     nft_table :inet, "host" do
+      nft_set "ban", :ipv4_addr
+
       base_chain "input", hook: :input, type: :filter,
         priority: :filter, policy: :drop do
 
+        nft_rule :drop, set: "ban"
         nft_rule :accept, ct_state: [:established, :related]
         nft_rule :accept, iifname: "lo"
         nft_rule :accept, tcp_dport: 22
@@ -62,11 +65,14 @@ defmodule SignedDeployment do
     end
 
     nft_table :inet, "erlkoenig" do
+      nft_set "ban", :ipv4_addr
       nft_counter "forward_drop"
       nft_counter "api_drop"
 
       base_chain "forward", hook: :forward, type: :filter,
         priority: :filter, policy: :drop do
+
+        nft_rule :drop, set: "ban"
 
         nft_rule :accept, ct_state: [:established, :related]
         nft_rule :jump, iifname: {:veth_of, "api", "server"}, to: "from-api"

@@ -85,9 +85,16 @@ defmodule ThreeTierNft do
     # Nur SSH und established Traffic erlaubt.
 
     nft_table :inet, "host" do
+      # Ban-Set: gebannte IPs werden VOR connection tracking
+      # gedroppt — null Kernel-State, kein conntrack Entry.
+      nft_set "ban", :ipv4_addr
+
       base_chain "input",
         hook: :input, type: :filter,
         priority: :filter, policy: :drop do
+
+        # Gebannte IPs sofort droppen (vor ct)
+        nft_rule :drop, set: "ban"
 
         # Antworten auf Verbindungen die der Host initiiert hat
         nft_rule :accept, ct_state: [:established, :related]
@@ -119,6 +126,10 @@ defmodule ThreeTierNft do
 
     nft_table :inet, "erlkoenig" do
 
+      # Ban-Set auch im Forward-Path — gebannte IPs können
+      # weder Container erreichen noch von Containern erreicht werden.
+      nft_set "ban", :ipv4_addr
+
       # Named Counters — Table-Level Objekte.
       # Werden in Regeln referenziert via counter: "name".
       # erlkoenig_nft_watch pollt sie periodisch und sendet
@@ -134,6 +145,7 @@ defmodule ThreeTierNft do
       # Policy drop: alles was keine Regel matcht wird verworfen.
       #
       # Reihenfolge ist wichtig — nft evaluiert top-to-bottom:
+      #   0. Ban-Set (gebannte IPs vor allem anderen)
       #   1. ct established (Antworten durchlassen)
       #   2. Egress-Jumps (Container-Outbound prüfen)
       #   3. Ingress-Allows (erlaubte Pfade zwischen Tiers)
@@ -142,6 +154,9 @@ defmodule ThreeTierNft do
       base_chain "forward",
         hook: :forward, type: :filter,
         priority: :filter, policy: :drop do
+
+        # Schritt 0: Gebannte IPs sofort droppen.
+        nft_rule :drop, set: "ban"
 
         # Schritt 1: Bestehende Verbindungen durchlassen.
         # Wenn ein TCP-Handshake einmal akzeptiert wurde,

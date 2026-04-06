@@ -26,6 +26,19 @@ defmodule PodSupervision do
 
   host do
     bridge "compute", subnet: {10, 0, 0, 0, 24}
+
+    nft_table :inet, "host" do
+      nft_set "ban", :ipv4_addr
+
+      base_chain "input", hook: :input, type: :filter,
+        priority: :filter, policy: :drop do
+
+        nft_rule :drop, set: "ban"
+        nft_rule :accept, ct_state: [:established, :related]
+        nft_rule :accept, iifname: "lo"
+        nft_rule :accept, tcp_dport: 22
+      end
+    end
   end
 
   # ── :one_for_all — gekoppelte Container ──────────────────

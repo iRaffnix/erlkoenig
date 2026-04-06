@@ -26,6 +26,26 @@ defmodule SimpleEcho do
 
   host do
     bridge "echo", subnet: {10, 0, 0, 0, 24}
+
+    # ── Host-Firewall ──────────────────────────────────────
+    #
+    # nft_set "ban": IP-Adressen die sofort gedroppt werden —
+    # BEVOR connection tracking. Gebannte IPs erzeugen null
+    # Kernel-State (kein conntrack Entry, kein NAT Lookup).
+    # Der Guard füllt das Set automatisch bei Flood/Scan.
+
+    nft_table :inet, "host" do
+      nft_set "ban", :ipv4_addr
+
+      base_chain "input", hook: :input, type: :filter,
+        priority: :filter, policy: :drop do
+
+        nft_rule :drop, set: "ban"
+        nft_rule :accept, ct_state: [:established, :related]
+        nft_rule :accept, iifname: "lo"
+        nft_rule :accept, tcp_dport: 22
+      end
+    end
   end
 
   # ── Container ────────────────────────────────────────────

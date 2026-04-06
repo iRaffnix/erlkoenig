@@ -668,7 +668,7 @@ defmodule NftDslTest do
     # erlkoenig table
     ek_table = Enum.find(config.nft_tables, & &1.name == "erlkoenig")
     assert length(ek_table.counters) == 4
-    assert length(ek_table.chains) == 5  # forward + 3 egress + postrouting
+    assert length(ek_table.chains) == 6  # prerouting_nat + 3 egress + forward + postrouting
 
     # forward chain has jump rules
     fwd = Enum.find(ek_table.chains, & &1.name == "forward")

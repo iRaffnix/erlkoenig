@@ -78,20 +78,27 @@ defmodule SignedDeployment do
       nft_counter "forward_drop"
       nft_counter "api_drop"
 
-      # DNAT: Internet → API Container
+      # ── 1. DNAT: priority -100 ──────────────────────
       base_chain "prerouting_nat", hook: :prerouting, type: :nat,
         priority: :dstnat, policy: :accept do
         nft_rule :dnat, iifname: "eth0", tcp_dport: 8443,
           dnat_to: {:replica_ips, "api", "server", 8443}
       end
 
+      # ── 2. Egress-Chain (jump target) ───────────────
+      # API: darf nur antworten — kein aktiver Outbound
+      nft_chain "from-api" do
+        nft_rule :accept, ct_state: [:established, :related]
+        nft_rule :drop, counter: "api_drop"
+      end
+
+      # ── 3. Forward: priority 0 ──────────────────────
       base_chain "forward", hook: :forward, type: :filter,
         priority: :filter, policy: :drop do
 
         nft_rule :accept, ct_state: [:established, :related]
         nft_rule :jump, iifname: {:veth_of, "api", "server"}, to: "from-api"
 
-        # Internet → API: nach DNAT hat das Paket die Container-IP als Ziel
         nft_rule :accept,
           iifname: "eth0",
           ip_daddr: {:replica_ips, "api", "server"},
@@ -100,15 +107,9 @@ defmodule SignedDeployment do
         nft_rule :drop, log_prefix: "FWD: ", counter: "forward_drop"
       end
 
-      # API: darf nur antworten
-      nft_chain "from-api" do
-        nft_rule :accept, ct_state: [:established, :related]
-        nft_rule :drop, counter: "api_drop"
-      end
-
+      # ── 4. Masquerade: priority +100 ────────────────
       base_chain "postrouting", hook: :postrouting, type: :nat,
         priority: :srcnat, policy: :accept do
-
         nft_rule :masquerade, ip_saddr: {10, 0, 0, 0, 24}, oifname_ne: "secure"
       end
     end

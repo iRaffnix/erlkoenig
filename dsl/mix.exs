@@ -7,7 +7,6 @@ defmodule Erlkoenig.DSL.MixProject do
       version: "0.5.0",
       elixir: "~> 1.18",
       deps: deps(),
-      escript: escript(),
       name: "Erlkoenig DSL",
       source_url: "https://github.com/iRaffnix/erlkoenig",
       docs: [
@@ -30,14 +29,6 @@ defmodule Erlkoenig.DSL.MixProject do
           "Builders": [Erlkoenig.Pod.Builder, Erlkoenig.Nft.TableBuilder, Erlkoenig.Nft.ChainBuilder]
         ]
       ]
-    ]
-  end
-
-  defp escript do
-    [
-      main_module: Erlkoenig.CLI,
-      name: "erlkoenig",
-      embed_elixir: true
     ]
   end
 

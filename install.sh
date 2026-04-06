@@ -242,12 +242,6 @@ if [ -n "$LOCAL_DIR" ]; then
     cp "$TARBALL" "$TMPDIR/erlkoenig-release.tar.gz"
     cp "$RT_BIN" "$TMPDIR/erlkoenig_rt"
 
-    # Optional: DSL escript
-    DSL_BIN=$(find "$LOCAL_DIR" -name 'erlkoenig-dsl' -o -name 'erlkoenig-dsl-linux-amd64' | head -1)
-    if [ -n "$DSL_BIN" ]; then
-        cp "$DSL_BIN" "$TMPDIR/erlkoenig-dsl"
-    fi
-
     # Optional: demo binaries
     DEMO_TAR=$(find "$LOCAL_DIR" -name 'static-demo-binaries-*.tar.gz' | head -1)
     if [ -n "$DEMO_TAR" ]; then
@@ -288,10 +282,6 @@ else
         fi
         exit 1
     fi
-
-    # Optional: DSL escript
-    curl -fsSL "https://github.com/${REPO}/releases/download/${VERSION}/erlkoenig-dsl-${TARGET}" \
-        -o "$TMPDIR/erlkoenig-dsl" 2>/dev/null || true
 
     # Optional: demo binaries
     curl -fsSL "https://github.com/${REPO}/releases/download/${VERSION}/static-demo-binaries-linux-amd64.tar.gz" \
@@ -359,8 +349,7 @@ if [ -n "$REL_VSN" ]; then
         base=$(basename "$f")
         case "$base" in
             erlkoenig-"$REL_VSN") ;; # keep current
-            erlkoenig-dsl)         ;; # keep DSL
-            erlkoenig-dsl-*)       ;; # keep DSL variants
+            erlkoenig-dsl*)        ;; # keep if present
             erlkoenig-*)
                 info "Removing stale script: $base"
                 rm -f "$f"
@@ -376,13 +365,6 @@ install -m 755 "$TMPDIR/erlkoenig_rt" "$RT_DIR/erlkoenig_rt"
 chown root:root "$RT_DIR/erlkoenig_rt"
 
 ok "C runtime: $RT_DIR/erlkoenig_rt ($(wc -c < "$RT_DIR/erlkoenig_rt") bytes)"
-
-# ── Install DSL escript (optional) ───────────────────────
-
-if [ -f "$TMPDIR/erlkoenig-dsl" ] && [ -s "$TMPDIR/erlkoenig-dsl" ]; then
-    install -m 755 "$TMPDIR/erlkoenig-dsl" "$PREFIX/bin/erlkoenig-dsl"
-    ok "DSL compiler installed"
-fi
 
 # ── Install demo binaries (optional) ─────────────────────
 
@@ -419,7 +401,6 @@ fi
 chown -R root:"$SERVICE_USER" "$PREFIX"
 chmod 750 "$PREFIX"
 [ -f "$PREFIX/bin/erlkoenig_run" ] && chmod 755 "$PREFIX/bin/erlkoenig_run"
-[ -f "$PREFIX/bin/erlkoenig-dsl" ] && chmod 755 "$PREFIX/bin/erlkoenig-dsl"
 [ -f "$PREFIX/dist/erlkoenig.service" ] && chmod 644 "$PREFIX/dist/erlkoenig.service"
 
 # RT dir owned by root (C runtime runs with file capabilities)
@@ -446,21 +427,6 @@ if command -v setcap >/dev/null 2>&1; then
 else
     warn "setcap not found — install libcap2-bin and run:"
     warn "  setcap 'cap_sys_admin,...=ep' $RT_DIR/erlkoenig_rt"
-fi
-
-# ── Fix escript shebang to use bundled ERTS ──────────────
-
-ERTS_BIN=$(ls -d "$PREFIX"/erts-*/bin 2>/dev/null | head -1)
-if [ -n "$ERTS_BIN" ] && [ -f "$PREFIX/bin/erlkoenig-dsl" ]; then
-    sed -i "1s|.*|#!${ERTS_BIN}/escript|" "$PREFIX/bin/erlkoenig-dsl"
-    ok "DSL shebang: ${ERTS_BIN}/escript"
-fi
-
-# ── Symlink CLI into PATH ────────────────────────────────
-
-if [ -f "$PREFIX/bin/erlkoenig-dsl" ]; then
-    ln -sf "$PREFIX/bin/erlkoenig-dsl" /usr/local/bin/erlkoenig-dsl
-    ok "CLI symlink: /usr/local/bin/erlkoenig-dsl"
 fi
 
 # ── Systemd unit (symlink from dist/) ────────────────────

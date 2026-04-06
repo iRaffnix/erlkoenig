@@ -13,7 +13,7 @@
 #   make integration  — Integrationstests (braucht sudo)
 #   make release      — OTP Release-Tarball (BEAM + ERTS, ohne C-Runtime)
 #   make dsl          — Elixir-DSL kompilieren
-#   make dsl-escript  — Standalone erlkoenig-dsl Binary (1.4 MB, braucht nur erl)
+#   make docs         — ExDoc Dokumentation generieren
 #   make test-dsl     — Elixir-DSL Tests
 #
 # Install:
@@ -29,7 +29,7 @@
 #   make clean        — Alles aufraeumen
 
 .PHONY: all check rt rt-san erl test test-rt dialyzer integration release \
-        dsl dsl-escript test-dsl go-demos \
+        dsl test-dsl docs go-demos \
         fmt fmt-check xref lint \
         install uninstall fetch-artifacts \
         tag clean clean-rt clean-erl clean-dsl
@@ -130,7 +130,7 @@ dialyzer: erl
 	fi; \
 	echo "Dialyzer: OK"
 
-integration: rt erl dsl-escript
+integration: rt erl
 	@echo ""
 	@echo "==> Integration Tests (braucht sudo)"
 	@echo ""
@@ -146,10 +146,8 @@ integration: rt erl dsl-escript
 dsl:
 	cd dsl && mix deps.get && mix compile
 
-dsl-escript: dsl
-	cd dsl && mix escript.build
-	@echo ""
-	@echo "==> dsl/erlkoenig"
+docs: dsl
+	cd dsl && mix docs
 
 test-dsl:
 	cd dsl && mix test
@@ -161,15 +159,13 @@ test-dsl:
 # C-Runtime ist NICHT enthalten — wird separat via install.sh installiert.
 # Discovery: {rt_path, auto} findet /opt/erlkoenig/rt/erlkoenig_rt
 
-release: erl dsl-escript
+release: erl
 	rebar3 release
 	rebar3 tar
 	@mkdir -p dist
 	cp _build/default/rel/erlkoenig/erlkoenig-*.tar.gz dist/
-	cp dsl/erlkoenig dist/erlkoenig-dsl
 	@echo ""
 	@echo "==> dist/$$(cd dist && ls erlkoenig-*.tar.gz)"
-	@echo "==> dist/erlkoenig-dsl"
 
 # ── Go-Demos (statisch gelinkt) ────────────────────────────────────
 
@@ -204,26 +200,15 @@ install: release rt
 	install -m 755 $(RT_BIN) $(PREFIX)/rt/erlkoenig_rt
 	chown root:root $(PREFIX)/rt/erlkoenig_rt
 	setcap cap_sys_admin,cap_net_admin,cap_sys_chroot,cap_sys_ptrace,cap_setpcap,cap_setuid,cap_setgid,cap_dac_override,cap_bpf,cap_sys_resource+ep $(PREFIX)/rt/erlkoenig_rt
-	@# DSL escript (if built)
-	@[ -f dsl/erlkoenig ] && install -m 755 dsl/erlkoenig $(PREFIX)/bin/erlkoenig-dsl || true
 	@# Ownership: root owns files, service user can read
 	chown -R root:$(SERVICE_USER) $(PREFIX)
 	chmod 750 $(PREFIX)
 	[ -f $(PREFIX)/bin/erlkoenig_run ] && chmod 755 $(PREFIX)/bin/erlkoenig_run || true
-	[ -f $(PREFIX)/bin/erlkoenig-dsl ] && chmod 755 $(PREFIX)/bin/erlkoenig-dsl || true
 	[ -f $(PREFIX)/dist/erlkoenig.service ] && chmod 644 $(PREFIX)/dist/erlkoenig.service || true
 	@# RT dir owned by root (file capabilities)
 	chown -R root:root $(PREFIX)/rt
 	@# Volume dir owned by service user
 	chown $(SERVICE_USER):$(SERVICE_USER) /var/lib/erlkoenig/volumes
-	@# Fix escript shebang to bundled ERTS
-	@ERTS_BIN=$$(ls -d $(PREFIX)/erts-*/bin 2>/dev/null | head -1); \
-	if [ -n "$$ERTS_BIN" ] && [ -f $(PREFIX)/bin/erlkoenig-dsl ]; then \
-		sed -i "1s|.*|#!$$ERTS_BIN/escript|" $(PREFIX)/bin/erlkoenig-dsl; \
-		echo "  DSL shebang: $$ERTS_BIN/escript"; \
-	fi
-	@# CLI symlink
-	@[ -f $(PREFIX)/bin/erlkoenig-dsl ] && ln -sf $(PREFIX)/bin/erlkoenig-dsl /usr/local/bin/erlkoenig-dsl || true
 	@# Systemd symlink
 	@if [ -d /etc/systemd/system ] && [ -f $(PREFIX)/dist/erlkoenig.service ]; then \
 		ln -sf $(PREFIX)/dist/erlkoenig.service /etc/systemd/system/erlkoenig.service; \
@@ -241,7 +226,6 @@ uninstall:
 	-systemctl stop erlkoenig 2>/dev/null || true
 	-systemctl disable erlkoenig 2>/dev/null || true
 	rm -f /etc/systemd/system/erlkoenig.service
-	rm -f /usr/local/bin/erlkoenig-dsl
 	-systemctl daemon-reload 2>/dev/null || true
 	rm -rf $(PREFIX)
 	@echo "Done."

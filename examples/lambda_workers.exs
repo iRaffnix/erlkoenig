@@ -90,20 +90,39 @@ defmodule LambdaWorkers do
     end
   end
 
-  pod "gateway" do
+  pod "gateway", strategy: :one_for_one do
     container "proxy",
       binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
       args: ["8443"],
       limits: %{memory: 268_435_456, pids: 100},
-      restart: :always
+      restart: :always do
+
+      publish interval: 2000 do
+        metric :memory
+        metric :cpu
+        metric :pids
+      end
+    end
   end
 
-  pod "worker" do
+  pod "worker", strategy: :one_for_one do
     container "fn",
       binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
       args: ["9000"],
       limits: %{memory: 134_217_728, pids: 50},
-      restart: {:on_failure, 3}
+      restart: {:on_failure, 3} do
+
+      publish interval: 2000 do
+        metric :memory
+        metric :cpu
+        metric :pids
+      end
+
+      publish interval: 10_000 do
+        metric :pressure
+        metric :oom_events
+      end
+    end
   end
 
   attach "gateway", to: "edge",    replicas: 1

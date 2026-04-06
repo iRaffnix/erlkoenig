@@ -259,22 +259,52 @@ defmodule ThreeTierNft do
   # Keine Firewall — die steht oben im nft_table Block.
   # Das ist der Kernunterschied zur alten DSL.
 
-  pod "web" do
+  pod "web", strategy: :one_for_one do
     container "nginx",
       binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
-      args: ["8443"]
+      args: ["8443"] do
+
+      publish interval: 2000 do
+        metric :memory
+        metric :cpu
+        metric :pids
+      end
+
+      publish interval: 10_000 do
+        metric :pressure
+        metric :oom_events
+      end
+    end
   end
 
-  pod "app" do
+  pod "app", strategy: :one_for_one do
     container "api",
       binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
-      args: ["4000"]
+      args: ["4000"] do
+
+      publish interval: 2000 do
+        metric :memory
+        metric :cpu
+        metric :pids
+      end
+    end
   end
 
-  pod "data" do
+  pod "data", strategy: :one_for_one do
     container "postgres",
       binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
-      args: ["5432"]
+      args: ["5432"] do
+
+      publish interval: 5000 do
+        metric :memory
+        metric :pids
+      end
+
+      publish interval: 30_000 do
+        metric :pressure
+        metric :oom_events
+      end
+    end
   end
 
   # ══════════════════════════════════════════════════════

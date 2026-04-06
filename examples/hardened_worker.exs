@@ -33,14 +33,26 @@ defmodule HardenedWorker do
     end
   end
 
-  pod "worker" do
+  pod "worker", strategy: :one_for_one do
     container "worker",
       binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
       args: ["9090"],
       limits: %{memory: 536_870_912, pids: 100},
       seccomp: :default,
       restart: {:on_failure, 10},
-      health_check: [port: 9090, interval: 15_000, retries: 5]
+      health_check: [port: 9090, interval: 15_000, retries: 5] do
+
+      publish interval: 2000 do
+        metric :memory
+        metric :cpu
+        metric :pids
+      end
+
+      publish interval: 10_000 do
+        metric :pressure
+        metric :oom_events
+      end
+    end
   end
 
   attach "worker", to: "compute", replicas: 1

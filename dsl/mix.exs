@@ -11,7 +11,17 @@ defmodule Erlkoenig.DSL.MixProject do
       name: "Erlkoenig DSL",
       source_url: "https://github.com/iRaffnix/erlkoenig",
       docs: [
-        main: "Erlkoenig.Stack",
+        main: "overview",
+        extras: [
+          "guides/overview.md",
+          "guides/containers.md",
+          "guides/networking.md",
+          "guides/firewall.md",
+          "guides/observability.md"
+        ],
+        groups_for_extras: [
+          "Guides": Path.wildcard("guides/*.md")
+        ],
         groups_for_modules: [
           "DSL": [Erlkoenig.Stack],
           "Builders": [Erlkoenig.Pod.Builder, Erlkoenig.Nft.TableBuilder, Erlkoenig.Nft.ChainBuilder]

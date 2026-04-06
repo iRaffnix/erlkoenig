@@ -122,12 +122,19 @@ defmodule MicroserviceCluster do
     end
   end
 
-  pod "gateway" do
+  pod "gateway", strategy: :one_for_one do
     container "gw",
       binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
       limits: %{memory: 268_435_456},
       restart: :always,
-      health_check: [port: 8080, interval: 5000, retries: 3]
+      health_check: [port: 8080, interval: 5000, retries: 3] do
+
+      publish interval: 2000 do
+        metric :memory
+        metric :cpu
+        metric :pids
+      end
+    end
   end
 
   pod "services", strategy: :rest_for_one do
@@ -136,21 +143,50 @@ defmodule MicroserviceCluster do
       limits: %{memory: 134_217_728, pids: 50},
       seccomp: :default,
       restart: {:on_failure, 5},
-      health_check: [port: 3000, interval: 10_000, retries: 3]
+      health_check: [port: 3000, interval: 10_000, retries: 3] do
+
+      publish interval: 5000 do
+        metric :memory
+        metric :cpu
+      end
+    end
 
     container "api",
       binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
       limits: %{memory: 1_073_741_824, pids: 200},
       seccomp: :default,
       restart: {:on_failure, 5},
-      health_check: [port: 4000, interval: 10_000, retries: 3]
+      health_check: [port: 4000, interval: 10_000, retries: 3] do
+
+      publish interval: 2000 do
+        metric :memory
+        metric :cpu
+        metric :pids
+      end
+
+      publish interval: 10_000 do
+        metric :pressure
+        metric :oom_events
+      end
+    end
 
     container "db",
       binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
       limits: %{memory: 2_147_483_648, pids: 100},
       seccomp: :default,
       restart: :always,
-      health_check: [port: 5432, interval: 5000, retries: 5]
+      health_check: [port: 5432, interval: 5000, retries: 5] do
+
+      publish interval: 5000 do
+        metric :memory
+        metric :pids
+      end
+
+      publish interval: 30_000 do
+        metric :pressure
+        metric :oom_events
+      end
+    end
   end
 
   attach "gateway",  to: "dmz",      replicas: 1

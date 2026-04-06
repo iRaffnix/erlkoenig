@@ -87,18 +87,37 @@ defmodule PodFirewall do
     end
   end
 
-  pod "web" do
+  pod "web", strategy: :one_for_all do
     container "frontend",
       binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
       args: ["8080"],
       limits: %{memory: 256_000_000, pids: 100},
-      restart: :on_failure
+      restart: :on_failure do
+
+      publish interval: 2000 do
+        metric :memory
+        metric :cpu
+        metric :pids
+      end
+    end
 
     container "api",
       binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
       args: ["4000"],
       limits: %{memory: 512_000_000, pids: 200},
-      restart: :on_failure
+      restart: :on_failure do
+
+      publish interval: 2000 do
+        metric :memory
+        metric :cpu
+        metric :pids
+      end
+
+      publish interval: 10_000 do
+        metric :pressure
+        metric :oom_events
+      end
+    end
   end
 
   attach "web", to: "br0", replicas: 1

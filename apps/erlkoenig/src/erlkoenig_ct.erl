@@ -19,15 +19,11 @@
 Container lifecycle as gen_statem.
 
 One gen_statem per container. Manages the C runtime (erlkoenig_rt)
-via Erlang Port (legacy) or Unix Domain Socket (new).
+via Unix Domain Socket at /run/erlkoenig/containers/<id>.sock.
 Drives the SPAWN -> GO -> EXITED sequence, handles kill/stop.
 
-Communication modes:
-  port   - Legacy: stdin/stdout pipe via open_port (default)
-  socket - New: Unix Domain Socket at /run/erlkoenig/containers/<id>.sock
-
 States:
-  creating        -> Port/socket opened, SPAWN sent
+  creating        -> Socket opened, SPAWN sent
   namespace_ready -> Got container PID, ready for network setup
   starting        -> GO sent, waiting for ack
   running         -> Container executing
@@ -86,8 +82,6 @@ States:
     gid           = 0  :: non_neg_integer(),
     ip            :: inet:ip4_address() | undefined,
     zone          = default :: atom(),
-    %% port field removed — socket mode only (no open_port)
-    comm_mode     = socket :: socket,
     sock          :: gen_tcp:socket() | undefined,
     socket_path   :: binary() | undefined,
     os_pid        :: non_neg_integer() | undefined,
@@ -116,7 +110,10 @@ States:
     fuse_mount    = undefined  :: binary() | undefined,
     tmpfs_mounts  = []         :: [map()],
     volumes       = []         :: [map()],
-    pod_supervised = false     :: boolean()
+    pod_supervised = false     :: boolean(),
+    publish       = []         :: [map()],
+    stats_timers  = []         :: [reference()],
+    last_cpu_usec = undefined  :: non_neg_integer() | undefined
 }).
 
 -define(SPAWN_TIMEOUT, application:get_env(erlkoenig, spawn_timeout, 30_000)).
@@ -185,7 +182,6 @@ init({normal, BinaryPath, Opts}) ->
         gid         = maps:get(gid, Opts, 0),
         ip          = maps:get(ip, Opts, undefined),
         zone        = maps:get(zone, Opts, default),
-        comm_mode   = comm_mode(Opts),
         restart     = Restart,
         limits      = maps:get(limits, Opts, #{}),
         seccomp     = seccomp_profile_id(maps:get(seccomp, Opts, none)),
@@ -198,11 +194,12 @@ init({normal, BinaryPath, Opts}) ->
         sig_path    = maps:get(sig_path, Opts, undefined),
         volumes     = maps:get(volumes, Opts, []),
         pod_supervised = maps:get(pod_supervised, Opts, false),
+        publish     = maps:get(publish, Opts, []),
         extra_opts  = maps:without([args, env, uid, gid, ip, restart,
                                     limits, seccomp, caps, output, name,
                                     files, zone, pty, firewall, sig_path,
-                                    signature_required, comm_mode, volumes,
-                                    pod_supervised], Opts)
+                                    signature_required, volumes,
+                                    pod_supervised, publish], Opts)
     },
     {ok, creating, Data};
 
@@ -213,7 +210,6 @@ init({recover, ContainerId, #{socket_path := SocketPath, os_pid := OsPid} = Info
     Data = #ct_data{
         id          = ContainerId,
         binary_path = maps:get(binary_path, Info, <<>>),
-        comm_mode   = socket,
         socket_path = SocketPath,
         os_pid      = OsPid,
         ip          = maps:get(ip, Config, undefined),
@@ -252,17 +248,9 @@ creating(info, do_spawn, Data) ->
     Data2 = resolve_volumes(Data),
     creating_do_spawn(Data2);
 
-%% Port mode: data from port
-creating(info, {_Port, {data, Reply}}, #ct_data{comm_mode = socket,
-                                                handshake = HS} = Data) ->
-    creating_handle_rt_data(Reply, HS, Data);
-creating(info, {tcp, Sock, Reply}, #ct_data{sock = Sock, comm_mode = socket,
+creating(info, {tcp, Sock, Reply}, #ct_data{sock = Sock,
                                              handshake = HS} = Data) ->
     creating_handle_rt_data(Reply, HS, Data);
-
-creating(info, {_Port, {exit_status, Status}}, #ct_data{} = Data) ->
-    {next_state, failed,
-     Data#ct_data{error_reason = {port_died, Status}}};
 
 creating(info, {tcp_closed, Sock}, #ct_data{sock = Sock} = Data) ->
     {next_state, failed,
@@ -278,29 +266,29 @@ creating(state_timeout, spawn_timeout, Data) ->
 creating({call, _From}, _, _Data) ->
     {keep_state_and_data, [postpone]}.
 
-creating_do_spawn(#ct_data{comm_mode = port} = Data) ->
-    RtBin = rt_path(),
-    Port = open_port({spawn_executable, RtBin},
-                     [{packet, 4}, binary, exit_status, use_stdio]),
-    %% Protocol handshake
-    port_command(Port, erlkoenig_proto:encode_handshake()),
-    {keep_state, Data#ct_data{},
-     [{state_timeout, ?SPAWN_TIMEOUT, spawn_timeout}]};
-creating_do_spawn(#ct_data{comm_mode = socket, id = ContainerId} = Data) ->
+creating_do_spawn(#ct_data{id = ContainerId} = Data) ->
     SocketPath = make_socket_path(ContainerId),
     ok = filelib:ensure_dir(binary_to_list(SocketPath)),
+    %% Pre-create the container cgroup so the C runtime starts in it
+    %% instead of the beam cgroup. This prevents erlkoenig_rt processes
+    %% from counting against beam_memory_max.
+    CgroupProcs = case erlkoenig_cgroup:ensure_container_dir(ContainerId) of
+        {ok, ProcsPath} -> ProcsPath;
+        _               -> undefined
+    end,
     %% Start C runtime via setsid in a background Erlang process.
-    %% setsid gives the runtime its own session so it survives
-    %% independently. File capabilities (setcap all=eip) on the
-    %% binary provide full root caps after execve.
-    %% The Erlang process blocks in os:cmd until the runtime exits.
-    %% Monitoring: TCP socket (tcp_closed = runtime dead).
+    %% If cgroup is available, write the shell's PID into the container
+    %% cgroup before exec — so erlkoenig_rt inherits it.
     RtBin = rt_path(),
     SockStr = binary_to_list(SocketPath),
     IdStr = binary_to_list(ContainerId),
+    CgFlag = case CgroupProcs of
+        undefined -> "";
+        CgProcsPath -> " --cgroup " ++ CgProcsPath
+    end,
     ShCmd = lists:flatten(io_lib:format(
-        "exec setsid ~s --socket ~s --id ~s </dev/null 2>/dev/null",
-        [RtBin, SockStr, IdStr])),
+        "exec setsid ~s --socket ~s --id ~s~s </dev/null 2>/dev/null",
+        [RtBin, SockStr, IdStr, CgFlag])),
     erlang:spawn(fun() -> os:cmd(ShCmd) end),
     %% Wait for C runtime to bind the socket, then connect
     case wait_and_connect(SocketPath, 10000) of
@@ -389,9 +377,7 @@ namespace_ready(enter, _OldState, _Data) ->
 namespace_ready(info, do_container_setup, Data) ->
     do_container_setup(Data);
 
-namespace_ready(info, {_Port, {data, Reply}}, #ct_data{ comm_mode = port} = Data) ->
-    namespace_ready_handle_data(Reply, Data);
-namespace_ready(info, {tcp, Sock, Reply}, #ct_data{sock = Sock, comm_mode = socket} = Data) ->
+namespace_ready(info, {tcp, Sock, Reply}, #ct_data{sock = Sock} = Data) ->
     namespace_ready_handle_data(Reply, Data);
 
 namespace_ready({call, From}, go, _Data) ->
@@ -403,10 +389,6 @@ namespace_ready({call, _From}, stop_container, _Data) ->
 
 namespace_ready({call, From}, get_info, Data) ->
     {keep_state_and_data, [{reply, From, build_info(namespace_ready, Data)}]};
-
-namespace_ready(info, {_Port, {exit_status, Status}}, #ct_data{} = Data) ->
-    {next_state, failed,
-     Data#ct_data{error_reason = {port_died, Status}}};
 
 namespace_ready(info, {tcp_closed, Sock}, #ct_data{sock = Sock} = Data) ->
     {next_state, failed,
@@ -431,15 +413,8 @@ namespace_ready_handle_data(Reply, Data) ->
 starting(enter, _OldState, _Data) ->
     {keep_state_and_data, [{state_timeout, ?GO_TIMEOUT, go_timeout}]};
 
-starting(info, {_Port, {data, Reply}}, #ct_data{ comm_mode = port} = Data) ->
+starting(info, {tcp, Sock, Reply}, #ct_data{sock = Sock} = Data) ->
     starting_handle_data(Reply, Data);
-starting(info, {tcp, Sock, Reply}, #ct_data{sock = Sock, comm_mode = socket} = Data) ->
-    starting_handle_data(Reply, Data);
-
-starting(info, {_Port, {exit_status, Status}}, #ct_data{} = Data) ->
-    Data2 = maybe_reply_go_error(Data, {port_died, Status}),
-    {next_state, failed,
-     Data2#ct_data{error_reason = {port_died, Status}}};
 
 starting(info, {tcp_closed, Sock}, #ct_data{sock = Sock} = Data) ->
     Data2 = maybe_reply_go_error(Data, socket_closed),
@@ -469,23 +444,20 @@ running(enter, _OldState, Data) ->
     dns_register(Data),
     dets_register(Data),
     audit_volumes_mounted(Data),
-    {keep_state, Data#ct_data{started_at = erlang:monotonic_time(millisecond)}};
+    Timers = start_stats_timers(Data#ct_data.publish),
+    {keep_state, Data#ct_data{started_at = erlang:monotonic_time(millisecond),
+                              stats_timers = Timers}};
 
-running(info, {_Port, {data, Reply}}, #ct_data{ comm_mode = port} = Data) ->
+running(info, {tcp, Sock, Reply}, #ct_data{sock = Sock} = Data) ->
     running_handle_data(Reply, Data);
-running(info, {tcp, Sock, Reply}, #ct_data{sock = Sock, comm_mode = socket} = Data) ->
-    running_handle_data(Reply, Data);
 
-running(info, {_Port, {exit_status, _Status}}, #ct_data{} = Data) ->
-    {next_state, stopped, Data};
-
-running(info, {tcp_closed, Sock}, #ct_data{sock = Sock, comm_mode = socket} = Data) ->
+running(info, {tcp_closed, Sock}, #ct_data{sock = Sock} = Data) ->
     %% Socket lost but container may still be alive (C runtime survives)
     logger:warning("container ~s: socket closed, entering disconnected state",
                    [Data#ct_data.id]),
     {next_state, disconnected, Data#ct_data{sock = undefined}};
 
-running(info, {tcp_error, Sock, Reason}, #ct_data{sock = Sock, comm_mode = socket} = Data) ->
+running(info, {tcp_error, Sock, Reason}, #ct_data{sock = Sock} = Data) ->
     logger:error("container ~s: socket error ~p, entering disconnected state",
                  [Data#ct_data.id, Reason]),
     {next_state, disconnected, Data#ct_data{sock = undefined}};
@@ -512,6 +484,11 @@ running({call, From}, {resize, _Rows, _Cols}, _Data) ->
 running({call, From}, get_info, Data) ->
     {keep_state_and_data, [{reply, From, build_info(running, Data)}]};
 
+running(info, {poll_stats, Interval, Metrics}, Data) ->
+    Data2 = poll_and_publish_stats(Metrics, Data),
+    _Ref = erlang:send_after(Interval, self(), {poll_stats, Interval, Metrics}),
+    {keep_state, Data2};
+
 running(cast, {send_input, InputData}, Data) ->
     send_to_rt(erlkoenig_proto:encode_cmd_stdin(InputData), Data),
     keep_state_and_data.
@@ -520,17 +497,16 @@ running(cast, {send_input, InputData}, Data) ->
 %% stopping - SIGTERM sent, waiting for exit
 %% =================================================================
 
-stopping(enter, _OldState, _Data) ->
-    {keep_state_and_data, [{state_timeout, ?STOP_TIMEOUT, force_kill}]};
+stopping(enter, _OldState, Data) ->
+    cancel_stats_timers(Data#ct_data.stats_timers),
+    {keep_state, Data#ct_data{stats_timers = []},
+     [{state_timeout, ?STOP_TIMEOUT, force_kill}]};
 
-stopping(info, {_Port, {data, Reply}}, #ct_data{ comm_mode = port} = Data) ->
-    stopping_handle_data(Reply, Data);
-stopping(info, {tcp, Sock, Reply}, #ct_data{sock = Sock, comm_mode = socket} = Data) ->
-    stopping_handle_data(Reply, Data);
+stopping(info, {poll_stats, _, _}, _Data) ->
+    keep_state_and_data;
 
-stopping(info, {_Port, {exit_status, _Status}}, #ct_data{} = Data) ->
-    Data2 = maybe_reply_stop(Data, ok),
-    {next_state, stopped, Data2};
+stopping(info, {tcp, Sock, Reply}, #ct_data{sock = Sock} = Data) ->
+    stopping_handle_data(Reply, Data);
 
 stopping(info, {tcp_closed, Sock}, #ct_data{sock = Sock} = Data) ->
     Data2 = maybe_reply_stop(Data, ok),
@@ -617,6 +593,7 @@ stopping_handle_data(Reply, Data) ->
 
 stopped(enter, _OldState, Data) ->
     pg:leave(erlkoenig_pg, erlkoenig_cts, self()),
+    cancel_stats_timers(Data#ct_data.stats_timers),
     firewall_remove(Data#ct_data.id),
     cleanup_fuse(Data),
 
@@ -626,7 +603,8 @@ stopped(enter, _OldState, Data) ->
     dets_unregister(Data),
     audit_volumes_released(Data),
     notify_stopped(Data),
-    Data2 = Data#ct_data{sock = undefined, fuse_mount = undefined},
+    Data2 = Data#ct_data{sock = undefined, fuse_mount = undefined,
+                         stats_timers = []},
     case Data2#ct_data.pod_supervised of
         true ->
             %% Pod supervisor handles restart — propagate exit reason.
@@ -703,6 +681,7 @@ restarting({call, From}, _, _Data) ->
 
 failed(enter, _OldState, Data) ->
     pg:leave(erlkoenig_pg, erlkoenig_cts, self()),
+    cancel_stats_timers(Data#ct_data.stats_timers),
     firewall_remove(Data#ct_data.id),
     cleanup_fuse(Data),
 
@@ -729,6 +708,9 @@ failed(enter, _OldState, Data) ->
             self() ! check_restart,
             {keep_state, Data2}
     end;
+
+failed(info, {poll_stats, _, _}, _Data) ->
+    keep_state_and_data;
 
 failed(info, check_restart, Data) ->
     handle_check_restart(Data);
@@ -838,11 +820,6 @@ disconnected(state_timeout, try_reconnect, Data) ->
             {keep_state, Data, [{state_timeout, 1000, try_reconnect}]}
     end;
 
-disconnected(info, {_Port, {exit_status, Status}}, #ct_data{} = Data) ->
-    %% C runtime process died while disconnected
-    logger:info("container ~s: C runtime died while disconnected (status ~p)",
-                [Data#ct_data.id, Status]),
-    {next_state, stopped, Data};
 
 disconnected({call, From}, stop_container, Data) ->
     %% Can't send SIGTERM via socket, use kill directly
@@ -859,6 +836,94 @@ disconnected({call, From}, _, _Data) ->
 %% =================================================================
 %% Internal
 %% =================================================================
+
+%% -- Stats timers (SPEC-EK-007) -----------------------------------
+
+-spec start_stats_timers([map()]) -> [reference()].
+start_stats_timers(PublishBlocks) ->
+    lists:map(fun(#{interval := Interval, metrics := Metrics}) ->
+        erlang:send_after(Interval, self(), {poll_stats, Interval, Metrics})
+    end, PublishBlocks).
+
+-spec cancel_stats_timers([reference()]) -> ok.
+cancel_stats_timers(Timers) ->
+    lists:foreach(fun(Ref) -> erlang:cancel_timer(Ref) end, Timers),
+    ok.
+
+-spec poll_and_publish_stats([atom()], #ct_data{}) -> #ct_data{}.
+poll_and_publish_stats(Metrics, #ct_data{id = Id, name = Name} = Data) ->
+    case erlkoenig_cgroup:read_metrics(Id, Metrics) of
+        {ok, Raw} ->
+            publish_each_metric(Metrics, Raw, Id, Name, Data);
+        {error, _} ->
+            Data
+    end.
+
+-spec publish_each_metric([atom()], map(), binary(), binary() | undefined, #ct_data{}) ->
+    #ct_data{}.
+publish_each_metric([], _Raw, _Id, _Name, Data) ->
+    Data;
+publish_each_metric([memory | Rest], Raw, Id, Name, Data) ->
+    Current = maps:get(memory_bytes, Raw, 0),
+    Peak = maps:get(memory_peak, Raw, 0),
+    Max = maps:get(memory_max, Raw, max),
+    Swap = maps:get(memory_swap, Raw, 0),
+    Pct = case Max of
+        max -> 0.0;
+        0   -> 0.0;
+        M   -> Current / M * 100
+    end,
+    erlkoenig_events:notify({container_stats, Id, Name, memory, #{
+        current => Current, peak => Peak, max => Max,
+        pct => round_2(Pct), swap => Swap
+    }}),
+    publish_each_metric(Rest, Raw, Id, Name, Data);
+publish_each_metric([cpu | Rest], Raw, Id, Name, Data) ->
+    Usec = maps:get(cpu_usec, Raw, 0),
+    Throttled = maps:get(cpu_throttled_usec, Raw, 0),
+    NrThrottled = maps:get(cpu_nr_throttled, Raw, 0),
+    DeltaUsec = case Data#ct_data.last_cpu_usec of
+        undefined -> 0;
+        Last      -> Usec - Last
+    end,
+    erlkoenig_events:notify({container_stats, Id, Name, cpu, #{
+        usec => Usec, delta_usec => DeltaUsec,
+        throttled_usec => Throttled, nr_throttled => NrThrottled
+    }}),
+    publish_each_metric(Rest, Raw, Id, Name, Data#ct_data{last_cpu_usec = Usec});
+publish_each_metric([pids | Rest], Raw, Id, Name, Data) ->
+    Current = maps:get(pids_current, Raw, 0),
+    Max = maps:get(pids_max, Raw, max),
+    erlkoenig_events:notify({container_stats, Id, Name, pids, #{
+        current => Current, max => Max
+    }}),
+    publish_each_metric(Rest, Raw, Id, Name, Data);
+publish_each_metric([pressure | Rest], Raw, Id, Name, Data) ->
+    CpuP = maps:get(cpu_pressure, Raw, #{}),
+    MemP = maps:get(memory_pressure, Raw, #{}),
+    IoP = maps:get(io_pressure, Raw, #{}),
+    erlkoenig_events:notify({container_stats, Id, Name, pressure, #{
+        cpu_some_avg10 => maps:get(avg10, CpuP, 0.0),
+        cpu_some_avg60 => maps:get(avg60, CpuP, 0.0),
+        memory_some_avg10 => maps:get(avg10, MemP, 0.0),
+        io_some_avg10 => maps:get(avg10, IoP, 0.0)
+    }}),
+    publish_each_metric(Rest, Raw, Id, Name, Data);
+publish_each_metric([oom_events | Rest], Raw, Id, Name, Data) ->
+    Events = maps:get(memory_events, Raw, #{}),
+    erlkoenig_events:notify({container_stats, Id, Name, oom, #{
+        kills => maps:get(oom_kill, Events, 0),
+        events => maps:get(oom, Events, 0),
+        high => maps:get(high, Events, 0),
+        max => maps:get(max, Events, 0)
+    }}),
+    publish_each_metric(Rest, Raw, Id, Name, Data);
+publish_each_metric([_ | Rest], Raw, Id, Name, Data) ->
+    publish_each_metric(Rest, Raw, Id, Name, Data).
+
+-spec round_2(float()) -> float().
+round_2(F) ->
+    round(F * 100) / 100.
 
 %% -- Output forwarding --------------------------------------------
 
@@ -1097,7 +1162,7 @@ dns_unregister(#ct_data{name = Name, id = Id, zone = Zone}) ->
 -spec dets_register(#ct_data{}) -> ok.
 dets_register(#ct_data{id = Id, os_pid = OsPid, socket_path = SocketPath,
                         ip = Ip, zone = Zone, binary_path = BinaryPath,
-                        comm_mode = CommMode, net_info = NetInfo,
+                        net_info = NetInfo,
                         firewall = Firewall, restart = Restart,
                         limits = Limits, seccomp = Seccomp,
                         caps_keep = CapsKeep, name = Name,
@@ -1143,8 +1208,7 @@ dets_register(#ct_data{id = Id, os_pid = OsPid, socket_path = SocketPath,
                 zone => Zone,
                 binary_path => BinaryPath,
                 config => Config,
-                started_at => erlang:system_time(second),
-                comm_mode => CommMode
+                started_at => erlang:system_time(second)
             },
             try erlkoenig_node_state:register_container(Id, Info)
             catch _:_ -> ok
@@ -1227,19 +1291,13 @@ rt_io_handle(_) ->
 
 -doc "Temporarily toggle socket active mode. No-op for port mode.".
 -spec maybe_set_active(#ct_data{}, boolean()) -> ok.
-maybe_set_active(#ct_data{comm_mode = socket, sock = Sock}, Active)
+maybe_set_active(#ct_data{sock = Sock}, Active)
   when Sock =/= undefined ->
     ok = inet:setopts(Sock, [{active, Active}]);
 maybe_set_active(_, _) ->
     ok.
 
 %% -- Socket helpers -----------------------------------------------
-
--doc "Determine communication mode from opts or application env.".
--spec comm_mode(map()) -> port | socket.
-comm_mode(Opts) ->
-    maps:get(comm_mode, Opts,
-             application:get_env(erlkoenig, comm_mode, port)).
 
 -doc "Get the socket directory from application config.".
 -spec socket_dir() -> binary().
@@ -1452,7 +1510,14 @@ destroy_cgroup(#ct_data{id = Id}) ->
 -spec setup_cgroup(binary(), non_neg_integer(), map()) -> ok | {error, term()}.
 setup_cgroup(Id, OsPid, Limits) ->
     maybe
+        %% cgroup may already exist (pre-created in creating_do_spawn
+        %% so erlkoenig_rt starts in containers/ not beam/).
+        %% create is idempotent — returns ok if already exists.
         ok ?= erlkoenig_cgroup:create(Id),
+        %% Attach the container's PID. If erlkoenig_rt already wrote
+        %% itself via echo $$ > cgroup.procs, this is a no-op (PID
+        %% is already in the right cgroup). But the child PID from
+        %% clone/fork may be different, so always attach.
         ok ?= erlkoenig_cgroup:attach(Id, OsPid),
         case map_size(Limits) =:= 0 of
             true  -> ok;

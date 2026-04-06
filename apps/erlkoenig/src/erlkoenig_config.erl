@@ -158,13 +158,43 @@ apply_config_with_reconciliation(OldConfig, Config) ->
     Images = maps:get(images, Config, #{}),
     Report1 = validate_images(Images, Report),
 
-    %% 2. Create/update zones (bridges before firewall)
+    %% 2. Stop removed containers FIRST (before zone cleanup)
+    AllContainers = flatten_containers(Config),
+    DeclaredNames = [iolist_to_binary(maps:get(name, C)) || C <- AllContainers],
+    RunningNames = container_names_from_old(OldConfig),
+    ToStop = RunningNames -- DeclaredNames,
+    lists:foreach(fun(Name) ->
+        logger:info("erlkoenig_config: stopping removed container ~s", [Name]),
+        stop_by_name(Name)
+    end, ToStop),
+    %% Give containers time to exit and release veths/IPs
+    case ToStop of [] -> ok; _ -> timer:sleep(1000) end,
+
+    %% 3. Reconcile zones: destroy stale zones (bridges), then create new
     Zones = maps:get(zones, Config, []),
+    NewZoneNames = [binary_to_atom(iolist_to_binary(maps:get(name, Z)))
+                    || Z <- Zones],
+    OldZoneNames = try erlkoenig_zone:zones()
+                   catch _:_ -> []
+                   end,
+    StaleZones = [Z || Z <- OldZoneNames, Z =/= default,
+                       not lists:member(Z, NewZoneNames)],
+    lists:foreach(fun(Z) ->
+        logger:info("erlkoenig_config: destroying stale zone ~s", [Z]),
+        case erlkoenig_zone:destroy(Z) of
+            ok -> ok;
+            {error, zone_not_empty} ->
+                %% Force: stop remaining containers in this zone, retry
+                force_stop_zone_containers(Z),
+                timer:sleep(500),
+                erlkoenig_zone:destroy(Z);
+            {error, Reason} ->
+                logger:warning("erlkoenig_config: zone ~s destroy failed: ~p", [Z, Reason])
+        end
+    end, StaleZones),
     Report2 = ensure_zones(Zones, Report1),
 
-    %% 2b. Rebuild nft table with zone-aware bridges
-    %% This ensures masquerade rules reference the correct zone bridges
-    %% instead of the default erlkoenig_br0.
+    %% 3b. Rebuild nft table with zone-aware bridges
     ZoneNftConfigs = [begin
         ZName = iolist_to_binary(maps:get(name, Z, <<"default">>)),
         Bridge = iolist_to_binary(maps:get(bridge, Z,
@@ -178,47 +208,31 @@ apply_config_with_reconciliation(OldConfig, Config) ->
         [] -> ok;
         _ ->
             erlkoenig_firewall_nft:setup_table(ZoneNftConfigs),
-            %% Remove stale default bridge if zone bridges are used.
-            %% The default erlkoenig_br0 may conflict (same subnet).
             _ = os:cmd("ip link delete erlkoenig_br0 2>/dev/null"),
             ok
     end,
 
-    %% 2c. Apply zone network policy (old format only — new format deferred to 6b)
+    %% 3c. Apply zone network policy (old format only — new format deferred to 6b)
     lists:foreach(fun(#{allows := _, bridge := Bridge} = Zone) ->
         BridgeBin = iolist_to_binary(Bridge),
         erlkoenig_firewall_nft:apply_zone_allows(Zone, BridgeBin);
        (_) -> ok
     end, Zones),
 
-    %% 3. Apply host firewall (skipped when nft_tables present — ADR-0015)
+    %% 4. Apply host firewall (skipped when nft_tables present — ADR-0015)
     Report3 = case maps:is_key(nft_tables, Config) of
         true -> Report2#{firewall => nft_tables};
         false -> maybe_apply_firewall(Config, Report2)
     end,
 
-    %% 4. Apply guard
+    %% 5. Apply guard + watches
     maybe_configure_guard(Config),
-
-    %% 5. Apply watches
     Watches = maps:get(watches, Config, maps:get(watch, Config, [])),
     WatchList = if is_list(Watches) -> Watches;
                    is_map(Watches) -> [Watches];
                    true -> []
                 end,
     lists:foreach(fun start_watch/1, WatchList),
-
-    %% 6. Reconcile containers (delta)
-    AllContainers = flatten_containers(Config),
-    DeclaredNames = [iolist_to_binary(maps:get(name, C)) || C <- AllContainers],
-    RunningNames = container_names_from_old(OldConfig),
-
-    %% Stop removed containers
-    ToStop = RunningNames -- DeclaredNames,
-    lists:foreach(fun(Name) ->
-        logger:info("erlkoenig_config: stopping removed container ~s", [Name]),
-        stop_by_name(Name)
-    end, ToStop),
 
     %% Start new containers (not already running)
     %% Group by pod instance for pod-supervised startup
@@ -235,16 +249,9 @@ apply_config_with_reconciliation(OldConfig, Config) ->
     Results = spawn_pods(NewContainers, Pods),
 
     %% 6b. Apply zone chains + pod forward chains (after spawn, need IPs)
-    timer:sleep(1500),
-
-    %% Build IP map from spawned containers: "web-0-nginx" → {10,0,0,2}
-    IpMap = lists:foldl(fun({Name, Pid}, Acc) ->
-        try erlkoenig:inspect(Pid) of
-            #{net_info := #{ip := Ip}} -> Acc#{Name => Ip};
-            _ -> Acc
-        catch _:_ -> Acc
-        end
-    end, #{}, Results),
+    %% Wait for containers to reach running state and have IPs assigned.
+    %% Poll instead of fixed sleep — returns as soon as all IPs are known.
+    IpMap = wait_for_ips(Results, 10_000),
 
     Pods = maps:get(pods, Config, []),
     NftTables = maps:get(nft_tables, Config, []),
@@ -404,10 +411,26 @@ ensure_zones(Zones, Report) ->
             netmask => maps:get(netmask, Zone, 24),
             policy  => maps:get(policy, Zone, allow_outbound)
         },
-        try
-            case erlkoenig_zone:zone_config(ZoneAtom) of
-                _ -> {Name, already_exists}
-            end
+        try erlkoenig_zone:zone_config(ZoneAtom) of
+            OldCfg ->
+                %% Zone exists — check if config changed (subnet/gateway)
+                OldSubnet = maps:get(subnet, OldCfg, undefined),
+                NewSubnet = maps:get(subnet, ZoneConfig),
+                case OldSubnet =:= NewSubnet of
+                    true ->
+                        {Name, already_exists};
+                    false ->
+                        %% Subnet changed — destroy and recreate
+                        logger:info("erlkoenig_config: zone ~s subnet changed ~p -> ~p, recreating",
+                                    [Name, OldSubnet, NewSubnet]),
+                        force_stop_zone_containers(ZoneAtom),
+                        timer:sleep(500),
+                        erlkoenig_zone:destroy(ZoneAtom),
+                        case erlkoenig_zone:create(ZoneAtom, ZoneConfig) of
+                            ok -> {Name, recreated};
+                            {error, R} -> {Name, {error, R}}
+                        end
+                end
         catch
             error:{unknown_zone, _} ->
                 case erlkoenig_zone:create(ZoneAtom, ZoneConfig) of
@@ -1276,7 +1299,7 @@ run_action(Unknown, WatchName, _Counter, _Metric, _Value, _Threshold) ->
 -spec build_spawn_opts(map()) -> map().
 build_spawn_opts(Ct) ->
     Keys = [ip, ports, args, env, firewall, limits, seccomp,
-            restart, name, files, zone, volumes, image_path],
+            restart, name, files, zone, volumes, image_path, publish],
     lists:foldl(fun(K, Acc) -> copy_if(K, Ct, Acc) end, #{}, Keys).
 
 -spec copy_if(atom(), map(), map()) -> map().
@@ -1306,6 +1329,62 @@ stop_by_name(Name) ->
         error ->
             ok
     end.
+
+%% Wait until all spawned containers have IPs assigned (= reached running state).
+%% Returns IP map #{Name => Ip}. Times out after MaxMs.
+-spec wait_for_ips([{binary(), pid()}], non_neg_integer()) -> map().
+wait_for_ips(Results, MaxMs) ->
+    Deadline = erlang:monotonic_time(millisecond) + MaxMs,
+    wait_for_ips_loop(Results, #{}, Deadline).
+
+-spec wait_for_ips_loop([{binary(), pid()}], map(), integer()) -> map().
+wait_for_ips_loop([], IpMap, _Deadline) ->
+    IpMap;
+wait_for_ips_loop(Remaining, IpMap, Deadline) ->
+    Now = erlang:monotonic_time(millisecond),
+    case Now >= Deadline of
+        true ->
+            Names = [N || {N, _} <- Remaining],
+            logger:warning("erlkoenig_config: timeout waiting for IPs: ~p", [Names]),
+            IpMap;
+        false ->
+            {Found, Still} = lists:partition(fun({_Name, Pid}) ->
+                try erlkoenig_ct:get_info(Pid) of
+                    #{net_info := #{ip := _}} -> true;
+                    _ -> false
+                catch _:_ -> false
+                end
+            end, Remaining),
+            NewIps = lists:foldl(fun({Name, Pid}, Acc) ->
+                try erlkoenig_ct:get_info(Pid) of
+                    #{net_info := #{ip := Ip}} -> Acc#{Name => Ip};
+                    _ -> Acc
+                catch _:_ -> Acc
+                end
+            end, IpMap, Found),
+            case Still of
+                [] -> NewIps;
+                _  ->
+                    timer:sleep(25),
+                    wait_for_ips_loop(Still, NewIps, Deadline)
+            end
+    end.
+
+-spec force_stop_zone_containers(atom()) -> ok.
+force_stop_zone_containers(ZoneName) ->
+    Pids = try pg:get_members(erlkoenig_pg, erlkoenig_cts)
+           catch error:_ -> []
+           end,
+    lists:foreach(fun(Pid) ->
+        try erlkoenig_ct:get_info(Pid) of
+            #{zone := Z} when Z =:= ZoneName ->
+                logger:info("erlkoenig_config: force stopping container in stale zone ~s", [ZoneName]),
+                erlkoenig:stop(Pid);
+            _ -> ok
+        catch _:_ -> ok
+        end
+    end, Pids),
+    ok.
 
 -spec find_pid_by_name(binary(), [pid()]) -> {ok, pid()} | error.
 find_pid_by_name(_Name, []) -> error;

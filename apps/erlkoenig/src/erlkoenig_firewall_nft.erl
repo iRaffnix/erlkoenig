@@ -343,8 +343,9 @@ remove_container(ContainerId) ->
     end,
     %% Remove this container from ETS
     ets:delete(erlkoenig_firewall_ports, ContainerId),
-    %% Remaining containers
-    Remaining = ets:tab2list(erlkoenig_firewall_ports),
+    %% Remaining containers (filter out metadata entries like nflog_group_counter)
+    Remaining = [R || R <- ets:tab2list(erlkoenig_firewall_ports),
+                      is_tuple(R), tuple_size(R) =:= 5],
     %% 1. Flush shared chains + container chain, then delete container chain
     FlushMsgs = [
         fun(S) -> nft_delete:flush_chain(?FAMILY, ?TABLE, ?FORWARD_CHAIN, S) end,

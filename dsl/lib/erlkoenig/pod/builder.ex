@@ -50,11 +50,14 @@ defmodule Erlkoenig.Pod.Builder do
   """
 
   @valid_strategies [:one_for_one, :one_for_all, :rest_for_one]
+  @valid_metrics [:memory, :cpu, :pids, :pressure, :oom_events]
+  @min_interval 1000
 
   defstruct name: nil,
             strategy: :one_for_one,
             containers: [],
-            current_ct: nil
+            current_ct: nil,
+            current_publish: nil
 
   def new(name, opts \\ []) when is_binary(name) do
     strategy = Keyword.get(opts, :strategy, :one_for_one)
@@ -80,13 +83,58 @@ defmodule Erlkoenig.Pod.Builder do
       uid: opts[:uid] || 65534,
       gid: opts[:gid] || 65534,
       args: opts[:args] || [],
-      caps: opts[:caps] || []
+      caps: opts[:caps] || [],
+      publish: []
     }
     %{pod | current_ct: ct}
   end
 
   def end_container(%__MODULE__{current_ct: ct, containers: cts} = pod) do
-    %{pod | containers: cts ++ [ct], current_ct: nil}
+    %{pod | containers: cts ++ [ct], current_ct: nil, current_publish: nil}
+  end
+
+  # --- Publish block lifecycle ---
+
+  def begin_publish(%__MODULE__{current_ct: nil}, _interval) do
+    raise CompileError,
+      description: "publish must be inside a container block"
+  end
+
+  def begin_publish(%__MODULE__{} = pod, interval) when is_integer(interval) do
+    if interval < @min_interval do
+      raise CompileError,
+        description: "publish interval must be >= #{@min_interval}ms, got: #{interval}"
+    end
+    %{pod | current_publish: %{interval: interval, metrics: []}}
+  end
+
+  def add_metric(%__MODULE__{current_publish: nil}, _metric) do
+    raise CompileError,
+      description: "metric must be inside a publish block"
+  end
+
+  def add_metric(%__MODULE__{current_publish: pub} = pod, metric) when is_atom(metric) do
+    unless metric in @valid_metrics do
+      raise CompileError,
+        description: "unknown metric #{inspect(metric)}. " <>
+          "Allowed: #{inspect(@valid_metrics)}"
+    end
+    if metric in pub.metrics do
+      raise CompileError,
+        description: "duplicate metric #{inspect(metric)} in publish block"
+    end
+    %{pod | current_publish: %{pub | metrics: pub.metrics ++ [metric]}}
+  end
+
+  def end_publish(%__MODULE__{current_publish: nil} = pod), do: pod
+
+  def end_publish(%__MODULE__{current_publish: pub, current_ct: ct} = pod) do
+    if pub.metrics == [] do
+      raise CompileError,
+        description: "publish block must contain at least one metric"
+    end
+    ct = %{ct | publish: ct.publish ++ [pub]}
+    %{pod | current_ct: ct, current_publish: nil}
   end
 
   # --- Validation ---
@@ -132,6 +180,15 @@ defmodule Erlkoenig.Pod.Builder do
       }
 
       ct_term = if ct.image, do: Map.put(ct_term, :image, ct.image), else: ct_term
+
+      ct_term = if ct[:publish] != nil and ct[:publish] != [] do
+        publish_term = Enum.map(ct.publish, fn pub ->
+          %{interval: pub.interval, metrics: pub.metrics}
+        end)
+        Map.put(ct_term, :publish, publish_term)
+      else
+        ct_term
+      end
 
       ct_term
       |> Enum.reject(fn {_k, v} -> v == nil or v == [] or v == %{} end)

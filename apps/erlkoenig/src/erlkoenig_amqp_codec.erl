@@ -22,14 +22,23 @@ Pure functional module — no processes, no state, no I/O.
 Translates gen_event tuples into {RoutingKey, JsonBinary} pairs
 with a versioned envelope.
 
-Envelope format (v1):
+Envelope format (v2, SPEC-EK-007):
   {
-    "v": 1,
-    "ts": "2026-04-04T12:34:56.789Z",
+    "v": 2,
+    "ts": "2026-04-05T18:00:00.000Z",
     "node": "erlkoenig@host",
-    "routing_key": "container.started",
+    "key": "container.web-0-nginx.started",
     "payload": { ... }
   }
+
+Routing key schema: <category>.<entity>.<event>
+  - container.<name>.<event>  — lifecycle
+  - stats.<name>.<metric>     — cgroup stats
+  - firewall.<chain>.<event>  — drops, packets
+  - conntrack.flow.<event>    — connection tracking
+  - guard.threat.<event>      — ban/unban
+  - control.<scope>.<action>  — manual operations
+  - policy.<name>.<event>     — violations
 """.
 
 -export([encode/1]).
@@ -43,10 +52,10 @@ encode(Event) ->
     case encode_payload(Event) of
         {ok, RoutingKey, Payload} ->
             Envelope = #{
-                <<"v">> => 1,
+                <<"v">> => 2,
                 <<"ts">> => timestamp(),
                 <<"node">> => atom_to_binary(node()),
-                <<"routing_key">> => RoutingKey,
+                <<"key">> => RoutingKey,
                 <<"payload">> => Payload
             },
             try
@@ -62,17 +71,17 @@ encode(Event) ->
 
 %%====================================================================
 %% Event → {RoutingKey, PayloadMap}
+%% Routing key schema (v2): <category>.<entity>.<event>
 %%====================================================================
 
 -spec encode_payload(term()) -> {ok, binary(), map()} | skip.
 
-%% ── Lifecycle events ─────────────────────────────────────────────
-%% Routing: container.<event>.<name>
-%% Name is the canonical container name from the DSL (e.g. "web-0-nginx").
+%% ── Container lifecycle ─────────────────────────────────────────
+%% Routing: container.<name>.<event>
 
 encode_payload({container_started, Id, Name, Pid}) when is_pid(Pid) ->
     NameBin = ensure_binary(Name),
-    {ok, <<"container.started.", NameBin/binary>>, #{
+    {ok, <<"container.", NameBin/binary, ".started">>, #{
         <<"id">> => ensure_binary(Id),
         <<"name">> => NameBin,
         <<"os_pid">> => os_pid(Pid)
@@ -80,7 +89,7 @@ encode_payload({container_started, Id, Name, Pid}) when is_pid(Pid) ->
 
 encode_payload({container_stopped, Id, Name, #{exit_code := Code, term_signal := Sig}}) ->
     NameBin = ensure_binary(Name),
-    {ok, <<"container.stopped.", NameBin/binary>>, #{
+    {ok, <<"container.", NameBin/binary, ".stopped">>, #{
         <<"id">> => ensure_binary(Id),
         <<"name">> => NameBin,
         <<"exit_code">> => Code,
@@ -89,7 +98,7 @@ encode_payload({container_stopped, Id, Name, #{exit_code := Code, term_signal :=
 
 encode_payload({container_stopped, Id, Name, _}) ->
     NameBin = ensure_binary(Name),
-    {ok, <<"container.stopped.", NameBin/binary>>, #{
+    {ok, <<"container.", NameBin/binary, ".stopped">>, #{
         <<"id">> => ensure_binary(Id),
         <<"name">> => NameBin,
         <<"exit_code">> => null,
@@ -98,7 +107,7 @@ encode_payload({container_stopped, Id, Name, _}) ->
 
 encode_payload({container_failed, Id, Name, Reason}) ->
     NameBin = ensure_binary(Name),
-    {ok, <<"container.failed.", NameBin/binary>>, #{
+    {ok, <<"container.", NameBin/binary, ".failed">>, #{
         <<"id">> => ensure_binary(Id),
         <<"name">> => NameBin,
         <<"reason">> => term_to_binary_string(Reason)
@@ -106,7 +115,7 @@ encode_payload({container_failed, Id, Name, Reason}) ->
 
 encode_payload({container_restarting, Id, Name, Count}) ->
     NameBin = ensure_binary(Name),
-    {ok, <<"container.restarting.", NameBin/binary>>, #{
+    {ok, <<"container.", NameBin/binary, ".restarting">>, #{
         <<"id">> => ensure_binary(Id),
         <<"name">> => NameBin,
         <<"attempt">> => Count
@@ -114,25 +123,169 @@ encode_payload({container_restarting, Id, Name, Count}) ->
 
 encode_payload({container_oom, Id, Name}) ->
     NameBin = ensure_binary(Name),
-    {ok, <<"container.oom.", NameBin/binary>>, #{
+    {ok, <<"container.", NameBin/binary, ".oom">>, #{
         <<"id">> => ensure_binary(Id),
         <<"name">> => NameBin
     }};
 
-encode_payload({container_unhealthy, Id, FailCount}) ->
+encode_payload({container_unhealthy, Id, Name, FailCount}) ->
+    NameBin = ensure_binary(Name),
+    {ok, <<"container.", NameBin/binary, ".health">>, #{
+        <<"id">> => ensure_binary(Id),
+        <<"name">> => NameBin,
+        <<"failures">> => FailCount
+    }};
+
+%% Legacy 2-arg form (backwards compat during transition)
+encode_payload({container_unhealthy, Id, FailCount}) when is_integer(FailCount) ->
     IdBin = ensure_binary(Id),
-    {ok, <<"container.unhealthy.", IdBin/binary>>, #{
+    {ok, <<"container.", IdBin/binary, ".health">>, #{
         <<"id">> => IdBin,
         <<"failures">> => FailCount
     }};
 
-%% ── Metrics events ──────────────────────────────────────────────
-%% Routing: metrics.<type>.<id>
+%% ── Container stats (SPEC-EK-007) ──────────────────────────────
+%% Routing: stats.<name>.<metric>
+
+encode_payload({container_stats, _Id, Name, MetricType, Values}) when is_map(Values) ->
+    NameBin = ensure_binary(Name),
+    MetricBin = atom_to_binary(MetricType),
+    Payload = Values#{<<"name">> => NameBin},
+    {ok, <<"stats.", NameBin/binary, ".", MetricBin/binary>>,
+     encode_map(Payload)};
+
+%% ── Policy events ───────────────────────────────────────────────
+%% Routing: policy.<name>.violation
+
+encode_payload({policy_violation, Id, Name, {Type, Action}}) ->
+    NameBin = ensure_binary(Name),
+    {ok, <<"policy.", NameBin/binary, ".violation">>, #{
+        <<"id">> => ensure_binary(Id),
+        <<"name">> => NameBin,
+        <<"violation_type">> => atom_to_binary(Type),
+        <<"action">> => atom_to_binary(Action)
+    }};
+
+encode_payload({policy_violation, Id, Name, {Type, Detail, Action}}) ->
+    NameBin = ensure_binary(Name),
+    {ok, <<"policy.", NameBin/binary, ".violation">>, #{
+        <<"id">> => ensure_binary(Id),
+        <<"name">> => NameBin,
+        <<"violation_type">> => atom_to_binary(Type),
+        <<"action">> => atom_to_binary(Action),
+        <<"detail">> => term_to_binary_string(Detail)
+    }};
+
+%% Legacy 3-arg policy (Id used as entity when no Name)
+encode_payload({policy_violation, Id, Details}) ->
+    IdBin = ensure_binary(Id),
+    {ok, <<"policy.", IdBin/binary, ".violation">>, #{
+        <<"id">> => IdBin,
+        <<"detail">> => term_to_binary_string(Details)
+    }};
+
+%% ── Firewall events ────────────────────────────────────────────
+%% Routing: firewall.<chain>.drop | firewall.<chain>.packet
+%% Routing: control.<scope>.<action>
+
+encode_payload({control_event, #{action := Action, status := Status, details := Details}}) ->
+    ActionBin = atom_to_binary(Action),
+    Scope = case Action of
+        ban   -> <<"nft">>;
+        unban -> <<"nft">>;
+        reload -> <<"nft">>;
+        set_add -> <<"set">>;
+        set_del -> <<"set">>;
+        _     -> <<"nft">>
+    end,
+    {ok, <<"control.", Scope/binary, ".", ActionBin/binary>>, #{
+        <<"action">> => ActionBin,
+        <<"status">> => atom_to_binary(Status),
+        <<"details">> => encode_map(Details)
+    }};
+
+%% ── Conntrack events ────────────────────────────────────────────
+%% Routing: conntrack.flow.<event>
+
+encode_payload({ct_new, Event}) ->
+    {ok, <<"conntrack.flow.new">>, encode_ct_flow(Event)};
+
+encode_payload({ct_destroy, Event}) ->
+    {ok, <<"conntrack.flow.destroy">>, encode_ct_flow(Event)};
+
+encode_payload({ct_alert, {mode_switch, Mode}}) ->
+    {ok, <<"conntrack.alert.mode">>, #{
+        <<"mode">> => atom_to_binary(Mode)
+    }};
+
+%% ── NFLOG events (logged packets) ───────────────────────────────
+%% Routing: firewall.<chain>.packet
+
+encode_payload({nflog_event, #{prefix := Prefix} = Event}) when is_map(Event) ->
+    ChainName = case binary:split(Prefix, <<"_drop">>) of
+        [Name, _] -> Name;
+        _         -> Prefix
+    end,
+    {ok, <<"firewall.", ChainName/binary, ".packet">>, encode_map(Event)};
+
+encode_payload({nflog_event, Event}) when is_map(Event) ->
+    {ok, <<"firewall.unknown.packet">>, encode_map(Event)};
+
+encode_payload({nflog_event, Event}) ->
+    {ok, <<"firewall.unknown.packet">>, #{<<"raw">> => term_to_binary_string(Event)}};
+
+%% ── Counter events ─────────────────────────────────────────────
+%% Routing: firewall.<chain>.drop
+
+encode_payload({counter_event, Name, #{packets := Pkts} = Rate}) when Pkts > 0 ->
+    ChainName = counter_to_chain(Name),
+    {ok, <<"firewall.", ChainName/binary, ".drop">>, #{
+        <<"chain">> => ChainName,
+        <<"packets">> => Pkts,
+        <<"pps">> => maps:get(pps, Rate, 0.0),
+        <<"bytes">> => maps:get(bytes, Rate, 0),
+        <<"bps">> => maps:get(bps, Rate, 0.0)
+    }};
+encode_payload({counter_event, _Name, _Rate}) ->
+    skip;
+
+encode_payload({threshold_event, Id, Name, Metric, Current, Threshold}) ->
+    NameBin = ensure_binary(Name),
+    {ok, <<"firewall.", NameBin/binary, ".threshold">>, #{
+        <<"id">> => ensure_binary(Id),
+        <<"name">> => NameBin,
+        <<"metric">> => atom_to_binary(Metric),
+        <<"current">> => Current,
+        <<"threshold">> => Threshold
+    }};
+
+%% ── Guard events ───────────────────────────────────────────────
+%% Routing: guard.threat.ban | guard.threat.unban
+
+encode_payload({ct_guard_ban, #{ip := Ip, reason := Reason} = Details}) ->
+    {ok, <<"guard.threat.ban">>, #{
+        <<"ip">> => format_ip(Ip),
+        <<"reason">> => atom_to_binary(Reason),
+        <<"duration">> => maps:get(duration, Details, 0)
+    }};
+
+encode_payload({ct_guard_ban, Details}) when is_map(Details) ->
+    {ok, <<"guard.threat.ban">>, encode_map(Details)};
+
+encode_payload({ct_guard_unban, #{ip := Ip}}) ->
+    {ok, <<"guard.threat.unban">>, #{
+        <<"ip">> => format_ip(Ip)
+    }};
+
+encode_payload({ct_guard_unban, Details}) when is_map(Details) ->
+    {ok, <<"guard.threat.unban">>, encode_map(Details)};
+
+%% ── Legacy metrics (kept for transition) ────────────────────────
 
 encode_payload({container_metrics, Id, #{type := Type} = M}) ->
     IdBin = ensure_binary(Id),
     TypeBin = atom_to_binary(Type),
-    RoutingKey = <<"metrics.", TypeBin/binary, ".", IdBin/binary>>,
+    RoutingKey = <<"stats.", IdBin/binary, ".", TypeBin/binary>>,
     Payload = #{
         <<"id">> => IdBin,
         <<"type">> => TypeBin
@@ -149,118 +302,10 @@ encode_payload({container_metrics, Id, #{type := Type} = M}) ->
 
 encode_payload({container_metrics, Id, _}) ->
     IdBin = ensure_binary(Id),
-    {ok, <<"metrics.unknown.", IdBin/binary>>, #{
+    {ok, <<"stats.", IdBin/binary, ".unknown">>, #{
         <<"id">> => IdBin,
         <<"type">> => <<"unknown">>
     }};
-
-%% ── Policy events ───────────────────────────────────────────────
-%% Routing: policy.violation.<id>
-
-encode_payload({policy_violation, Id, {Type, Action}}) ->
-    IdBin = ensure_binary(Id),
-    {ok, <<"policy.violation.", IdBin/binary>>, #{
-        <<"id">> => IdBin,
-        <<"violation_type">> => atom_to_binary(Type),
-        <<"action">> => atom_to_binary(Action)
-    }};
-
-encode_payload({policy_violation, Id, {Type, Detail, Action}}) ->
-    IdBin = ensure_binary(Id),
-    {ok, <<"policy.violation.", IdBin/binary>>, #{
-        <<"id">> => IdBin,
-        <<"violation_type">> => atom_to_binary(Type),
-        <<"action">> => atom_to_binary(Action),
-        <<"detail">> => term_to_binary_string(Detail)
-    }};
-
-encode_payload({policy_violation, Id, Details}) ->
-    IdBin = ensure_binary(Id),
-    {ok, <<"policy.violation.", IdBin/binary>>, #{
-        <<"id">> => IdBin,
-        <<"detail">> => term_to_binary_string(Details)
-    }};
-
-%% ── Firewall control events ──────────────────────────────────────
-
-encode_payload({control_event, #{action := Action, status := Status, details := Details}}) ->
-    ActionBin = atom_to_binary(Action),
-    {ok, <<"nft.control.", ActionBin/binary>>, #{
-        <<"action">> => atom_to_binary(Action),
-        <<"status">> => atom_to_binary(Status),
-        <<"details">> => encode_map(Details)
-    }};
-
-%% ── Conntrack events ────────────────────────────────────────────
-
-encode_payload({ct_new, Event}) ->
-    {ok, <<"nft.ct.new">>, encode_ct_flow(Event)};
-
-encode_payload({ct_destroy, Event}) ->
-    {ok, <<"nft.ct.destroy">>, encode_ct_flow(Event)};
-
-encode_payload({ct_alert, {mode_switch, Mode}}) ->
-    {ok, <<"nft.ct.alert">>, #{
-        <<"type">> => <<"mode_switch">>,
-        <<"mode">> => atom_to_binary(Mode)
-    }};
-
-%% ── NFLOG events (logged packets) ───────────────────────────────
-
-encode_payload({nflog_event, #{prefix := Prefix} = Event}) when is_map(Event) ->
-    %% Container drop events have prefix = counter name (e.g. "web-0-nginx_drop")
-    %% Route as nft.drop.<container-name> for per-container filtering
-    RoutingKey = case binary:split(Prefix, <<"_drop">>) of
-        [ContainerName, _] ->
-            <<"nft.drop.", ContainerName/binary>>;
-        _ ->
-            <<"nft.nflog.", Prefix/binary>>
-    end,
-    %% NFLOG events already have string IPs (not raw binaries)
-    {ok, RoutingKey, encode_map(Event)};
-
-encode_payload({nflog_event, Event}) when is_map(Event) ->
-    {ok, <<"nft.nflog">>, encode_map(Event)};
-
-encode_payload({nflog_event, Event}) ->
-    {ok, <<"nft.nflog">>, #{<<"raw">> => term_to_binary_string(Event)}};
-
-%% ── Counter / threshold events ──────────────────────────────────
-
-encode_payload({counter_event, Name, #{packets := Pkts} = Rate}) when Pkts > 0 ->
-    NameBin = ensure_binary(Name),
-    {ok, <<"nft.counter.", NameBin/binary>>, #{
-        <<"name">> => NameBin,
-        <<"packets">> => Pkts,
-        <<"pps">> => maps:get(pps, Rate, 0.0),
-        <<"bytes">> => maps:get(bytes, Rate, 0),
-        <<"bps">> => maps:get(bps, Rate, 0.0)
-    }};
-encode_payload({counter_event, _Name, _Rate}) ->
-    %% Skip zero-rate counters (no drops = no event)
-    skip;
-
-encode_payload({threshold_event, Id, Name, Metric, Current, Threshold}) ->
-    {ok, <<"nft.threshold">>, #{
-        <<"id">> => ensure_binary(Id),
-        <<"name">> => ensure_binary(Name),
-        <<"metric">> => atom_to_binary(Metric),
-        <<"current">> => Current,
-        <<"threshold">> => Threshold
-    }};
-
-%% ── Guard events (ct_guard_events pg group) ─────────────────────
-
-encode_payload({ct_guard_ban, #{ip := Ip, reason := Reason} = Details}) ->
-    IpStr = format_ip(Ip),
-    {ok, <<"nft.guard.ban.", IpStr/binary>>, #{
-        <<"ip">> => format_ip(Ip),
-        <<"reason">> => atom_to_binary(Reason),
-        <<"duration">> => maps:get(duration, Details, 0)
-    }};
-
-encode_payload({ct_guard_ban, Details}) when is_map(Details) ->
-    {ok, <<"nft.guard.ban">>, encode_map(Details)};
 
 %% Unknown
 encode_payload(Event) ->
@@ -278,6 +323,15 @@ routing_key(Event) ->
 %%====================================================================
 %% Helpers
 %%====================================================================
+
+%% Counter names like "forward_drop" → chain name "forward"
+-spec counter_to_chain(term()) -> binary().
+counter_to_chain(Name) ->
+    NameBin = ensure_binary(Name),
+    case binary:split(NameBin, <<"_drop">>) of
+        [Chain, _] -> Chain;
+        _          -> NameBin
+    end.
 
 -spec timestamp() -> binary().
 timestamp() ->

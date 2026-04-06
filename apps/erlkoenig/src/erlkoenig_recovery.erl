@@ -81,7 +81,7 @@ migration_needed(OldPathBin, NewPath) ->
 %%====================================================================
 
 -spec recover_one(binary(), map()) -> {binary(), recovered | dead | {error, term()}}.
-recover_one(Id, #{os_pid := Pid, comm_mode := socket} = Info) ->
+recover_one(Id, #{os_pid := Pid} = Info) ->
     case is_process_alive_os(Pid) of
         true ->
             %% C-Runtime lives! Try to recover.
@@ -100,13 +100,7 @@ recover_one(Id, #{os_pid := Pid, comm_mode := socket} = Info) ->
             cleanup_dead(Id, Info),
             {Id, dead}
     end;
-recover_one(Id, #{comm_mode := port} = _Info) ->
-    %% Port-mode containers can't survive BEAM crash (pipes break)
-    %% Just clean up the DETS entry
-    erlkoenig_node_state:unregister_container(Id),
-    {Id, dead};
 recover_one(Id, Info) ->
-    %% No comm_mode set — treat as dead
     cleanup_dead(Id, Info),
     {Id, dead}.
 

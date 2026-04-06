@@ -56,9 +56,11 @@ All operations are pure file I/O on cgroupfs — no os:cmd.
          set_limits/2,
          destroy/1,
          read_stats/1,
+         read_metrics/2,
          read_containers_stats/0,
          was_oom_killed/1,
-         path/1]).
+         path/1,
+         ensure_container_dir/1]).
 
 %% Configuration (exported for testing)
 -export([beam_config/0,
@@ -130,6 +132,11 @@ destroy(ContainerId) ->
 read_stats(ContainerId) ->
     gen_server:call(?MODULE, {read_stats, ContainerId}).
 
+-doc "Read only selected metrics for a container. Metrics: memory, cpu, pids, pressure, oom_events.".
+-spec read_metrics(binary(), [atom()]) -> {ok, map()} | {error, term()}.
+read_metrics(ContainerId, Metrics) when is_list(Metrics) ->
+    gen_server:call(?MODULE, {read_metrics, ContainerId, Metrics}).
+
 -doc "Read stats from the containers ceiling cgroup (aggregate).".
 -spec read_containers_stats() -> {ok, map()} | {error, term()}.
 read_containers_stats() ->
@@ -145,6 +152,25 @@ was_oom_killed(ContainerId) ->
 path(ContainerId) ->
     gen_server:call(?MODULE, {path, ContainerId}).
 
+-doc """
+Create container cgroup directory directly (no gen_server roundtrip).
+Returns the cgroup.procs path on success. Used by erlkoenig_ct to
+pre-create the cgroup before spawning the C runtime.
+""".
+-spec ensure_container_dir(binary()) -> {ok, string()} | {error, term()}.
+ensure_container_dir(ContainerId) ->
+    try persistent_term:get(erlkoenig_cgroup_containers_path) of
+        CPath ->
+            Path = container_path(CPath, ContainerId),
+            case file:make_dir(Path) of
+                ok              -> {ok, filename:join(Path, "cgroup.procs")};
+                {error, eexist} -> {ok, filename:join(Path, "cgroup.procs")};
+                Error           -> Error
+            end
+    catch error:badarg ->
+        {error, cgroup_not_initialized}
+    end.
+
 %% =================================================================
 %% gen_server callbacks
 %% =================================================================
@@ -157,6 +183,8 @@ init([]) ->
     case setup_protected_topology(BasePath) of
         {ok, BeamPath, ContainersPath} ->
             logger:info("erlkoenig_cgroup: setup complete at ~s", [BasePath]),
+            %% Store containers path for direct access (no gen_server call needed)
+            persistent_term:put(erlkoenig_cgroup_containers_path, ContainersPath),
             {ok, #state{base_path = BasePath,
                         beam_path = BeamPath,
                         containers_path = ContainersPath}};
@@ -213,6 +241,18 @@ handle_call({read_stats, ContainerId}, _From, #state{containers_path = CPath} = 
                 fun read_cpu_stat/2,
                 fun read_pids_current/2
             ]),
+            {ok, Stats}
+    end,
+    {reply, Result, State};
+
+handle_call({read_metrics, ContainerId, Metrics}, _From, #state{containers_path = CPath} = State) ->
+    Path = container_path(CPath, ContainerId),
+    Result = case filelib:is_dir(Path) of
+        false ->
+            {error, enoent};
+        true ->
+            Readers = lists:flatmap(fun metric_readers/1, Metrics),
+            Stats = lists:foldl(fun(F, Acc) -> F(Path, Acc) end, #{}, Readers),
             {ok, Stats}
     end,
     {reply, Result, State};
@@ -635,6 +675,21 @@ format_bytes(Bytes) when Bytes >= 1024 ->
 format_bytes(Bytes) ->
     io_lib:format("~bB", [Bytes]).
 
+%% -- Metric selector (SPEC-EK-007) -----------------------------------
+
+-spec metric_readers(atom()) -> [fun((string(), map()) -> map())].
+metric_readers(memory) ->
+    [fun read_memory_current/2, fun read_memory_peak/2,
+     fun read_memory_max/2, fun read_memory_swap/2];
+metric_readers(cpu) ->
+    [fun read_cpu_stat_full/2];
+metric_readers(pids) ->
+    [fun read_pids_current/2, fun read_pids_max/2];
+metric_readers(pressure) ->
+    [fun read_cpu_pressure/2, fun read_memory_pressure/2, fun read_io_pressure/2];
+metric_readers(oom_events) ->
+    [fun read_memory_events/2].
+
 %% -- Stats readers ---------------------------------------------------
 
 -spec read_memory_current(string(), map()) -> map().
@@ -645,9 +700,47 @@ read_memory_current(Path, Acc) ->
 read_memory_peak(Path, Acc) ->
     read_int_file(Path, "memory.peak", memory_peak, Acc).
 
+-spec read_memory_max(string(), map()) -> map().
+read_memory_max(Path, Acc) ->
+    File = filename:join(Path, "memory.max"),
+    case file:read_file(File) of
+        {ok, Bin} ->
+            Trimmed = string:trim(Bin),
+            case Trimmed of
+                <<"max">> -> Acc#{memory_max => max};
+                _ ->
+                    try binary_to_integer(Trimmed) of
+                        N -> Acc#{memory_max => N}
+                    catch _:_ -> Acc
+                    end
+            end;
+        _ -> Acc
+    end.
+
+-spec read_memory_swap(string(), map()) -> map().
+read_memory_swap(Path, Acc) ->
+    read_int_file(Path, "memory.swap.current", memory_swap, Acc).
+
 -spec read_pids_current(string(), map()) -> map().
 read_pids_current(Path, Acc) ->
     read_int_file(Path, "pids.current", pids_current, Acc).
+
+-spec read_pids_max(string(), map()) -> map().
+read_pids_max(Path, Acc) ->
+    File = filename:join(Path, "pids.max"),
+    case file:read_file(File) of
+        {ok, Bin} ->
+            Trimmed = string:trim(Bin),
+            case Trimmed of
+                <<"max">> -> Acc#{pids_max => max};
+                _ ->
+                    try binary_to_integer(Trimmed) of
+                        N -> Acc#{pids_max => N}
+                    catch _:_ -> Acc
+                    end
+            end;
+        _ -> Acc
+    end.
 
 -spec read_cpu_stat(string(), map()) -> map().
 read_cpu_stat(Path, Acc) ->
@@ -660,6 +753,34 @@ read_cpu_stat(Path, Acc) ->
             end;
         _ ->
             Acc
+    end.
+
+-spec read_cpu_stat_full(string(), map()) -> map().
+read_cpu_stat_full(Path, Acc) ->
+    File = filename:join(Path, "cpu.stat"),
+    case file:read_file(File) of
+        {ok, Bin} -> parse_cpu_stat_full(Bin, Acc);
+        _ -> Acc
+    end.
+
+-spec read_cpu_pressure(string(), map()) -> map().
+read_cpu_pressure(Path, Acc) ->
+    read_pressure_file(Path, "cpu.pressure", cpu_pressure, Acc).
+
+-spec read_memory_pressure(string(), map()) -> map().
+read_memory_pressure(Path, Acc) ->
+    read_pressure_file(Path, "memory.pressure", memory_pressure, Acc).
+
+-spec read_io_pressure(string(), map()) -> map().
+read_io_pressure(Path, Acc) ->
+    read_pressure_file(Path, "io.pressure", io_pressure, Acc).
+
+-spec read_memory_events(string(), map()) -> map().
+read_memory_events(Path, Acc) ->
+    File = filename:join(Path, "memory.events"),
+    case file:read_file(File) of
+        {ok, Bin} -> parse_memory_events(Bin, Acc);
+        _ -> Acc
     end.
 
 -spec read_int_file(string(), string(), atom(), map()) -> map().
@@ -702,6 +823,107 @@ parse_oom_kill(Bin) ->
             end;
         (_) -> false
     end, Lines).
+
+%% -- Full cpu.stat parser (SPEC-EK-007) ------------------------------
+
+-spec parse_cpu_stat_full(binary(), map()) -> map().
+parse_cpu_stat_full(Bin, Acc) ->
+    Lines = binary:split(Bin, <<"\n">>, [global]),
+    lists:foldl(fun parse_cpu_stat_line/2, Acc, Lines).
+
+-spec parse_cpu_stat_line(binary(), map()) -> map().
+parse_cpu_stat_line(<<>>, Acc) -> Acc;
+parse_cpu_stat_line(Line, Acc) ->
+    case binary:split(Line, <<" ">>) of
+        [<<"usage_usec">>, Val] ->
+            try_int(Val, cpu_usec, Acc);
+        [<<"throttled_usec">>, Val] ->
+            try_int(Val, cpu_throttled_usec, Acc);
+        [<<"nr_throttled">>, Val] ->
+            try_int(Val, cpu_nr_throttled, Acc);
+        _ ->
+            Acc
+    end.
+
+%% -- Pressure file parser (PSI format) -------------------------------
+%% Format: "some avg10=0.00 avg60=0.00 avg300=0.00 total=0"
+
+-spec read_pressure_file(string(), string(), atom(), map()) -> map().
+read_pressure_file(Path, Filename, Key, Acc) ->
+    File = filename:join(Path, Filename),
+    case file:read_file(File) of
+        {ok, Bin} ->
+            case parse_pressure_some(Bin) of
+                {ok, Vals} -> Acc#{Key => Vals};
+                error -> Acc
+            end;
+        _ -> Acc
+    end.
+
+-spec parse_pressure_some(binary()) -> {ok, map()} | error.
+parse_pressure_some(Bin) ->
+    Lines = binary:split(Bin, <<"\n">>, [global]),
+    parse_pressure_lines(Lines).
+
+-spec parse_pressure_lines([binary()]) -> {ok, map()} | error.
+parse_pressure_lines([]) -> error;
+parse_pressure_lines([Line | Rest]) ->
+    case binary:match(Line, <<"some ">>) of
+        {0, _} ->
+            Parts = binary:split(Line, <<" ">>, [global]),
+            Vals = lists:foldl(fun parse_pressure_kv/2, #{}, Parts),
+            {ok, Vals};
+        _ ->
+            parse_pressure_lines(Rest)
+    end.
+
+-spec parse_pressure_kv(binary(), map()) -> map().
+parse_pressure_kv(Part, Acc) ->
+    case binary:split(Part, <<"=">>) of
+        [<<"avg10">>, V] -> try_float(V, avg10, Acc);
+        [<<"avg60">>, V] -> try_float(V, avg60, Acc);
+        [<<"avg300">>, V] -> try_float(V, avg300, Acc);
+        _ -> Acc
+    end.
+
+%% -- memory.events parser -------------------------------------------
+%% Format: "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\n..."
+
+-spec parse_memory_events(binary(), map()) -> map().
+parse_memory_events(Bin, Acc) ->
+    Lines = binary:split(Bin, <<"\n">>, [global]),
+    Vals = lists:foldl(fun parse_memory_event_line/2, #{}, Lines),
+    Acc#{memory_events => Vals}.
+
+-spec parse_memory_event_line(binary(), map()) -> map().
+parse_memory_event_line(<<>>, Acc) -> Acc;
+parse_memory_event_line(Line, Acc) ->
+    case binary:split(Line, <<" ">>) of
+        [<<"oom">>, V]      -> try_int(V, oom, Acc);
+        [<<"oom_kill">>, V] -> try_int(V, oom_kill, Acc);
+        [<<"high">>, V]     -> try_int(V, high, Acc);
+        [<<"max">>, V]      -> try_int(V, max, Acc);
+        _ -> Acc
+    end.
+
+-spec try_int(binary(), atom(), map()) -> map().
+try_int(Bin, Key, Acc) ->
+    try binary_to_integer(string:trim(Bin)) of
+        N -> Acc#{Key => N}
+    catch _:_ -> Acc
+    end.
+
+-spec try_float(binary(), atom(), map()) -> map().
+try_float(Bin, Key, Acc) ->
+    Trimmed = string:trim(Bin),
+    try binary_to_float(Trimmed) of
+        F -> Acc#{Key => F}
+    catch _:_ ->
+        try float(binary_to_integer(Trimmed)) of
+            F -> Acc#{Key => F}
+        catch _:_ -> Acc
+        end
+    end.
 
 -spec apply_limit(string(), atom(), term()) -> [ok | {error, term()}].
 apply_limit(_Path, _Type, undefined) ->

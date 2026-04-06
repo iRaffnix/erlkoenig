@@ -23,8 +23,6 @@
     ]},
     {env, [
         {rt_path, auto},
-        %% Socket mode only — no port mode. Runtime started via systemd.
-        {comm_mode, socket},
         {socket_dir, "/run/erlkoenig/"}
     ]},
     {modules, []},

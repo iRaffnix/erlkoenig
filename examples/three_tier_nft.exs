@@ -264,7 +264,10 @@ defmodule ThreeTierNft do
   pod "web", strategy: :one_for_one do
     container "nginx",
       binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
-      args: ["8443"] do
+      args: ["8443"],
+      limits: %{memory: 268_435_456, pids: 100},
+      seccomp: :default,
+      restart: :always do
 
       publish interval: 2000 do
         metric :memory
@@ -276,18 +279,30 @@ defmodule ThreeTierNft do
         metric :pressure
         metric :oom_events
       end
+
+      stream retention: {30, :days} do
+        channel :stdout
+        channel :stderr
+      end
     end
   end
 
   pod "app", strategy: :one_for_one do
     container "api",
       binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
-      args: ["4000"] do
+      args: ["4000"],
+      limits: %{memory: 536_870_912, pids: 200},
+      seccomp: :default,
+      restart: {:on_failure, 5} do
 
       publish interval: 2000 do
         metric :memory
         metric :cpu
         metric :pids
+      end
+
+      stream retention: {90, :days} do
+        channel :stderr
       end
     end
   end
@@ -295,7 +310,10 @@ defmodule ThreeTierNft do
   pod "data", strategy: :one_for_one do
     container "postgres",
       binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
-      args: ["5432"] do
+      args: ["5432"],
+      limits: %{memory: 1_073_741_824, pids: 50},
+      seccomp: :default,
+      restart: :always do
 
       publish interval: 5000 do
         metric :memory
@@ -305,6 +323,11 @@ defmodule ThreeTierNft do
       publish interval: 30_000 do
         metric :pressure
         metric :oom_events
+      end
+
+      stream retention: {90, :days} do
+        channel :stdout
+        channel :stderr
       end
     end
   end

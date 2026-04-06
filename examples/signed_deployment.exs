@@ -112,6 +112,13 @@ defmodule SignedDeployment do
         metric :pressure
         metric :oom_events
       end
+
+      # stderr mit 90 Tagen Retention — für Forensik nach
+      # Sicherheitsvorfällen. Wann genau hat der Container
+      # eine verdächtige Meldung geschrieben?
+      stream retention: {90, :days} do
+        channel :stderr
+      end
     end
   end
 

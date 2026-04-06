@@ -860,6 +860,12 @@ ip_to_cidr(Other) -> Other.
 %% The table is gone and back in one kernel operation — no window
 %% where hooks are missing.
 flush_table_chains(Family, Table) ->
+    %% Ensure table exists first (idempotent), then delete+recreate
+    %% to flush all chains atomically. Two separate batches because
+    %% delete on a non-existent table aborts the entire batch.
+    _ = nfnl_server:apply_msgs(erlkoenig_nft_srv, [
+        fun(S) -> nft_table:add(Family, Table, S) end
+    ]),
     _ = nfnl_server:apply_msgs(erlkoenig_nft_srv, [
         fun(S) -> nft_delete:table(Family, Table, S) end,
         fun(S) -> nft_table:add(Family, Table, S) end

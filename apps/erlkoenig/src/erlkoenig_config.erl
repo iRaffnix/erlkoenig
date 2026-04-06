@@ -708,6 +708,9 @@ apply_nft_table(#{name := TableName, chains := Chains} = Table, VethMap, Replica
     %% Maps MUST come before rules that reference them.
     %% Chains MUST come before rules that belong to them.
     AllMsgs = CounterMsgs ++ AllMapCreates ++ AllChainCreates ++ AllRuleCreates,
+    logger:info("erlkoenig_config: nft_table ~s: ~p counters, ~p maps, ~p chains, ~p rules",
+                [TableName, length(CounterMsgs), length(AllMapCreates),
+                 length(AllChainCreates), length(AllRuleCreates)]),
     case AllMsgs of
         [] ->
             logger:info("erlkoenig_config: nft_table ~s: empty (no chains)", [TableName]);
@@ -1427,13 +1430,15 @@ maybe_create_lb_map({rule, dnat_lb, #{targets := Targets, dport := Port} = Opts}
     MapName = <<"__lb_", (integer_to_binary(erlang:phash2({Targets, Port})))/binary>>,
     MapId = erlang:phash2(MapName) band 16#FFFF,
 
-    %% 1. Create the data map: integer → ipv4_addr
+    %% 1. Create the data map: mark (u32) → ipv4_addr
+    %% key_type = mark (19) is a u32 that matches the hash output.
+    %% key_type = 0 (untyped) is rejected by some kernel versions.
     CreateMap = fun(S) ->
         nft_set:add_data_map(Family, #{
             table => Table,
             name => MapName,
-            key_type => 0,     %% integer
-            key_len => 4,      %% u32
+            key_type => 19,    %% mark = u32
+            key_len => 4,      %% 4 bytes
             data_type => ipv4_addr
         }, MapId, S)
     end,

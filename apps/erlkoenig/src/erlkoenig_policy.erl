@@ -57,10 +57,10 @@ and removed when it stops.
 
 -spec subscribe() -> ok | {error, term()}.
 subscribe() ->
-    case ets:info(?TABLE) of
+    _ = case ets:info(?TABLE) of
         undefined ->
-            _ = ets:new(?TABLE, [named_table, public, set,
-                                  {keypos, #pol.id}]);
+            ets:new(?TABLE, [named_table, public, set,
+                              {keypos, #pol.id}]);
         _ ->
             ok
     end,

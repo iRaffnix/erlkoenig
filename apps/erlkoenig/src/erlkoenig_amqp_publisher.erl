@@ -62,7 +62,7 @@ init(Config) ->
         {ok, Channel} ->
             link(Channel),
             ok = declare_exchange(Channel, Exchange),
-            install_forwarder(),
+            _ = install_forwarder(),
             logger:info("erlkoenig_amqp_publisher: ready (exchange=~s)", [Exchange]),
             {ok, #state{channel = Channel, exchange = Exchange,
                         published = 0, dropped = 0, errors = 0}};

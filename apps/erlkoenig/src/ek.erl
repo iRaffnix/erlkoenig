@@ -403,7 +403,7 @@ export() ->
 -spec export(file:filename()) -> ok.
 export(Filename) when is_list(Filename) ->
     Output = capture(fun() -> export() end),
-    file:write_file(Filename, Output),
+    _ = file:write_file(Filename, Output),
     io:format("Exported to ~s~n", [Filename]),
     ok.
 
@@ -507,7 +507,7 @@ logs(Name) ->
     end.
 
 do_logs(Pid, Name) ->
-    erlkoenig:attach(Pid),
+    _ = erlkoenig:attach(Pid),
     io:format("~n  ~sAttached to ~s. Press Ctrl-C to detach.~s~n~n",
               [?DIM, to_str(Name), ?RESET]),
     logs_loop(Pid).
@@ -535,7 +535,7 @@ logs_loop(Pid) ->
 stop(Name) ->
     case find_pid(Name) of
         {ok, Pid} ->
-            erlkoenig:stop(Pid),
+            _ = erlkoenig:stop(Pid),
             io:format("  ~sStopped ~s~s~n", [?GREEN, to_str(Name), ?RESET]),
             ok;
         not_found ->
@@ -551,7 +551,7 @@ restart(Name) ->
                 no_restart ->
                     print_error("Container '~s' has no restart policy", [to_str(Name)]);
                 _ ->
-                    erlkoenig:stop(Pid),
+                    _ = erlkoenig:stop(Pid),
                     io:format("  ~sRestarting ~s (waiting for supervisor)~s~n",
                               [?YELLOW, to_str(Name), ?RESET]),
                     ok
@@ -684,7 +684,7 @@ zones() ->
 events() ->
     io:format("~n  ~sStreaming events. Press Ctrl-C to stop.~s~n~n",
               [?DIM, ?RESET]),
-    erlkoenig_events:subscribe(ek_event_printer, self()),
+    _ = erlkoenig_events:subscribe(ek_event_printer, self()),
     events_loop().
 
 -spec events(pos_integer()) -> ok.
@@ -692,7 +692,7 @@ events(N) when is_integer(N), N > 0 ->
     io:format("~n  ~sLast ~p event(s) — use ek:events() to stream live~s~n~n",
               [?DIM, N, ?RESET]),
     %% Event log does not store history; just start streaming
-    erlkoenig_events:subscribe(ek_event_printer, self()),
+    _ = erlkoenig_events:subscribe(ek_event_printer, self()),
     events_loop_n(N).
 
 events_loop() ->
@@ -705,7 +705,7 @@ events_loop() ->
     end.
 
 events_loop_n(0) ->
-    erlkoenig_events:unsubscribe(ek_event_printer, self()),
+    _ = erlkoenig_events:unsubscribe(ek_event_printer, self()),
     ok;
 events_loop_n(N) ->
     receive

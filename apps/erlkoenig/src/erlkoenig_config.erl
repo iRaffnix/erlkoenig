@@ -97,7 +97,7 @@ reload(TermFile) ->
 %% Internal -- Validation
 %%====================================================================
 
--spec validate_config(map()) -> ok | {error, term()}.
+-spec validate_config(term()) -> ok | {error, term()}.
 validate_config(Config) when is_map(Config) ->
     %% Unified format: #{images, firewall, zones, steering, ct_guard, watch}
     %% Legacy format:  #{containers, watches, guard}
@@ -210,7 +210,7 @@ apply_config_with_reconciliation(OldConfig, Config) ->
     case ZoneNftConfigs of
         [] -> ok;
         _ ->
-            erlkoenig_firewall_nft:setup_table(ZoneNftConfigs),
+            _ = erlkoenig_firewall_nft:setup_table(ZoneNftConfigs),
             _ = os:cmd("ip link delete erlkoenig_br0 2>/dev/null"),
             ok
     end,
@@ -259,7 +259,7 @@ apply_config_with_reconciliation(OldConfig, Config) ->
     Pods = maps:get(pods, Config, []),
     NftTables = maps:get(nft_tables, Config, []),
 
-    case NftTables of
+    _ = case NftTables of
         [] ->
             %% Legacy path: zone chains + pod forward chains (old DSL)
             lists:foreach(fun(#{chains := Chains} = Zone) when is_list(Chains), Chains =/= [] ->
@@ -428,7 +428,7 @@ ensure_zones(Zones, Report) ->
                                     [Name, OldSubnet, NewSubnet]),
                         force_stop_zone_containers(ZoneAtom),
                         timer:sleep(500),
-                        erlkoenig_zone:destroy(ZoneAtom),
+                        _ = erlkoenig_zone:destroy(ZoneAtom),
                         case erlkoenig_zone:create(ZoneAtom, ZoneConfig) of
                             ok -> {Name, recreated};
                             {error, R} -> {Name, {error, R}}
@@ -1015,9 +1015,7 @@ apply_zone_chains(#{chains := Chains} = Zone, IpMap) ->
                                        [ZoneName, Reason])
                 end
         end
-    end, Chains);
-apply_zone_chains(_, _) ->
-    ok.
+    end, Chains).
 
 %% Resolve symbolic references in rules:
 %%   :bridge      → zone bridge name (e.g. "ek_br_test")

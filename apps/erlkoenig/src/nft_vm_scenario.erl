@@ -257,8 +257,6 @@ find_rule_in_trace([Entry | Rest], RuleIdx, PrevWasBreak) ->
     end.
 
 is_terminal({verdict, _}) -> true;
-is_terminal(accept) -> true;
-is_terminal(drop) -> true;
 is_terminal(_) -> false.
 
 -spec load_vmaps(file:filename()) -> map().

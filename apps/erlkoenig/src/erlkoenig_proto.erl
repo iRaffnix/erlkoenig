@@ -542,7 +542,7 @@ strip_nulls(Bin) ->
 
 -define(EK_VOLUME_F_READONLY, 16#01).
 
--spec encode_volumes([map()]) -> binary().
+-spec encode_volumes([map()]) -> [map()].
 encode_volumes(Volumes) ->
     [#{host => H, container => C, opts => O}
      || #{host := H, container := C, opts := O} <- Volumes].

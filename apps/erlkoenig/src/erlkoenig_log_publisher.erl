@@ -220,7 +220,7 @@ buffer_stdout(Chunk, #state{stdout_buf = Buf, stdout_bytes = Bytes} = State) ->
     NewBuf = [Buf, Chunk],
     if NewBytes >= ?CHUNK_SIZE ->
         State2 = flush_buffer(stdout, State#state{stdout_buf = NewBuf, stdout_bytes = NewBytes}),
-        cancel_timer(State2#state.flush_timer_out),
+        _ = cancel_timer(State2#state.flush_timer_out),
         State2#state{flush_timer_out = undefined};
        true ->
         Timer = case State#state.flush_timer_out of
@@ -237,7 +237,7 @@ buffer_stderr(Chunk, #state{stderr_buf = Buf, stderr_bytes = Bytes} = State) ->
     HasNewline = binary:match(Chunk, <<"\n">>) =/= nomatch,
     if HasNewline orelse NewBytes >= ?CHUNK_SIZE ->
         State2 = flush_buffer(stderr, State#state{stderr_buf = NewBuf, stderr_bytes = NewBytes}),
-        cancel_timer(State2#state.flush_timer_err),
+        _ = cancel_timer(State2#state.flush_timer_err),
         State2#state{flush_timer_err = undefined};
        true ->
         Timer = case State#state.flush_timer_err of

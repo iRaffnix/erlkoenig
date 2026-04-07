@@ -67,6 +67,7 @@ wrap each rule separately:
     set_lookup_drop_named/3,
     set_lookup_accept/1,
     set_lookup_accept/2,
+    set_lookup_accept_named/2,
     set_lookup_tcp_accept/1,
     connlimit_drop/2,
     log_drop/1,
@@ -530,6 +531,18 @@ set_lookup_accept(SetName, ipv6_addr) ->
         nft_expr_ir:cmp(eq, ?REG1, <<?NFPROTO_IPV6>>),
         nft_expr_ir:ip6_saddr(?REG1),
         nft_expr_ir:lookup(?REG1, SetName),
+        nft_expr_ir:accept()
+    ].
+
+-doc "Accept if source IP is in the named set, with a named counter.".
+-spec set_lookup_accept_named(binary(), binary()) -> rule().
+set_lookup_accept_named(SetName, CounterName) ->
+    [
+        nft_expr_ir:meta(nfproto, ?REG1),
+        nft_expr_ir:cmp(eq, ?REG1, <<?NFPROTO_IPV4>>),
+        nft_expr_ir:ip_saddr(?REG1),
+        nft_expr_ir:lookup(?REG1, SetName),
+        nft_expr_ir:objref_counter(CounterName),
         nft_expr_ir:accept()
     ].
 

@@ -91,7 +91,6 @@ build_chain_rules(Chain, Config) ->
 %% A few (tcp_accept_limited, udp_accept_limited) return multiple rules
 %% (list of lists). wrap_rules normalizes both to [[rule1], [rule2], ...].
 -spec wrap_rules([nft_vm:expr()] | [[nft_vm:expr()]]) -> [[nft_vm:expr()]].
-wrap_rules([]) -> [];
 wrap_rules([First | _] = Rules) when is_list(First) ->
     %% Already a list of rules (multi-rule return)
     Rules;

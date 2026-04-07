@@ -331,17 +331,13 @@ add_container(ContainerId, Ip, HostVeth, Ports, FirewallTerm, Name) ->
     Result = nfnl_server:apply_msgs(?SERVER, Msgs ++ DnatMsgs),
 
     %% Start NFLOG receiver for this container's drop events
-    case NflogGroup of
-        undefined -> ok;
-        _ ->
-            case erlkoenig_nft_nflog:start_link(NflogGroup) of
-                {ok, _} ->
-                    logger:info("erlkoenig_firewall_nft: nflog group ~p for ~s",
-                                [NflogGroup, Chain]);
-                {error, Reason} ->
-                    logger:warning("erlkoenig_firewall_nft: nflog start failed for ~s: ~p",
-                                    [Chain, Reason])
-            end
+    case erlkoenig_nft_nflog:start_link(NflogGroup) of
+        {ok, _} ->
+            logger:info("erlkoenig_firewall_nft: nflog group ~p for ~s",
+                        [NflogGroup, Chain]);
+        {error, Reason} ->
+            logger:warning("erlkoenig_firewall_nft: nflog start failed for ~s: ~p",
+                            [Chain, Reason])
     end,
     Result.
 
@@ -671,8 +667,8 @@ compile_rule({set_lookup_accept, SetName}) ->
 compile_rule({set_lookup_accept, SetName, Type}) when Type =:= ipv4_addr; Type =:= ipv6_addr ->
     nft_rules:set_lookup_accept(iolist_to_binary(SetName), Type);
 compile_rule({set_lookup_accept, SetName, Counter}) ->
-    nft_rules:set_lookup_accept(iolist_to_binary(SetName),
-                                 iolist_to_binary(Counter));
+    nft_rules:set_lookup_accept_named(iolist_to_binary(SetName),
+                                       iolist_to_binary(Counter));
 compile_rule({set_lookup_accept_tcp, SetName}) ->
     nft_rules:set_lookup_tcp_accept(iolist_to_binary(SetName));
 %% SNAT

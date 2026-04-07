@@ -65,10 +65,10 @@ from erlkoenig_ct (forwarded from the C runtime's BPF ring buffer).
 -doc "Install the metrics handler on the erlkoenig_events bus.".
 -spec subscribe() -> ok | {error, term()}.
 subscribe() ->
-    case ets:info(?TABLE) of
+    _ = case ets:info(?TABLE) of
         undefined ->
-            _ = ets:new(?TABLE, [named_table, public, set,
-                                  {keypos, #metrics.id}]);
+            ets:new(?TABLE, [named_table, public, set,
+                              {keypos, #metrics.id}]);
         _ ->
             ok
     end,

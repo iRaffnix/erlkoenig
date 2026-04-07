@@ -70,7 +70,11 @@ calling this module directly.
 
 -type state() :: #{
     config := map(),
-    table := binary()
+    table := binary(),
+    mode := active | degraded,
+    degraded_reason => {apply_failed, term()}
+                     | {diagnostic_error, term()}
+                     | {apply_failed, tuple(), term()}
 }.
 
 %% --- Public API ---

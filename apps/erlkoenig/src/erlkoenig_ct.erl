@@ -102,7 +102,7 @@ States:
     files         = #{}        :: #{binary() => binary()},
     handshake     = false      :: boolean(),
     pty           = false      :: boolean(),
-    firewall      = #{}        :: map(),
+    firewall      = #{}        :: map() | skip_firewall,
     extra_opts    = #{}        :: map(),
     sig_path      = undefined  :: binary() | undefined,
     sig_verified  = false      :: boolean(),
@@ -964,7 +964,7 @@ maybe_stop_log_publisher({Pid, _InFlight}) ->
 forward_output(Stream, Chunk, #ct_data{output = OutputPid,
                                         log_publisher = LogPub} = Data) ->
     %% 1. Attached pid (interactive consumer)
-    case OutputPid of
+    _ = case OutputPid of
         undefined -> ok;
         Pid ->
             Tag = case Stream of
@@ -1415,7 +1415,7 @@ kill_os_pid(_) -> ok.
 
 %% -- Firewall (direct nft integration) ----------------------------
 
--spec firewall_add(binary(), map(), map(), binary() | undefined) -> ok.
+-spec firewall_add(binary(), map(), map() | skip_firewall, binary() | undefined) -> ok.
 firewall_add(_ContainerId, _NetInfo, skip_firewall, _Name) ->
     %% nft_tables mode (ADR-0015): firewall defined in DSL, not auto-generated
     ok;

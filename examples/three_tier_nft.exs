@@ -366,28 +366,142 @@ defmodule ThreeTierNft do
   # mit eigenen IPs und Veth-Paaren.
 
   # ══════════════════════════════════════════════════════
-  # Threat Detection
+  # Threat Detection (ct_guard)
   # ══════════════════════════════════════════════════════
   #
-  # Explizite Guard-Konfiguration. Keine impliziten Defaults —
-  # der Entwickler entscheidet welche Schwellwerte gelten.
-  # Ohne diesen Block laeuft kein Guard.
+  # Automatische Erkennung und Abwehr von Angriffen.
+  # Keine impliziten Defaults — ohne diesen Block laeuft
+  # kein Guard. Der Entwickler entscheidet jede Schwelle.
+  #
+  # ct_guard abonniert Conntrack-Events vom Kernel und
+  # prueft jede neue Verbindung gegen die konfigurierten
+  # Detektoren. Bei Schwellwert-Ueberschreitung wird die
+  # Quell-IP in ein nft-Set eingetragen und in der
+  # prerouting_ban Chain (priority -300, raw) gedroppt.
+  #
+  # Erkennungsschichten (von schnell nach langsam):
+  #
+  #   ┌─ Honeypot ──────────────────────────────────┐
+  #   │ 1 Probe auf ungenutzten Port = sofort Ban   │
+  #   │ Zero tolerance, zero false positives        │
+  #   │ Port 22 ist Falle (SSH auf 22222)           │
+  #   └─────────────────────────────────────────────┘
+  #
+  #   ┌─ Flood Detection ──────────────────────────┐
+  #   │ >50 Connections in 10s von einer IP         │
+  #   │ Faengt SYN-Floods, HTTP-Floods, Brute Force│
+  #   └─────────────────────────────────────────────┘
+  #
+  #   ┌─ Port Scan ─────────────────────────────────┐
+  #   │ >20 verschiedene Ports in 60s               │
+  #   │ Faengt Nmap, Masscan, Zmap                  │
+  #   └─────────────────────────────────────────────┘
+  #
+  #   ┌─ Slow Scan ─────────────────────────────────┐
+  #   │ >5 verschiedene Ports in 1 Stunde           │
+  #   │ Faengt Shodan, Censys, manuelle Recon       │
+  #   │ (1 Port alle 10 Min umgeht fast alles)      │
+  #   └─────────────────────────────────────────────┘
+  #
+  # Repeat Offender: IP wird zum N-ten Mal gebannt?
+  # Eskalation: 1h → 6h → 24h → 7 Tage.
+  #
+  # AMQP Events (alle auf erlkoenig.events exchange):
+  #
+  #   guard.threat.ban              — Flood oder Port Scan
+  #   guard.threat.honeypot         — Honeypot Port getroffen
+  #   guard.threat.slow_scan        — Langsamer Scanner erkannt
+  #   guard.threat.unban            — Ban abgelaufen
 
   guard do
-    detect :conn_flood, threshold: 50, window: 10
-    detect :port_scan, threshold: 20, window: 60
-    detect :slow_scan, threshold: 5, window: 3600
+    # ── Detektoren ────────────────────────────────
+    #
+    # Jeder Detektor ueberwacht Conntrack-Events fuer ein
+    # bestimmtes Muster. threshold = max Events, window = Sekunden.
 
-    honeypot_ports [21, 22, 23, 445, 1433, 1521, 3306, 3389,
-                    5900, 6379, 8080, 8888, 9200, 27017]
+    detect :conn_flood, threshold: 50, window: 10
+    # 50 neue Verbindungen in 10 Sekunden von einer IP.
+    # Typisch: SYN-Flood (10.000+ SYN/s), HTTP-Flood,
+    # SSH Brute Force (hydra, medusa).
+
+    detect :port_scan, threshold: 20, window: 60
+    # 20 verschiedene Ziel-Ports in 60 Sekunden.
+    # Typisch: nmap -sS (SYN Scan), masscan,
+    # zmap mit Port-Liste.
+
+    detect :slow_scan, threshold: 5, window: 3600
+    # 5 verschiedene Ports in 1 Stunde.
+    # Faengt Angreifer die unter den schnellen Schwellen
+    # bleiben: 1 Port alle 10 Minuten, ueber Stunden.
+    # Shodan und Censys scannen so.
+
+    # ── Honeypot Ports ────────────────────────────
+    #
+    # Ports die kein Service auf diesem Host nutzt.
+    # JEDE einzelne Connection = sofortiger Ban.
+    # Null False Positives: wer Port 23 (Telnet) probt
+    # auf einem Server der kein Telnet hat, ist ein Scanner.
+    #
+    # Port 22 ist hier dabei weil SSH auf 22222 laeuft.
+    # Alle Bots die Standard-Port 22 scannen werden
+    # sofort fuer 24h gebannt.
+    #
+    # WICHTIG: Ports die tatsaechlich genutzt werden
+    # (22222, 8443, 4000, 5432, 9100) duerfen NICHT
+    # in dieser Liste stehen!
+
+    honeypot_ports [
+      21,     # FTP — niemand nutzt FTP in 2026
+      22,     # SSH — laeuft auf 22222, Standard-Port ist Falle
+      23,     # Telnet — archaisch, nur Scanner
+      445,    # SMB — Windows File Sharing, nicht auf Linux
+      1433,   # MSSQL — kein Microsoft SQL hier
+      1521,   # Oracle DB — kein Oracle hier
+      3306,   # MySQL — wir nutzen Postgres, nicht MySQL
+      3389,   # RDP — Remote Desktop, nicht auf Linux
+      5900,   # VNC — kein VNC hier
+      6379,   # Redis — kein Redis hier
+      8080,   # HTTP alt — kein Service auf 8080
+      8888,   # HTTP alt — kein Service auf 8888
+      9200,   # Elasticsearch — kein ES hier
+      27017   # MongoDB — kein Mongo hier
+    ]
+
+    # Honeypot-Bans dauern laenger (24h) weil gezieltes
+    # Probing auf nicht-existierende Dienste ein starkes
+    # Signal ist. Regulaere Bans (Flood/Scan) sind 1h.
     honeypot_ban_duration 86400
+
+    # ── Repeat Offender ───────────────────────────
+    #
+    # Eskalierendes Ban-System: wer wiederholt gebannt
+    # wird, bekommt exponentiell laengere Sperren.
+    #
+    #   1. Ban:  1 Stunde     (3600s)
+    #   2. Ban:  6 Stunden    (21600s)
+    #   3. Ban:  24 Stunden   (86400s)
+    #   4+ Ban:  7 Tage       (604800s)
+    #
+    # Die Eskalation gilt pro IP ueber die gesamte
+    # Lebensdauer des erlkoenig-Prozesses.
 
     escalation [3600, 21600, 86400, 604800]
 
+    # ── Basis Ban-Dauer ───────────────────────────
+    #
+    # Default fuer Flood und Port Scan (vor Eskalation).
+    # Honeypot-Bans haben ihre eigene Dauer (oben).
+
     ban_duration 3600
 
-    whitelist {127, 0, 0, 1}
-    whitelist {10, 0, 0, 1}
+    # ── Whitelist ─────────────────────────────────
+    #
+    # IPs die nie gebannt werden, egal was sie tun.
+    # Wichtig: Management-IPs und Monitoring hier eintragen,
+    # sonst sperrt sich der Admin selbst aus.
+
+    whitelist {127, 0, 0, 1}       # localhost
+    whitelist {10, 0, 0, 1}        # Bridge Gateway
   end
 
   attach "web",  to: "dmz",  replicas: 3

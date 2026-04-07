@@ -45,7 +45,8 @@ be unique within a batch.
 Corresponds to libnftnl src/set.c.
 """.
 
--export([add/3, add_meter/3, add_vmap/4, add_data_map/4, add_concat/3]).
+-export([add/3, add_meter/3, add_vmap/4, add_data_map/4, add_concat/3,
+         add_concat_vmap/4]).
 
 -export_type([set_opts/0, set_type/0, concat_opts/0]).
 
@@ -267,7 +268,8 @@ add_concat(Family, Opts, Seq) when is_map(Opts), is_integer(Seq), Seq >= 0 ->
 
     %% Compute total key length and concat key type
     FieldInfos = [type_info(F) || F <- Fields],
-    TotalKeyLen = lists:sum([Len || {_Type, Len} <- FieldInfos]),
+    %% Kernel requires 4-byte aligned field lengths for concat keys
+    TotalKeyLen = lists:sum([align4(Len) || {_Type, Len} <- FieldInfos]),
     %% For concat sets, key type is a hash of the field types.
     %% The kernel uses a composite type: we concatenate the type IDs.
     %% In practice, nftables uses a hash, but setting 0 works for named sets.
@@ -275,10 +277,10 @@ add_concat(Family, Opts, Seq) when is_map(Opts), is_integer(Seq), Seq >= 0 ->
 
     FlagVal = encode_flags(Flags) bor ?NFT_SET_CONCAT,
 
-    %% Build NFTA_SET_DESC_CONCAT: nested list of field length descriptors
+    %% Build NFTA_SET_DESC_CONCAT: NFTA_LIST_ELEM entries wrapping field lengths
     ConcatFields = iolist_to_binary([
         nfnl_attr:encode_nested(
-            ?NFTA_SET_FIELD_LEN,
+            1,  %% NFTA_LIST_ELEM
             nfnl_attr:encode_u32(?NFTA_SET_FIELD_LEN, Len)
         )
      || {_Type, Len} <- FieldInfos
@@ -299,6 +301,57 @@ add_concat(Family, Opts, Seq) when is_map(Opts), is_integer(Seq), Seq >= 0 ->
                 undefined -> [];
                 Ms -> [nfnl_attr:encode_u64(?NFTA_SET_TIMEOUT, Ms)]
             end
+        ])
+    ),
+
+    NlFlags = ?NLM_F_REQUEST bor ?NLM_F_ACK bor ?NLM_F_CREATE,
+    nfnl_msg:build_hdr(?NFT_MSG_NEWSET, Family, NlFlags, Seq, Attrs).
+
+-doc """
+Build a NEWSET message for a concatenated verdict map.
+
+Combines concatenated keys (e.g., ip saddr . ip daddr . tcp dport)
+with verdict values (accept/drop/jump/goto). This replaces long chains
+of individual rules with a single O(1) lookup.
+
+Example:
+    Msg = nft_set:add_concat_vmap(1, #{
+        table  => <<"erlkoenig">>,
+        name   => <<"fwd_policy">>,
+        fields => [ipv4_addr, ipv4_addr, inet_service],
+        id     => 50
+    }, 50, Seq).
+""".
+-spec add_concat_vmap(0..255, concat_opts(), non_neg_integer(), non_neg_integer()) ->
+    nfnl_msg:nl_msg().
+add_concat_vmap(Family, Opts, Id, Seq) when is_map(Opts), is_integer(Seq), Seq >= 0 ->
+    Table = maps:get(table, Opts),
+    Name = maps:get(name, Opts),
+    Fields = maps:get(fields, Opts),
+
+    FieldInfos = [type_info(F) || F <- Fields],
+    TotalKeyLen = lists:sum([align4(Len) || {_Type, Len} <- FieldInfos]),
+    KeyType = concat_key_type(FieldInfos),
+
+    FlagVal = ?NFT_SET_MAP,
+
+    %% Kernel 6.12 + nft CLI 1.1.x: concat field descriptors are encoded
+    %% as NFTA_SET_USERDATA (type 13), NOT as NFTA_SET_DESC + DESC_CONCAT.
+    %% The DESC_CONCAT format exists only in nf-next (bleeding edge).
+    %% USERDATA uses a libnftnl-specific TLV format: 1-byte type, 1-byte len.
+    UserData = build_concat_userdata(FieldInfos),
+
+    Attrs = iolist_to_binary(
+        lists:flatten([
+            nfnl_attr:encode_str(?NFTA_SET_TABLE, Table),
+            nfnl_attr:encode_str(?NFTA_SET_NAME, Name),
+            nfnl_attr:encode_u32(?NFTA_SET_FLAGS, FlagVal),
+            nfnl_attr:encode_u32(?NFTA_SET_KEY_TYPE, KeyType),
+            nfnl_attr:encode_u32(?NFTA_SET_KEY_LEN, TotalKeyLen),
+            nfnl_attr:encode_u32(?NFTA_SET_DATA_TYPE, ?NFT_DATA_VERDICT),
+            nfnl_attr:encode_u32(7, 0),  %% NFTA_SET_DATA_LEN
+            nfnl_attr:encode_u32(?NFTA_SET_ID, Id),
+            nfnl_attr:encode(13, UserData)  %% NFTA_SET_USERDATA
         ])
     ),
 
@@ -340,3 +393,64 @@ concat_key_type([], _Shift, Acc) ->
     Acc;
 concat_key_type([{Type, _Len} | Rest], Shift, Acc) ->
     concat_key_type(Rest, Shift + 8, Acc bor (Type bsl Shift)).
+
+-spec align4(non_neg_integer()) -> non_neg_integer().
+align4(N) -> ((N + 3) div 4) * 4.
+
+%% Build libnftnl USERDATA for concatenated verdict maps.
+%%
+%% nft CLI + libnftnl 1.2.9 encode concat field descriptors as
+%% NFTA_SET_USERDATA (attribute 13) using a TLV format (1-byte type,
+%% 1-byte len). The nft CLI source (libnftnl/src/set.c) generates
+%% this via nftnl_set_nlmsg_build_payload → NFTA_SET_USERDATA.
+%%
+%% The USERDATA contains typeof information that allows nft to
+%% reconstruct the field types when listing the set.
+%%
+%% Verified by reading libnftnl 1.2.9 source and strace capture.
+-spec build_concat_userdata([{non_neg_integer(), non_neg_integer()}]) -> binary().
+build_concat_userdata(FieldInfos) ->
+    %% Build the typeof expression chain from libnftnl udata format.
+    %% Source: libnftnl/src/udata.c, nftnl_udata_put()
+    %% Each entry: <<Type:8, Len:8, Data:Len/binary>>
+    KeyTypeof = build_key_typeof(FieldInfos),
+    DataTypeof = build_data_typeof_verdict(),
+    iolist_to_binary([
+        udata_entry(0, <<0:32/little>>),       %% KEYBYTEORDER = host
+        udata_entry(1, <<0:32/little>>),        %% DATABYTEORDER = host
+        udata_entry(3, KeyTypeof),              %% KEY_TYPEOF
+        udata_entry(4, DataTypeof),             %% DATA_TYPEOF
+        udata_entry(6, <<0:32/little>>)         %% MERGE_ELEMENTS = 0
+    ]).
+
+udata_entry(Type, Data) ->
+    <<Type:8, (byte_size(Data)):8, Data/binary>>.
+
+%% Build KEY_TYPEOF from libnftnl typeof serialization.
+%% Source: libnftnl/src/set.c → set_build_udata_key()
+%% Uses nftnl_udata_put for each expression in the typeof chain.
+%% For concat: one expression per field, each with:
+%%   type=0: expr_name hash (4 bytes LE)
+%%   type=1: serialized expression attributes
+build_key_typeof(FieldInfos) ->
+    iolist_to_binary([typeof_field_entry(F) || F <- FieldInfos]).
+
+typeof_field_entry({ipv4_addr, _}) ->
+    <<(udata_entry(0, <<16#0d:32/little>>))/binary,
+      (udata_entry(1, <<0, 0, 0, 4>>))/binary>>;
+typeof_field_entry({ipv6_addr, _}) ->
+    <<(udata_entry(0, <<16#0d:32/little>>))/binary,
+      (udata_entry(1, <<0, 0, 0, 16>>))/binary>>;
+typeof_field_entry({inet_service, _}) ->
+    <<(udata_entry(0, <<16#04:32/little>>))/binary,
+      (udata_entry(1, <<0, 0, 0, 0, 1, 0>>))/binary>>;
+typeof_field_entry({mark, _}) ->
+    <<(udata_entry(0, <<16#04:32/little>>))/binary,
+      (udata_entry(1, <<0, 0, 0, 4>>))/binary>>;
+typeof_field_entry({_Type, Len}) ->
+    <<(udata_entry(0, <<16#04:32/little>>))/binary,
+      (udata_entry(1, <<0, 0, 0, Len>>))/binary>>.
+
+build_data_typeof_verdict() ->
+    <<(udata_entry(0, <<16#04:32/little>>))/binary,
+      (udata_entry(1, <<>>))/binary>>.

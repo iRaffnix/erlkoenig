@@ -656,16 +656,20 @@ dnat_lb_rule([SingleIp], Port, _MapName, _MapId) ->
 dnat_lb_rule(Targets, Port, MapName, MapId) when length(Targets) > 1 ->
     N = length(Targets),
     [
-        %% 1. Load source IP into REG1
-        nft_expr_ir:ip_saddr(?REG1),
-        %% 2. Jenkins hash mod N → REG1 (0..N-1)
-        nft_expr_ir:hash(?REG1, 4, N, ?REG1),
-        %% 3. Lookup hash result in named data map → REG1 (container IP)
+        %% 1. Match IPv4 only (meta nfproto == ipv4).
+        %%    Without this, nft renders the payload as @nh,96,32 instead of ip saddr.
+        nft_expr_ir:meta(nfproto, ?REG1),
+        nft_expr_ir:cmp(eq, ?REG1, <<2>>),  %% AF_INET = 2
+        %% 2. Load source IP into REG2 (REG1 is used by meta/cmp)
+        nft_expr_ir:ip_saddr(?REG2),
+        %% 3. Jenkins hash mod N → REG1 (0..N-1)
+        nft_expr_ir:hash(?REG2, 4, N, ?REG1),
+        %% 4. Lookup hash result in named data map → REG1 (container IP)
         nft_expr_ir:lookup_data(?REG1, MapName, ?REG1, MapId),
-        %% 4. Load port into REG2
+        %% 5. Load port into REG2
         nft_expr_ir:immediate_data(?REG2, <<Port:16/big>>),
-        %% 5. DNAT to REG1:REG2 (IP:Port)
-        nft_expr_ir:dnat(?REG1, ?REG2, 2)  %% 2 = AF_INET
+        %% 6. DNAT to REG1:REG2 (IP:Port)
+        nft_expr_ir:dnat(?REG1, ?REG2, 2)
     ].
 
 -spec dnat_rule(binary(), 0..65535) -> rule().

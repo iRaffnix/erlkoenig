@@ -25,7 +25,10 @@ event type, or wildcard.
 | Conntrack | `conntrack.flow.new` | New connection |
 | | `conntrack.flow.destroy` | Connection ended |
 | | `conntrack.alert.mode` | Mode switch |
-| Guard | `guard.threat.ban` | IP banned |
+| Guard | `guard.threat.ban` | IP banned (flood or port scan) |
+| | `guard.threat.honeypot` | Connection to honeypot port, instant 24h ban |
+| | `guard.threat.slow_scan` | 5+ distinct ports within 1 hour |
+| | `guard.threat.repeat_offender` | Nth violation, escalating ban (1h → 6h → 24h → 7d) |
 | | `guard.threat.unban` | Ban expired |
 | Control | `control.nft.ban` | Manual ban |
 | | `control.set.add` | Set element added |

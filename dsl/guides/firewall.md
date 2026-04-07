@@ -189,3 +189,70 @@ nft_table :inet, "erlkoenig" do
   end
 end
 ```
+
+## Threat Detection (ct_guard)
+
+erlkoenig monitors conntrack events in real time and automatically bans
+malicious source IPs. Bans are applied in the kernel via nft set elements
+in the `blocklist` set, dropped at raw priority (-300) — before conntrack
+processes the packet. Zero kernel state consumed for banned traffic.
+
+### Detection Types
+
+| Type | Threshold | Ban Duration | What It Catches |
+|------|-----------|-------------|----------------|
+| Connection flood | 50 connections / 10s | 1 hour | SYN floods, HTTP floods, brute force |
+| Port scan | 20 distinct ports / 60s | 1 hour | Nmap, Masscan |
+| Slow scan | 5 distinct ports / 1 hour | 2 hours | Shodan, Censys, manual recon |
+| Honeypot port | 1 connection | 24 hours | Any probe to unused ports (22, 23, 445, 3389, ...) |
+
+### Repeat Offender Escalation
+
+IPs that are banned repeatedly get exponentially longer bans:
+
+| Ban # | Duration |
+|-------|----------|
+| 1st | 1 hour |
+| 2nd | 6 hours |
+| 3rd | 24 hours |
+| 4th+ | 7 days |
+
+### Honeypot Ports
+
+Ports that no service on the host uses. Any single connection attempt
+triggers an instant 24-hour ban. Default honeypot ports:
+
+21 (FTP), 22 (SSH on non-standard hosts), 23 (Telnet), 445 (SMB),
+1433 (MSSQL), 3306 (MySQL), 3389 (RDP), 5900 (VNC), 6379 (Redis),
+8080/8888 (HTTP alt), 9200 (Elasticsearch), 27017 (MongoDB).
+
+Ports actually used by services on the host are automatically excluded.
+
+### Packet Flow
+
+```
+Incoming packet
+    │
+    ▼
+prerouting_ban (priority -300, raw)
+    ├── ip saddr @blocklist → DROP
+    │         ↑
+    │    ct_guard adds IPs here
+    │
+    ▼
+conntrack → ct_guard monitors new flows
+    ├── honeypot port? → instant ban
+    ├── flood threshold? → ban
+    ├── port scan threshold? → ban
+    ├── slow scan threshold? → ban
+    └── repeat offender? → escalated ban
+```
+
+### AMQP Events
+
+All guard actions publish events to `erlkoenig.events`:
+
+- `guard.threat.ban` — flood or port scan detected
+- `guard.threat.honeypot` — honeypot port triggered
+- `guard.threat.slow_scan` — slow scanner detected
+- `guard.threat.unban` — ban expired

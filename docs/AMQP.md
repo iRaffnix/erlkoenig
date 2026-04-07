@@ -165,6 +165,27 @@ All internal erlkoenig events are forwarded as JSON to the `erlkoenig.events` to
 | `metrics.exit` | Process exit traced |
 | `metrics.oom` | OOM event traced |
 | `policy.violation` | Policy engine triggered |
+| `stats.<name>.memory` | cgroup memory stats |
+| `stats.<name>.cpu` | CPU usage percentage |
+| `stats.<name>.pids` | Process count |
+| `stats.<name>.pressure` | PSI pressure metrics |
+| `conntrack.flow.new` | New connection tracked |
+| `conntrack.flow.destroy` | Connection ended |
+| `guard.threat.ban` | IP banned (flood or port scan) |
+| `guard.threat.honeypot` | Connection to honeypot port |
+| `guard.threat.slow_scan` | 5+ distinct ports in 1 hour |
+| `guard.threat.repeat_offender` | Nth ban with escalating duration |
+| `guard.threat.unban` | Ban expired |
+
+#### Guard Event Payloads
+
+| Event | Payload Fields |
+|---|---|
+| `guard.threat.ban` | `ip`, `reason`, `duration`, `ban_count` |
+| `guard.threat.honeypot` | `ip`, `port`, `duration`, `reason` |
+| `guard.threat.slow_scan` | `ip`, `ports[]`, `window`, `reason` |
+| `guard.threat.repeat_offender` | `ip`, `ban_count`, `escalated_duration` |
+| `guard.threat.unban` | `ip` |
 
 ### JSON Envelope
 

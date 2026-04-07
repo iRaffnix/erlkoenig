@@ -11,7 +11,7 @@ defmodule ThreeTierNft do
   #
   # Topologie:
   #
-  #   Internet (:8443)
+  #   Internet (:8443, Port 22 is honeypot trap)
   #      │
   #   ┌──┴───────────────────────────────┐
   #   │  Bridge: dmz (10.0.0.0/24)      │
@@ -64,6 +64,8 @@ defmodule ThreeTierNft do
   #   firewall.from-app-api.drop      — Illegale Egress-Versuche von der API
   #   firewall.from-data-postgres.drop — Illegale Egress-Versuche von der DB
   #   firewall.forward.packet         — NFLOG mit Paket-Details bei Drops
+  #   guard.threat.honeypot           — Instant ban on honeypot port probe
+  #   guard.threat.slow_scan          — Slow scanner detected (5+ ports/hour)
   #   conntrack.flow.new / .destroy   — Conntrack (neue/beendete Verbindungen)
   #   stats.web-0-nginx.memory        — cgroup Memory Stats (alle 2s)
   #   stats.data-0-postgres.pressure  — PSI Pressure (alle 30s)
@@ -122,8 +124,8 @@ defmodule ThreeTierNft do
         # ICMP: Ping für Monitoring
         nft_rule :accept, ip_protocol: :icmp
 
-        # SSH-Zugang
-        nft_rule :accept, tcp_dport: 22
+        # SSH-Zugang (non-standard port, 22 is honeypot)
+        nft_rule :accept, tcp_dport: 22222
 
         # Prometheus Node-Exporter
         nft_rule :accept, tcp_dport: 9100

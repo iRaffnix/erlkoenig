@@ -266,11 +266,28 @@ encode_payload({ct_guard_ban, #{ip := Ip, reason := Reason} = Details}) ->
     {ok, <<"guard.threat.ban">>, #{
         <<"ip">> => format_ip(Ip),
         <<"reason">> => atom_to_binary(Reason),
-        <<"duration">> => maps:get(duration, Details, 0)
+        <<"duration">> => maps:get(duration, Details, 0),
+        <<"ban_count">> => maps:get(ban_count, Details, 1)
     }};
 
 encode_payload({ct_guard_ban, Details}) when is_map(Details) ->
     {ok, <<"guard.threat.ban">>, encode_map(Details)};
+
+encode_payload({ct_guard_honeypot, #{ip := Ip, port := Port} = Details}) ->
+    {ok, <<"guard.threat.honeypot">>, #{
+        <<"ip">> => format_ip(Ip),
+        <<"port">> => Port,
+        <<"duration">> => maps:get(duration, Details, 86400),
+        <<"reason">> => <<"honeypot_port">>
+    }};
+
+encode_payload({ct_guard_slow_scan, #{ip := Ip, ports := Ports} = Details}) ->
+    {ok, <<"guard.threat.slow_scan">>, #{
+        <<"ip">> => format_ip(Ip),
+        <<"ports">> => Ports,
+        <<"window">> => maps:get(window, Details, 0),
+        <<"reason">> => <<"slow_scan">>
+    }};
 
 encode_payload({ct_guard_unban, #{ip := Ip}}) ->
     {ok, <<"guard.threat.unban">>, #{

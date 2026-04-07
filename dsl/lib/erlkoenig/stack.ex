@@ -62,12 +62,8 @@ defmodule Erlkoenig.Stack do
     # Validate pods
     Enum.each(pods, &Erlkoenig.Pod.Builder.validate!/1)
 
+    Erlkoenig.Validation.check_uniqueness(pods, :name, "pod names")
     pod_names = Enum.map(pods, & &1.name)
-    dupes = pod_names -- Enum.uniq(pod_names)
-    if dupes != [] do
-      raise CompileError,
-        description: "duplicate pod names: #{inspect(Enum.uniq(dupes))}"
-    end
 
     # Build list of all container names (pod-qualified)
     all_container_names = Enum.flat_map(pods, fn pod ->
@@ -135,12 +131,7 @@ defmodule Erlkoenig.Stack do
     Enum.each(nft_tables, &Erlkoenig.Nft.TableBuilder.validate!/1)
 
     # Check table name uniqueness
-    table_names = Enum.map(nft_tables, & &1.name)
-    table_dupes = table_names -- Enum.uniq(table_names)
-    if table_dupes != [] do
-      raise CompileError,
-        description: "duplicate nft_table names: #{inspect(Enum.uniq(table_dupes))}"
-    end
+    Erlkoenig.Validation.check_uniqueness(nft_tables, :name, "nft_table names")
 
     nft_tables_term = Enum.map(nft_tables, &Erlkoenig.Nft.TableBuilder.to_term/1)
 

@@ -29,7 +29,7 @@
 #   make clean        — Alles aufraeumen
 
 .PHONY: all check rt rt-san erl test test-rt dialyzer integration release \
-        dsl test-dsl docs go-demos \
+        dsl dsl-escript test-dsl docs go-demos \
         fmt fmt-check xref lint \
         install uninstall fetch-artifacts \
         tag clean clean-rt clean-erl clean-dsl
@@ -145,6 +145,9 @@ integration: rt erl
 
 dsl:
 	cd dsl && mix deps.get && mix compile
+
+dsl-escript: dsl
+	cd dsl && mix escript.build
 
 docs: dsl
 	cd dsl && mix docs

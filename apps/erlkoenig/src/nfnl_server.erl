@@ -52,6 +52,10 @@ Then used by name from any process:
 
 -export_type([server_ref/0]).
 
+-ifdef(TEST).
+-export([next_seq/1, process_acks/3]).
+-endif.
+
 %% --- Types ---
 
 -type server_ref() :: pid() | atom().

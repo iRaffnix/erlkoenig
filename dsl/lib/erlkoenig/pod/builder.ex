@@ -208,12 +208,7 @@ defmodule Erlkoenig.Pod.Builder do
         description: "pod #{inspect(pod.name)}: must have at least one container"
     end
 
-    names = Enum.map(pod.containers, & &1.name)
-    dupes = names -- Enum.uniq(names)
-    if dupes != [] do
-      raise CompileError,
-        description: "pod #{inspect(pod.name)}: duplicate container names: #{inspect(Enum.uniq(dupes))}"
-    end
+    Erlkoenig.Validation.check_uniqueness(pod.containers, :name, "container names in pod #{inspect(pod.name)}")
 
     Enum.each(pod.containers, fn ct ->
       if ct.binary == nil do

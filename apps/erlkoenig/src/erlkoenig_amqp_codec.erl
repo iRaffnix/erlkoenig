@@ -430,13 +430,11 @@ term_to_binary_string(T) -> iolist_to_binary(io_lib:format("~p", [T])).
 encode_ct_flow(Event) when is_map(Event) ->
     M = #{},
     M1 = case maps:find(src, Event) of
-        {ok, <<A,B,C,D>>} ->
-            M#{<<"src">> => iolist_to_binary(io_lib:format("~B.~B.~B.~B", [A,B,C,D]))};
+        {ok, SrcIp} -> M#{<<"src">> => format_ip(SrcIp)};
         _ -> M
     end,
     M2 = case maps:find(dst, Event) of
-        {ok, <<E,F,G,H>>} ->
-            M1#{<<"dst">> => iolist_to_binary(io_lib:format("~B.~B.~B.~B", [E,F,G,H]))};
+        {ok, DstIp} -> M1#{<<"dst">> => format_ip(DstIp)};
         _ -> M1
     end,
     M3 = case maps:find(sport, Event) of

@@ -29,7 +29,8 @@ scp "$HOST":/etc/systemd/system/erlkoenig.service "$BACKUP_DIR/erlkoenig.service
 
 # 4. sys.config (contains AMQP credentials, limits, etc.)
 echo "[4/5] sys.config..."
-scp "$HOST":/opt/erlkoenig/releases/0.5.0/sys.config "$BACKUP_DIR/sys.config" 2>/dev/null || echo "  skipped (no release)"
+REL_DIR=$(ssh "$HOST" 'ls -d /opt/erlkoenig/releases/*/start.boot 2>/dev/null | head -1 | xargs dirname' 2>/dev/null) && \
+  scp "$HOST":"$REL_DIR/sys.config" "$BACKUP_DIR/sys.config" || echo "  skipped (no release)"
 
 # 5. hostname + network info
 echo "[5/5] Host info..."

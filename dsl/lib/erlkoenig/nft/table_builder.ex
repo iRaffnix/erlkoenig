@@ -49,12 +49,7 @@ defmodule Erlkoenig.Nft.TableBuilder do
     end
 
     # Check chain name uniqueness
-    names = Enum.map(t.chains, & &1.name)
-    dupes = names -- Enum.uniq(names)
-    if dupes != [] do
-      raise CompileError,
-        description: "nft_table #{inspect(t.name)}: duplicate chain names: #{inspect(Enum.uniq(dupes))}"
-    end
+    Erlkoenig.Validation.check_uniqueness(t.chains, :name, "chain names in nft_table #{inspect(t.name)}")
 
     # Check counter references exist
     declared_counters = MapSet.new(t.counters)

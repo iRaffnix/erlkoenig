@@ -640,15 +640,23 @@ defmodule Erlkoenig.Stack do
   that exceed detection thresholds. Bans are enforced via nft sets —
   banned IPs are dropped at the kernel level before reaching containers.
 
+  **No implicit defaults.** If no `guard` block is present, no threat
+  detection runs. The developer decides every threshold explicitly.
+
   ## Contains
 
-  - `detect` — detection rules (flood, port scan)
-  - `ban_duration` — how long to ban (seconds)
+  - `detect` — detection rules (flood, port scan, slow scan)
+  - `honeypot_ports` — ports that trigger instant ban on any connection
+  - `honeypot_ban_duration` — how long honeypot bans last (seconds)
+  - `escalation` — repeat offender ban durations (list of seconds)
+  - `ban_duration` — default ban duration (seconds)
   - `whitelist` — IPs that are never banned
 
   ## AMQP Events
 
-  - `guard.threat.ban` — IP banned (includes reason and duration)
+  - `guard.threat.ban` — IP banned (flood or port scan)
+  - `guard.threat.honeypot` — honeypot port triggered, instant ban
+  - `guard.threat.slow_scan` — slow scanner detected
   - `guard.threat.unban` — ban expired
 
   ## Examples
@@ -656,8 +664,13 @@ defmodule Erlkoenig.Stack do
       guard do
         detect :conn_flood, threshold: 50, window: 10
         detect :port_scan, threshold: 20, window: 60
+        detect :slow_scan, threshold: 5, window: 3600
+        honeypot_ports [21, 22, 23, 445, 1433, 3389, 5900, 6379, 27017]
+        honeypot_ban_duration 86400
+        escalation [3600, 21600, 86400, 604800]
         ban_duration 3600
         whitelist {127, 0, 0, 1}
+        whitelist {10, 20, 30, 2}
       end
   """
   defmacro guard(do: block) do
@@ -688,11 +701,13 @@ defmodule Erlkoenig.Stack do
   |------|----------|---------------|
   | `:conn_flood` | New connections per source IP | > `threshold` new connections in `window` seconds |
   | `:port_scan` | Distinct destination ports per source IP | > `threshold` different ports in `window` seconds |
+  | `:slow_scan` | Distinct ports over long window | > `threshold` different ports in `window` seconds |
 
   ## Examples
 
-      detect :conn_flood, threshold: 50, window: 10   # 50 new conns in 10s → ban
-      detect :port_scan, threshold: 20, window: 60    # 20 ports in 60s → ban
+      detect :conn_flood, threshold: 50, window: 10      # 50 new conns in 10s → ban
+      detect :port_scan, threshold: 20, window: 60       # 20 ports in 60s → ban
+      detect :slow_scan, threshold: 5, window: 3600      # 5 ports in 1 hour → ban
   """
   defmacro detect(type, opts) do
     threshold = Keyword.fetch!(opts, :threshold)
@@ -733,6 +748,54 @@ defmodule Erlkoenig.Stack do
     quote do
       var!(ek_guard_builder) = ErlkoenigNft.Guard.Builder.add_whitelist(
         var!(ek_guard_builder), unquote(ip))
+    end
+  end
+
+  @doc """
+  Define honeypot ports. Any single connection to a honeypot port
+  triggers an instant ban. Only list ports that no service on the
+  host uses — every probe is guaranteed malicious.
+
+  ## Examples
+
+      honeypot_ports [21, 22, 23, 445, 1433, 3389, 5900, 6379, 27017]
+  """
+  defmacro honeypot_ports(ports) do
+    quote do
+      var!(ek_guard_builder) = ErlkoenigNft.Guard.Builder.set_honeypot_ports(
+        var!(ek_guard_builder), unquote(ports))
+    end
+  end
+
+  @doc """
+  Set the ban duration for honeypot triggers in seconds.
+  Default: 86400 (24 hours).
+
+  ## Examples
+
+      honeypot_ban_duration 86400     # 24 hours
+  """
+  defmacro honeypot_ban_duration(seconds) do
+    quote do
+      var!(ek_guard_builder) = ErlkoenigNft.Guard.Builder.set_honeypot_ban_duration(
+        var!(ek_guard_builder), unquote(seconds))
+    end
+  end
+
+  @doc """
+  Configure repeat offender escalation. List of ban durations in
+  seconds — one per violation. IPs banned for the Nth time get the
+  Nth duration. Last value repeats for all subsequent bans.
+
+  ## Examples
+
+      # 1st ban: 1h, 2nd: 6h, 3rd: 24h, 4th+: 7 days
+      escalation [3600, 21600, 86400, 604800]
+  """
+  defmacro escalation(durations) do
+    quote do
+      var!(ek_guard_builder) = ErlkoenigNft.Guard.Builder.set_escalation(
+        var!(ek_guard_builder), unquote(durations))
     end
   end
 

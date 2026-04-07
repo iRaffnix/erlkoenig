@@ -365,6 +365,31 @@ defmodule ThreeTierNft do
   # Bei replicas: 2 entstehen pro Pod zwei Container-Instanzen
   # mit eigenen IPs und Veth-Paaren.
 
+  # ══════════════════════════════════════════════════════
+  # Threat Detection
+  # ══════════════════════════════════════════════════════
+  #
+  # Explizite Guard-Konfiguration. Keine impliziten Defaults —
+  # der Entwickler entscheidet welche Schwellwerte gelten.
+  # Ohne diesen Block laeuft kein Guard.
+
+  guard do
+    detect :conn_flood, threshold: 50, window: 10
+    detect :port_scan, threshold: 20, window: 60
+    detect :slow_scan, threshold: 5, window: 3600
+
+    honeypot_ports [21, 22, 23, 445, 1433, 1521, 3306, 3389,
+                    5900, 6379, 8080, 8888, 9200, 27017]
+    honeypot_ban_duration 86400
+
+    escalation [3600, 21600, 86400, 604800]
+
+    ban_duration 3600
+
+    whitelist {127, 0, 0, 1}
+    whitelist {10, 0, 0, 1}
+  end
+
   attach "web",  to: "dmz",  replicas: 3
   attach "app",  to: "app",  replicas: 1
   attach "data", to: "data", replicas: 1

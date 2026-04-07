@@ -25,23 +25,34 @@ defmodule ErlkoenigNft.Guard.Builder do
     %{
       detectors: [],
       ban_duration: 3600,
+      honeypot_ports: [],
+      honeypot_ban_duration: 86400,
+      escalation: [3600, 21600, 86400, 604800],
       whitelist: [{127, 0, 0, 1}],
       cleanup_interval: 30_000
     }
   end
 
-  def add_detector(state, :conn_flood, threshold, window)
-      when is_integer(threshold) and is_integer(window) do
-    %{state | detectors: state.detectors ++ [{:conn_flood, threshold, window}]}
-  end
-
-  def add_detector(state, :port_scan, threshold, window)
-      when is_integer(threshold) and is_integer(window) do
-    %{state | detectors: state.detectors ++ [{:port_scan, threshold, window}]}
+  def add_detector(state, type, threshold, window)
+      when type in [:conn_flood, :port_scan, :slow_scan] and
+           is_integer(threshold) and is_integer(window) do
+    %{state | detectors: state.detectors ++ [{type, threshold, window}]}
   end
 
   def set_ban_duration(state, seconds) when is_integer(seconds) and seconds > 0 do
     %{state | ban_duration: seconds}
+  end
+
+  def set_honeypot_ports(state, ports) when is_list(ports) do
+    %{state | honeypot_ports: ports}
+  end
+
+  def set_honeypot_ban_duration(state, seconds) when is_integer(seconds) and seconds > 0 do
+    %{state | honeypot_ban_duration: seconds}
+  end
+
+  def set_escalation(state, durations) when is_list(durations) do
+    %{state | escalation: durations}
   end
 
   def add_whitelist(state, ip) when is_tuple(ip) do
@@ -59,12 +70,23 @@ defmodule ErlkoenigNft.Guard.Builder do
       cleanup_interval: state.cleanup_interval
     }
 
-    Enum.reduce(state.detectors, base, fn
-      {:conn_flood, threshold, window}, acc ->
-        Map.put(acc, :conn_flood, {threshold, window})
+    base = if state.honeypot_ports != [] do
+      base
+      |> Map.put(:honeypot_ports, state.honeypot_ports)
+      |> Map.put(:honeypot_ban_duration, state.honeypot_ban_duration)
+    else
+      base
+    end
 
-      {:port_scan, threshold, window}, acc ->
-        Map.put(acc, :port_scan, {threshold, window})
+    base = if state.escalation != [3600, 21600, 86400, 604800] do
+      Map.put(base, :escalation, state.escalation)
+    else
+      base
+    end
+
+    Enum.reduce(state.detectors, base, fn
+      {type, threshold, window}, acc ->
+        Map.put(acc, type, {threshold, window})
     end)
   end
 end

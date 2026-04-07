@@ -363,7 +363,7 @@ defmodule ThreeTierNft do
   # Bei replicas: 2 entstehen pro Pod zwei Container-Instanzen
   # mit eigenen IPs und Veth-Paaren.
 
-  attach "web",  to: "dmz",  replicas: 1
+  attach "web",  to: "dmz",  replicas: 3
   attach "app",  to: "app",  replicas: 1
   attach "data", to: "data", replicas: 1
 end

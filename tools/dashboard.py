@@ -255,12 +255,14 @@ class AmqpThread:
                 conn = pika.BlockingConnection(params)
                 ch = conn.channel()
                 stream_name = f"{LOG_STREAM_PREFIX}{container_name}"
+                is_stream = False
 
                 # Try to consume from the stream
                 try:
                     ch.queue_declare(
                         queue=stream_name, durable=True, passive=True
                     )
+                    is_stream = True
                 except Exception:
                     # Stream doesn't exist — try topic exchange fallback
                     conn = pika.BlockingConnection(params)
@@ -278,7 +280,7 @@ class AmqpThread:
 
                 def on_log(ch, method, props, body_bytes):
                     try:
-                        headers = props.headers or {}
+                        headers = props.headers or {} if props.headers else {}
                         fd = headers.get("fd", "stdout")
                         if isinstance(body_bytes, bytes):
                             try:
@@ -291,11 +293,15 @@ class AmqpThread:
                     except Exception:
                         pass
 
+                # Streams require prefetch (QoS) before consuming
+                if is_stream:
+                    ch.basic_qos(prefetch_count=100)
+
                 ch.basic_consume(
                     queue=stream_name,
                     on_message_callback=on_log,
-                    auto_ack=True,
-                    arguments={"x-stream-offset": "last"}
+                    auto_ack=not is_stream,
+                    arguments={"x-stream-offset": "last"} if is_stream else {}
                 )
                 self._log_channels[container_name] = ch
                 ch.start_consuming()
@@ -343,10 +349,12 @@ class AmqpThread:
                     except Exception:
                         pass
 
+                # Streams require prefetch before consuming
+                ch.basic_qos(prefetch_count=200)
                 ch.basic_consume(
                     queue=stream_name,
                     on_message_callback=on_log,
-                    auto_ack=True,
+                    auto_ack=False,
                     arguments={"x-stream-offset": "first"}
                 )
                 ch.start_consuming()

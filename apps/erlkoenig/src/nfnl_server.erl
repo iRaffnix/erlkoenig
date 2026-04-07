@@ -162,16 +162,21 @@ init(_Opts) ->
 -spec handle_call(term(), {pid(), term()}, state()) ->
     {reply, term(), state()}.
 handle_call({apply_msgs, MsgFuns}, _From, #{socket := Sock, seq := Seq} = State) ->
-    {Msgs, NextSeq} = build_msgs(MsgFuns, Seq + 1, []),
-    Batch = nft_batch:wrap(Msgs, Seq),
+    FirstMsgSeq = next_seq(Seq),
+    {Msgs, MsgSeqs, LastMsgSeq} = build_msgs(MsgFuns, FirstMsgSeq, [], []),
+    BatchBeginSeq = Seq,
+    BatchEndSeq = next_seq(LastMsgSeq),
+    Batch = nft_batch:wrap(Msgs, BatchBeginSeq),
+    %% Expected: only the message seqs (batch_begin/end have no NLM_F_ACK)
+    Expected = maps:from_keys(MsgSeqs, true),
     Result =
         case nfnl_socket:send(Sock, Batch) of
             ok ->
-                collect_and_parse(Sock, length(MsgFuns));
+                collect_until_seq(Sock, Expected, ok);
             {error, _} = Err ->
                 Err
         end,
-    {reply, Result, State#{seq => NextSeq + 1}};
+    {reply, Result, State#{seq => BatchEndSeq}};
 handle_call({get_counter, Family, Table, Name}, _From, #{socket := Sock} = State) ->
     Result = nft_object:get_counter(Sock, Family, Table, Name),
     {reply, Result, State};
@@ -204,57 +209,77 @@ terminate(_Reason, #{socket := Sock}) ->
 
 %% --- Internal ---
 
+%% 32-bit wraparound-safe sequence increment.
+-spec next_seq(non_neg_integer()) -> non_neg_integer().
+next_seq(Seq) -> (Seq + 1) band 16#FFFFFFFF.
+
+%% Build encoded messages and collect the sequence numbers assigned.
 -spec build_msgs(
     [fun((non_neg_integer()) -> binary())],
     non_neg_integer(),
-    [binary()]
+    [binary()],
+    [non_neg_integer()]
 ) ->
-    {[binary()], non_neg_integer()}.
-build_msgs([], Seq, Acc) ->
-    {lists:reverse(Acc), Seq};
-build_msgs([Fun | Rest], Seq, Acc) ->
+    {[binary()], [non_neg_integer()], non_neg_integer()}.
+build_msgs([], Seq, MsgAcc, SeqAcc) ->
+    %% Seq points one past the last used seq.
+    %% LastUsedSeq = Seq - 1, but we return Seq as "next available" boundary.
+    %% The caller needs the last actually assigned seq, so subtract 1.
+    %% But with wraparound... just track it properly:
+    {lists:reverse(MsgAcc), lists:reverse(SeqAcc), (Seq - 1) band 16#FFFFFFFF};
+build_msgs([Fun | Rest], Seq, MsgAcc, SeqAcc) ->
     Msg = Fun(Seq),
-    build_msgs(Rest, Seq + 1, [Msg | Acc]).
+    build_msgs(Rest, next_seq(Seq), [Msg | MsgAcc], [Seq | SeqAcc]).
 
--spec collect_and_parse(socket:socket(), non_neg_integer()) ->
-    ok | {error, atom() | {integer(), atom()}}.
-collect_and_parse(Sock, ExpectedCount) ->
-    collect_loop(Sock, ExpectedCount, []).
-
--spec collect_loop(socket:socket(), non_neg_integer(), [binary()]) ->
-    ok | {error, atom() | {integer(), atom()}}.
-collect_loop(_Sock, 0, _Acc) ->
-    ok;
-collect_loop(Sock, Remaining, Acc) ->
+%% Drain the socket until all expected sequence numbers have been seen.
+%% Accumulates the first error but keeps reading — socket is guaranteed
+%% clean after this function returns (no stale ACKs in the buffer).
+-spec collect_until_seq(
+    socket:socket(),
+    #{non_neg_integer() => true},
+    ok | {error, term()}
+) ->
+    ok | {error, term()}.
+collect_until_seq(_Sock, Expected, Acc) when map_size(Expected) =:= 0 ->
+    Acc;
+collect_until_seq(Sock, Expected, Acc) ->
     case nfnl_socket:recv(Sock) of
         {ok, Data} ->
-            Results = nfnl_response:parse(Data),
-            case check_results(Results) of
-                {ok, Count} ->
-                    Left = Remaining - Count,
-                    if
-                        Left =< 0 -> ok;
-                        true -> collect_loop(Sock, Left, Acc)
-                    end;
-                {error, _} = Err ->
-                    Err
-            end;
+            Parsed = nfnl_response:parse_with_seq(Data),
+            {Expected2, Acc2} = process_acks(Parsed, Expected, Acc),
+            collect_until_seq(Sock, Expected2, Acc2);
         {error, timeout} ->
-            {error, timeout};
-        {error, _} = Err ->
-            Err
+            %% Timeout: not all ACKs received. Return what we have.
+            logger:warning("nfnl_server: timeout waiting for ~p ACKs",
+                           [maps:size(Expected)]),
+            case Acc of
+                ok -> {error, timeout};
+                Err -> Err
+            end;
+        {error, Reason} ->
+            {error, Reason}
     end.
 
--spec check_results(nfnl_response:response()) ->
-    {ok, non_neg_integer()} | {error, {integer(), atom()}}.
-check_results(Results) ->
-    check_results(Results, 0).
-
--spec check_results(nfnl_response:response(), non_neg_integer()) ->
-    {ok, non_neg_integer()} | {error, {integer(), atom()}}.
-check_results([], Count) ->
-    {ok, Count};
-check_results([ok | Rest], Count) ->
-    check_results(Rest, Count + 1);
-check_results([{error, _} = Err | _Rest], _Count) ->
-    Err.
+%% Process parsed ACKs against the expected set.
+%% Removes matched seqs from Expected, accumulates first error.
+-spec process_acks(
+    nfnl_response:seq_response(),
+    #{non_neg_integer() => true},
+    ok | {error, term()}
+) ->
+    {#{non_neg_integer() => true}, ok | {error, term()}}.
+process_acks([], Expected, Acc) ->
+    {Expected, Acc};
+process_acks([{Seq, Result} | Rest], Expected, Acc) ->
+    case maps:take(Seq, Expected) of
+        {true, Expected2} ->
+            NewAcc = case {Acc, Result} of
+                {ok, ok}           -> ok;
+                {ok, {error, _}}   -> Result;
+                {{error, _}, _}    -> Acc
+            end,
+            process_acks(Rest, Expected2, NewAcc);
+        error ->
+            %% Stale or out-of-band ACK — discard silently
+            process_acks(Rest, Expected, Acc)
+    end.

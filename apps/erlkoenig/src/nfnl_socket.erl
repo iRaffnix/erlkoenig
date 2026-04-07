@@ -52,6 +52,9 @@ The socket is bound with pid=0, letting the kernel assign our port ID.
 open() ->
     maybe
         {ok, Sock} ?= socket:open(?AF_NETLINK, raw, ?NETLINK_NETFILTER),
+        %% Enable extended ACK messages for better error diagnostics.
+        %% SOL_NETLINK=270, NETLINK_EXT_ACK=11
+        _ = socket:setopt_native(Sock, {270, 11}, <<1:32/native>>),
         ok ?=
             case socket:bind(Sock, sockaddr(0, 0)) of
                 ok ->

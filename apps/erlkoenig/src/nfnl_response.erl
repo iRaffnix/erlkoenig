@@ -38,9 +38,9 @@ Common error codes:
   -95    EOPNOTSUPP   Operation not supported
 """.
 
--export([parse/1]).
+-export([parse/1, parse_with_seq/1]).
 
--export_type([response/0, result/0]).
+-export_type([response/0, seq_response/0, result/0]).
 
 %% --- Types ---
 
@@ -49,6 +49,12 @@ Common error codes:
 
 -type response() :: [result()].
 %% List of results, one per message in the batch.
+
+-type seq_result() :: {non_neg_integer(), result()}.
+%% Result tagged with the sequence number from the ACK header.
+
+-type seq_response() :: [seq_result()].
+%% List of seq-tagged results.
 
 %% --- Constants ---
 
@@ -66,6 +72,17 @@ are included. NLMSG_DONE messages are silently skipped.
 -spec parse(binary()) -> response().
 parse(Bin) when is_binary(Bin) ->
     parse_messages(Bin, []).
+
+-doc """
+Parse responses with sequence numbers preserved.
+
+Returns `[{Seq, ok | {error, Reason}}, ...]`. Used by `nfnl_server`
+for seq-based ACK correlation. NLMSG_DONE messages are not included
+in the result list.
+""".
+-spec parse_with_seq(binary()) -> seq_response().
+parse_with_seq(Bin) when is_binary(Bin) ->
+    parse_messages_seq(Bin, []).
 
 %% --- Internal ---
 
@@ -95,6 +112,34 @@ parse_messages(<<Len:32/little, _Type:16/little, _/binary>> = Bin, Acc) when
     <<_:Len/binary, Tail/binary>> = Bin,
     parse_messages(Tail, Acc);
 parse_messages(_Other, Acc) ->
+    lists:reverse(Acc).
+
+-spec parse_messages_seq(binary(), seq_response()) -> seq_response().
+parse_messages_seq(<<>>, Acc) ->
+    lists:reverse(Acc);
+parse_messages_seq(
+    <<Len:32/little, ?NLMSG_ERROR:16/little, _Flags:16/little, Seq:32/little, _Pid:32/little,
+        Error:32/signed-little, _Rest/binary>> = Bin,
+    Acc
+) when Len >= 20 ->
+    Result =
+        case Error of
+            0 -> ok;
+            N -> {error, {N, errno_name(N)}}
+        end,
+    <<_:Len/binary, Tail/binary>> = Bin,
+    parse_messages_seq(Tail, [{Seq, Result} | Acc]);
+parse_messages_seq(<<Len:32/little, ?NLMSG_DONE:16/little, _/binary>> = Bin, Acc) when
+    Len >= 16
+->
+    <<_:Len/binary, Tail/binary>> = Bin,
+    parse_messages_seq(Tail, Acc);
+parse_messages_seq(<<Len:32/little, _Type:16/little, _/binary>> = Bin, Acc) when
+    Len >= 16
+->
+    <<_:Len/binary, Tail/binary>> = Bin,
+    parse_messages_seq(Tail, Acc);
+parse_messages_seq(_Other, Acc) ->
     lists:reverse(Acc).
 
 -spec errno_name(integer()) ->

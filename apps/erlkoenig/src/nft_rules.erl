@@ -76,7 +76,7 @@ wrap each rule separately:
     masq_rule/0,
     oifname_neq_masq/1,
     dnat_rule/2,
-    dnat_lb_rule/3,
+    dnat_lb_rule/4,
     snat_rule/2,
     tcp_dnat/3,
     %% Per-source-IP rate limiting (meters)
@@ -649,11 +649,11 @@ Expression chain:
 The named data map must be created separately before this rule
 (nft_set:add_data_map + nft_set_elem:add_data_map_elems).
 """.
--spec dnat_lb_rule([binary()], 0..65535, binary()) -> rule().
-dnat_lb_rule([SingleIp], Port, _MapName) ->
+-spec dnat_lb_rule([binary()], 0..65535, binary(), non_neg_integer()) -> rule().
+dnat_lb_rule([SingleIp], Port, _MapName, _MapId) ->
     %% Degenerate case: 1 target = simple DNAT
     dnat_rule(SingleIp, Port);
-dnat_lb_rule(Targets, Port, MapName) when length(Targets) > 1 ->
+dnat_lb_rule(Targets, Port, MapName, MapId) when length(Targets) > 1 ->
     N = length(Targets),
     [
         %% 1. Load source IP into REG1
@@ -661,7 +661,7 @@ dnat_lb_rule(Targets, Port, MapName) when length(Targets) > 1 ->
         %% 2. Jenkins hash mod N → REG1 (0..N-1)
         nft_expr_ir:hash(?REG1, 4, N, ?REG1),
         %% 3. Lookup hash result in named data map → REG1 (container IP)
-        nft_expr_ir:lookup_data(?REG1, MapName, ?REG1),
+        nft_expr_ir:lookup_data(?REG1, MapName, ?REG1, MapId),
         %% 4. Load port into REG2
         nft_expr_ir:immediate_data(?REG2, <<Port:16/big>>),
         %% 5. DNAT to REG1:REG2 (IP:Port)

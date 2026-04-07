@@ -73,6 +73,7 @@ Example:
     bitwise/4,
     lookup/2,
     lookup_data/3,
+    lookup_data/4,
     lookup_inv/2,
     vmap_lookup/2,
     concat_lookup/3,
@@ -292,6 +293,11 @@ lookup(SReg, SetName) ->
 -spec lookup_data(non_neg_integer(), binary(), non_neg_integer()) -> expr().
 lookup_data(SReg, SetName, DReg) ->
     {lookup, #{sreg => SReg, set => SetName, dreg => DReg}}.
+
+-doc "Data map lookup with set_id for same-batch map references.".
+-spec lookup_data(non_neg_integer(), binary(), non_neg_integer(), non_neg_integer()) -> expr().
+lookup_data(SReg, SetName, DReg, SetId) ->
+    {lookup, #{sreg => SReg, set => SetName, dreg => DReg, set_id => SetId}}.
 
 -spec lookup_inv(non_neg_integer(), binary()) -> expr().
 lookup_inv(SReg, SetName) ->

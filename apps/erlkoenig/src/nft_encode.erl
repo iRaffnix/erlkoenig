@@ -113,7 +113,15 @@ expr({lookup, #{sreg := SReg, set := SetName, flags := 1} = Opts}) ->
         set_id => maps:get(set_id, Opts, 0),
         flags => ?NFT_LOOKUP_F_INV
     });
-%% === lookup (normal) ===
+%% === lookup (data map: has dreg for result storage) ===
+expr({lookup, #{sreg := SReg, set := SetName, dreg := DReg} = Opts}) when DReg > 0 ->
+    nft_expr_lookup_gen:encode(#{
+        set => SetName,
+        sreg => SReg,
+        dreg => DReg,
+        set_id => maps:get(set_id, Opts, 0)
+    });
+%% === lookup (normal set membership, no data returned) ===
 expr({lookup, #{sreg := SReg, set := SetName} = Opts}) ->
     nft_expr_lookup_gen:encode(#{
         set => SetName,

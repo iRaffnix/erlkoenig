@@ -70,10 +70,9 @@ Also enables ip_forward so the kernel routes between interfaces.
 -spec setup_table() -> ok | {error, term()}.
 setup_table() ->
     _ = ensure_ets(),
-    %% Clean slate: delete table if it exists (ignore errors)
-    _ = nfnl_server:apply_msgs(?SERVER, [
-        fun(S) -> nft_delete:table(?FAMILY, ?TABLE, S) end
-    ]),
+    %% Selective cleanup: flush own chains instead of deleting the entire table.
+    %% Other subsystems (erlkoenig_config/DSL) may have chains/maps in this table.
+    flush_own_chains(),
     %% Enable IP forwarding + route_localnet on bridge
     _ = file:write_file(?IP_FORWARD_PATH, <<"1">>),
     enable_route_localnet(?BRIDGE_NAME),
@@ -147,9 +146,8 @@ Zones with policy isolate or strict get no masquerade.
 -spec setup_table([map()]) -> ok | {error, term()}.
 setup_table(Zones) when is_list(Zones) ->
     _ = ensure_ets(),
-    _ = nfnl_server:apply_msgs(?SERVER, [
-        fun(S) -> nft_delete:table(?FAMILY, ?TABLE, S) end
-    ]),
+    %% Selective cleanup: flush own chains instead of deleting the entire table.
+    flush_own_chains(),
     _ = file:write_file(?IP_FORWARD_PATH, <<"1">>),
     lists:foreach(fun(#{bridge := Br}) -> enable_route_localnet(Br) end, Zones),
     MasqRules = lists:append([zone_masq_rules(Z) || Z <- Zones]),
@@ -224,6 +222,28 @@ teardown_table() ->
     nfnl_server:apply_msgs(?SERVER, [
         fun(S) -> nft_delete:table(?FAMILY, ?TABLE, S) end
     ]).
+
+%% Flush own chains without deleting the table.
+%% Preserves chains/maps/sets from other subsystems (erlkoenig_config/DSL).
+flush_own_chains() ->
+    OwnChains = [?FORWARD_CHAIN, ?POSTROUTING_CHAIN, ?PREROUTING_CHAIN, ?OUTPUT_CHAIN],
+    %% Also flush per-container chains from ETS
+    PerCtChains = case ets:info(erlkoenig_firewall_ports) of
+        undefined -> [];
+        _ ->
+            [element(5, R) || R <- ets:tab2list(erlkoenig_firewall_ports),
+                              is_tuple(R), tuple_size(R) =:= 5]
+    end,
+    AllChains = OwnChains ++ PerCtChains,
+    lists:foreach(fun(CN) ->
+        _ = nfnl_server:apply_msgs(?SERVER, [
+            fun(S) -> nft_delete:flush_chain(?FAMILY, ?TABLE, CN, S) end
+        ]),
+        _ = nfnl_server:apply_msgs(?SERVER, [
+            fun(S) -> nft_delete:chain(?FAMILY, ?TABLE, CN, S) end
+        ])
+    end, AllChains),
+    ok.
 
 -doc "Add firewall rules for a container (no port-forwarding).".
 -spec add_container(binary(), inet:ip_address(), binary()) -> ok | {error, term()}.
@@ -914,9 +934,10 @@ compile_generic_special(reject, #{tcp := Port}) ->
 compile_generic_special(accept, #{tcp := Port, counter := Counter, limit := #{rate := Rate, burst := Burst}}) ->
     {ok, nft_rules:tcp_accept_limited(Port, iolist_to_binary(Counter),
                                        #{rate => Rate, burst => Burst})};
-compile_generic_special(dnat_lb, #{targets := Targets, dport := Port, map_name := MapName})
+compile_generic_special(dnat_lb, #{targets := Targets, dport := Port,
+                                    map_name := MapName, map_id := MapId})
   when is_list(Targets), length(Targets) > 0 ->
-    {ok, nft_rules:dnat_lb_rule(Targets, Port, MapName)};
+    {ok, nft_rules:dnat_lb_rule(Targets, Port, MapName, MapId)};
 compile_generic_special(_, _) -> false.
 
 -spec compile_generic_matches(map()) -> list().

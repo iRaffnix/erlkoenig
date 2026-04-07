@@ -678,19 +678,17 @@ apply_nft_table(#{name := TableName, chains := Chains} = Table, VethMap, Replica
     TableBin = iolist_to_binary(TableName),
     Counters = maps:get(counters, Table, []),
 
-    %% 0. Atomic table rebuild: delete + add in ONE netlink batch.
-    %% The kernel processes the entire batch as a transaction —
-    %% no window where hooks are missing.
-    %% After this: table exists but is empty (no chains, no counters).
-    flush_table_chains(FamilyNum, TableBin),
+    %% 0. Ensure the table exists (idempotent).
+    %% Do NOT delete+recreate the table — that wipes chains/sets/maps
+    %% from other subsystems (erlkoenig_firewall_nft, ct_guard).
+    %% Instead, selectively remove only DSL-owned objects, then re-add.
+    _ = nfnl_server:apply_msgs(erlkoenig_nft_srv, [
+        fun(S) -> nft_table:add(FamilyNum, TableBin, S) end
+    ]),
 
-
-    %% 2. Create counters
-    CounterMsgs = [fun(S) ->
-        nft_object:add_counter(FamilyNum, TableBin, iolist_to_binary(C), S)
-    end || C <- Counters],
-
-    %% Build ALL messages: counters + chains + rules in one go
+    %% 1. Build the new state first (we need map names to know what to delete)
+    %% Clear tmp map name accumulator before compilation
+    persistent_term:put(erlkoenig_dsl_map_names_tmp, []),
     %% Regular chains first (jump targets), then base chains
     OrderedChains = lists:sort(fun(A, _B) ->
         not maps:is_key(hook, A)
@@ -703,12 +701,49 @@ apply_nft_table(#{name := TableName, chains := Chains} = Table, VethMap, Replica
             {CAcc ++ ChainMsg, MAcc ++ MapMsgs, RAcc ++ RuleMsgs}
         end, {[], [], []}, OrderedChains),
 
-    %% Apply in correct order:
-    %% counters → maps → chains → rules
-    %% Maps MUST come before rules that reference them.
-    %% Chains MUST come before rules that belong to them.
+    %% 2. Collect names of DSL objects for selective cleanup.
+    %% Chain names from the config, map names from the compiled output.
+    ChainNames = [iolist_to_binary(maps:get(name, C)) || C <- Chains],
+    NewMapNames = collect_compiled_map_names(AllMapCreates),
+
+    %% 3. Also collect map names from the persistent_term (previous load's maps).
+    %% On reload, container IPs change → map names change (phash2 of targets).
+    %% We need to delete OLD maps, not just new ones.
+    OldMapNames = persistent_term:get({erlkoenig_dsl_maps, TableBin}, []),
+
+    %% 4. Selectively delete old DSL objects.
+    %% Order: flush chain rules → delete chains → delete maps.
+    %% Maps cannot be deleted while rules reference them.
+    %% Each operation is a separate batch because non-existent objects
+    %% cause the whole batch to fail with enoent (first load: nothing exists).
+    lists:foreach(fun(CN) ->
+        _ = nfnl_server:apply_msgs(erlkoenig_nft_srv, [
+            fun(S) -> nft_delete:flush_chain(FamilyNum, TableBin, CN, S) end
+        ]),
+        _ = nfnl_server:apply_msgs(erlkoenig_nft_srv, [
+            fun(S) -> nft_delete:chain(FamilyNum, TableBin, CN, S) end
+        ])
+    end, ChainNames),
+    AllMapNames = lists:usort(OldMapNames ++ NewMapNames),
+    lists:foreach(fun(MN) ->
+        _ = nfnl_server:apply_msgs(erlkoenig_nft_srv, [
+            fun(S) -> nft_delete:set(FamilyNum, TableBin, MN, S) end
+        ])
+    end, AllMapNames),
+
+    %% 5. Remember current map names for next reload
+    persistent_term:put({erlkoenig_dsl_maps, TableBin}, NewMapNames),
+
+    %% 4. Create counters (idempotent — CREATE flag means no error if exists)
+    CounterMsgs = [fun(S) ->
+        nft_object:add_counter(FamilyNum, TableBin, iolist_to_binary(C), S)
+    end || C <- Counters],
+
+    %% 5. Single atomic batch: counters → maps+elements → chains → rules.
+    %% Maps and elements use SET_ID for same-batch correlation.
+    %% Rules use SET_ID in lookup expressions to reference pending maps.
     AllMsgs = CounterMsgs ++ AllMapCreates ++ AllChainCreates ++ AllRuleCreates,
-    logger:info("erlkoenig_config: nft_table ~s: ~p counters, ~p maps, ~p chains, ~p rules",
+    logger:notice("erlkoenig_config: nft_table ~s: ~p counters, ~p maps, ~p chains, ~p rules",
                 [TableName, length(CounterMsgs), length(AllMapCreates),
                  length(AllChainCreates), length(AllRuleCreates)]),
     case AllMsgs of
@@ -717,29 +752,12 @@ apply_nft_table(#{name := TableName, chains := Chains} = Table, VethMap, Replica
         _ ->
             case nfnl_server:apply_msgs(erlkoenig_nft_srv, AllMsgs) of
                 ok ->
-                    logger:info("erlkoenig_config: nft_table ~s: ~p chains, ~p counters applied",
-                                [TableName, length(Chains), length(Counters)]),
+                    logger:notice("erlkoenig_config: nft_table ~s applied ok", [TableName]),
                     erlkoenig_events:notify({firewall_applied, TableName});
                 {error, Reason} ->
-                    %% Atomic batch failed — try per-chain for error isolation
-                    logger:warning("erlkoenig_config: nft_table ~s batch failed (~p), retrying per-chain",
+                    logger:warning("erlkoenig_config: nft_table ~s batch failed: ~p",
                                    [TableName, Reason]),
-                    erlkoenig_events:notify({firewall_failed, TableName, Reason}),
-                    %% Counters + maps first
-                    _ = nfnl_server:apply_msgs(erlkoenig_nft_srv, CounterMsgs ++ AllMapCreates),
-                    %% Then chains individually
-                    lists:foreach(fun(Chain) ->
-                        {ChainMsg, _MapMsgs, RuleMsgs} = compile_nft_chain_split(
-                            FamilyNum, TableBin, Chain, VethMap, ReplicaIpMap),
-                        case nfnl_server:apply_msgs(erlkoenig_nft_srv, ChainMsg ++ RuleMsgs) of
-                            ok ->
-                                logger:info("erlkoenig_config: nft chain ~s/~s ok",
-                                            [TableName, maps:get(name, Chain)]);
-                            {error, R2} ->
-                                logger:warning("erlkoenig_config: nft chain ~s/~s failed: ~p",
-                                               [TableName, maps:get(name, Chain), R2])
-                        end
-                    end, OrderedChains)
+                    erlkoenig_events:notify({firewall_failed, TableName, Reason})
             end
     end;
 apply_nft_table(_, _, _) -> ok.
@@ -784,7 +802,10 @@ compile_nft_chain_split(Family, Table, #{name := Name, rules := Rules} = Chain,
         {NewRules, NewMaps}
     end, {[], []}, Rules),
 
-    {ChainMsg, lists:reverse(MapMsgs), lists:reverse(RuleMsgs)}.
+    %% MapMsgs are accumulated with prepend (ExtraMaps ++ MA), so they're
+    %% already in correct order [CreateMap, AddElems, ...]. Don't reverse!
+    %% RuleMsgs are accumulated with prepend ([Msg | RA]), so reverse.
+    {ChainMsg, MapMsgs, lists:reverse(RuleMsgs)}.
 
 %% Expand a single nft rule, resolving {:veth_of,...} and {:replica_ips,...}.
 %% Returns a list of rules (one per replica IP when expanded).
@@ -895,21 +916,21 @@ ip_to_binary({A,B,C,D}) -> <<A,B,C,D>>;
 ip_to_binary({A,B,C,D,_Prefix}) -> <<A,B,C,D>>;
 ip_to_binary(B) when is_binary(B) -> B.
 
-%% Safely flush a table: delete+add in one atomic netlink batch.
-%% The table is gone and back in one kernel operation — no window
-%% where hooks are missing.
-flush_table_chains(Family, Table) ->
-    %% Ensure table exists first (idempotent), then delete+recreate
-    %% to flush all chains atomically. Two separate batches because
-    %% delete on a non-existent table aborts the entire batch.
-    _ = nfnl_server:apply_msgs(erlkoenig_nft_srv, [
-        fun(S) -> nft_table:add(Family, Table, S) end
-    ]),
-    _ = nfnl_server:apply_msgs(erlkoenig_nft_srv, [
-        fun(S) -> nft_delete:table(Family, Table, S) end,
-        fun(S) -> nft_table:add(Family, Table, S) end
-    ]),
-    ok.
+
+%% Extract map names from the compiled AllMapCreates list.
+%% AllMapCreates contains [CreateMap1, AddElems1, CreateMap2, AddElems2, ...].
+%% The CreateMap funs create maps with names like __lb_XXXX.
+%% We extract the names by running the split and inspecting maybe_create_lb_map output.
+%% Simpler approach: the map names are embedded in the compiled rules via map_name key.
+-spec collect_compiled_map_names([fun()]) -> [binary()].
+collect_compiled_map_names([]) -> [];
+collect_compiled_map_names(_MapMsgs) ->
+    %% MapMsgs are [Create, Elems, Create, Elems, ...] pairs.
+    %% We can't inspect funs, so we track map names at creation time.
+    %% This is called AFTER compile_nft_chain_split, so we extract from
+    %% the accumulated data. For now, use the persistent_term set in
+    %% maybe_create_lb_map.
+    persistent_term:get(erlkoenig_dsl_map_names_tmp, []).
 
 priority_to_int(filter) -> 0;
 priority_to_int(dstnat) -> -100;
@@ -1449,11 +1470,16 @@ maybe_create_lb_map({rule, dnat_lb, #{targets := Targets, dport := Port} = Opts}
         Targets
     ),
     AddElems = fun(S) ->
-        nft_set_elem:add_data_map_elems(Family, Table, MapName, Elements, S)
+        nft_set_elem:add_data_map_elems(Family, Table, MapName, Elements, MapId, S)
     end,
 
-    %% 3. Inject map_name into the rule opts
-    Rule2 = {rule, dnat_lb, Opts#{map_name => MapName}},
+    %% 3. Track map name for cleanup on next reload
+    OldNames = persistent_term:get(erlkoenig_dsl_map_names_tmp, []),
+    persistent_term:put(erlkoenig_dsl_map_names_tmp, [MapName | OldNames]),
+
+    %% 4. Inject map_name and map_id for same-batch SET_ID correlation.
+    %% Maps, elements, and rules are all in one atomic Netlink batch.
+    Rule2 = {rule, dnat_lb, Opts#{map_name => MapName, map_id => MapId}},
     {Rule2, [CreateMap, AddElems]};
 
 maybe_create_lb_map(Rule, _Family, _Table) ->

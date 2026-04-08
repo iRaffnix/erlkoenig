@@ -50,11 +50,6 @@ jobs:
       - name: DSL tests
         run: cd dsl && mix test
 
-      - name: Build escript
-        run: make dsl-escript
-
-      - name: Verify escript
-        run: dsl/erlkoenig-dsl --help || true
 
   # ── nft Namespace Integration Tests ───────────────────────
   nft-integration:
@@ -90,11 +85,10 @@ jobs:
       - name: Install nft
         run: sudo apt-get update && sudo apt-get install -y nftables
 
-      - name: Build release + DSL escript
+      - name: Build release
         run: |
           rebar3 compile
           rebar3 release
-          make dsl-escript
 
       - name: Run nft kernel tests
         run: sudo bash tests/integration/nft-run-tests.sh tests/integration/testcases

@@ -130,7 +130,8 @@ jobs:
 
             # Step 1: Compile .exs → .term (normal user)
             tmpterm=$(mktemp /tmp/dsl_e2e_XXXXX.term)
-            if ! (cd dsl && mix erlkoenig.compile "../$exs" -o "$tmpterm") >/dev/null 2>&1; then
+            abs_exs="$(pwd)/$exs"
+            if ! (cd dsl && mix erlkoenig.compile "$abs_exs" -o "$tmpterm") >/dev/null 2>&1; then
               echo "  FAIL: $name (dsl compile)"
               FAIL=$((FAIL+1)); rm -f "$tmpterm"; continue
             fi

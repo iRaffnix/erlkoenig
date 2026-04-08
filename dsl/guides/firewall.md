@@ -256,3 +256,77 @@ All guard actions publish events to `erlkoenig.events`:
 - `guard.threat.honeypot` — honeypot port triggered
 - `guard.threat.slow_scan` — slow scanner detected
 - `guard.threat.unban` — ban expired
+
+## Data Maps and Verdict Maps
+
+nftables maps are explicit, named lookup tables. The developer defines
+them in the DSL — no implicit generation behind the scenes.
+
+### nft_map — Data Map (jhash Loadbalancing)
+
+Maps a hash result to a container IP. Used with `dnat_jhash` for
+kernel-native source-IP sticky loadbalancing.
+
+```elixir
+nft_map "web_jhash", :mark, :ipv4_addr,
+  entries: {:replica_ips, "web", "nginx"}
+
+base_chain "prerouting_nat", hook: :prerouting, type: :nat,
+  priority: :dstnat, policy: :accept do
+  nft_rule :dnat_jhash,
+    iifname: "eth0",
+    tcp_dport: 8443,
+    map: "web_jhash",
+    mod: 3,
+    port: 8443
+end
+```
+
+`:replica_ips` expands at deploy time to the actual container IPs.
+`mod: 3` is the jhash modulus (number of map entries). The developer
+must set this explicitly — no auto-detection.
+
+Result in the kernel:
+
+```
+map web_jhash { type mark : ipv4_addr
+    elements = { 0x0 : 10.0.0.2, 0x1 : 10.0.0.3, 0x2 : 10.0.0.4 } }
+chain prerouting_nat {
+    dnat ip to jhash ip saddr mod 3 seed 0x0 map @web_jhash:8443 }
+```
+
+### nft_vmap — Concatenated Verdict Map (Forward Policy)
+
+Replaces multiple accept rules with a single O(1) hashtable lookup.
+Composite keys: `ip saddr . ip daddr . tcp dport → verdict`.
+
+```elixir
+nft_vmap "fwd_policy",
+  fields: [:ipv4_addr, :ipv4_addr, :inet_service],
+  entries: [
+    {{10, 0, 0, 2}, {10, 0, 1, 2}, 4000, :accept},
+    {{10, 0, 0, 3}, {10, 0, 1, 2}, 4000, :accept},
+    {{10, 0, 1, 2}, {10, 0, 2, 2}, 5432, :accept}
+  ]
+
+base_chain "forward", ... do
+  nft_rule :accept, ct_state: [:established, :related]
+  nft_rule :vmap_lookup, vmap: "fwd_policy"
+  nft_rule :drop, counter: "forward_drop"
+end
+```
+
+Result in the kernel:
+
+```
+map fwd_policy { type ipv4_addr . ipv4_addr . inet_service : verdict
+    elements = { 10.0.0.2 . 10.0.1.2 . 4000 : accept,
+                 10.0.1.2 . 10.0.2.2 . 5432 : accept } }
+chain forward {
+    ct state established,related accept
+    ip saddr . ip daddr . th dport vmap @fwd_policy
+    counter name "forward_drop" drop }
+```
+
+At autoscaling time, adding a new container is a single map element
+insertion — no rule rebuild needed.

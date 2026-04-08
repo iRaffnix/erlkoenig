@@ -309,19 +309,35 @@ length 32 bits = IPv4 source address), hashes it with Jenkins hash
 modulo N, looks up the result in the data map, and DNATs to the
 corresponding container IP on port 8443.
 
-In erlkoenig this is expressed as a single DSL rule:
+In erlkoenig, the map and rule are explicit DSL constructs:
 
 ```elixir
-nft_rule :dnat_lb,
-  iifname: "eth0",
-  tcp_dport: 8443,
-  port: 8443,
-  targets: {:replica_ips, "web", "nginx"}
+nft_map "web_jhash", :mark, :ipv4_addr,
+  entries: {:replica_ips, "web", "nginx"}
+
+nft_rule :dnat_jhash,
+  iifname: "eth0", tcp_dport: 8443,
+  map: "web_jhash", mod: 3, port: 8443
 ```
 
-`{:replica_ips, "web", "nginx"}` resolves at deploy time to the actual
-container IPs. The DSL compiler generates the map, elements, and jhash
-rule as a single atomic batch.
+The developer names the map, sets the modulus, and references it
+explicitly. No auto-generated hidden maps.
+
+## Concatenated Verdict Maps
+
+Concat verdict maps use composite keys for O(1) policy lookups.
+Instead of N individual accept rules, one hashtable lookup decides
+the verdict for `ip saddr . ip daddr . tcp dport`.
+
+On Kernel 6.12, concat field descriptors are encoded as
+`NFTA_SET_USERDATA` (attribute 13) using a libnftnl-specific TLV
+format — not `NFTA_SET_DESC` + `DESC_CONCAT` (which is nf-next only).
+
+Concat lookups require 32-bit registers (`NFT_REG32_00` = 8,
+`NFT_REG32_01` = 9, etc.) packed consecutively. The old 128-bit
+registers (`NFT_REG_1` = 1) are too wide — the kernel returns
+`ENODATA` if registers between payload loads are "uninitialized"
+in its 32-bit register tracking.
 
 ## Architecture Overview
 

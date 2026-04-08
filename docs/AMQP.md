@@ -191,17 +191,19 @@ All internal erlkoenig events are forwarded as JSON to the `erlkoenig.events` to
 
 ```json
 {
-  "v": 1,
+  "v": 2,
   "ts": "2026-04-04T12:34:56.789Z",
   "node": "erlkoenig@worker-1",
-  "routing_key": "container.stopped",
+  "key": "container.web-0-nginx.stopped",
   "payload": {
-    "id": "a1b2c3d4-...",
     "exit_code": -1,
     "signal": 9
   }
 }
 ```
+
+v2 envelope uses `"key"` (not `"routing_key"`) and includes the
+entity name in the routing key: `<category>.<entity>.<event>`.
 
 ## Python Consumer (Demo Tool)
 

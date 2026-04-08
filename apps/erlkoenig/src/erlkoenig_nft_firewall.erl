@@ -1368,7 +1368,7 @@ config_path() ->
             ...
         ],
         counters := [banned | dropped | forward | input | output, ...],
-        sets := [{<<_:64, _:_*8>>, ipv4_addr | ipv6_addr}, ...],
+        sets := [{<<_:64, _:_*8>>, ipv4_addr | ipv6_addr, map()}, ...],
         table := <<_:72>>
     }.
 default_config() ->

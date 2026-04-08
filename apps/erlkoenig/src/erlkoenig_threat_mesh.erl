@@ -97,7 +97,7 @@ init(Config) ->
     try pg:join(?PG_SCOPE, ?PG_GROUP, self())
     catch _:_ -> ok  %% pg scope might not exist in test
     end,
-    net_kernel:monitor_nodes(true),
+    _ = net_kernel:monitor_nodes(true),
     Whitelist = normalize_whitelist(maps:get(whitelist, Config, [])),
     {ok, #state{
         active_bans = #{},
@@ -294,7 +294,7 @@ schedule_unban_timer(IP, Sources, State) ->
 -spec cancel_unban_timer(binary(), #state{}) -> ok.
 cancel_unban_timer(IP, #state{unban_timers = Timers}) ->
     case maps:find(IP, Timers) of
-        {ok, Ref} -> erlang:cancel_timer(Ref);
+        {ok, Ref} -> _ = erlang:cancel_timer(Ref), ok;
         error -> ok
     end,
     ok.

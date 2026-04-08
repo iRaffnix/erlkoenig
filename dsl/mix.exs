@@ -4,7 +4,7 @@ defmodule Erlkoenig.DSL.MixProject do
   def project do
     [
       app: :erlkoenig_dsl,
-      version: "0.5.0",
+      version: "0.6.0",
       elixir: "~> 1.18",
       deps: deps(),
       name: "Erlkoenig DSL",

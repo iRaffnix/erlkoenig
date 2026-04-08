@@ -60,3 +60,26 @@ process_acks_preserves_existing_error_test() ->
         [{1, ok}], Expected, {error, previous}),
     ?assertEqual(#{}, Remaining),
     ?assertEqual({error, previous}, Result).
+
+%% --- Unified Seq: verify exports exist ---
+
+unified_seq_nft_object_exports_test() ->
+    %% Ensure module is loaded before checking exports
+    _ = code:ensure_loaded(nft_object),
+    ?assert(erlang:function_exported(nft_object, get_counter, 5)),
+    ?assert(erlang:function_exported(nft_object, get_counter_reset, 5)),
+    ?assert(erlang:function_exported(nft_object, get_all_counters, 4)),
+    ?assert(erlang:function_exported(nft_object, get_counter, 4)),
+    ?assert(erlang:function_exported(nft_object, get_counter_reset, 4)),
+    ?assert(erlang:function_exported(nft_object, get_all_counters, 3)).
+
+unified_seq_nft_query_exports_test() ->
+    _ = code:ensure_loaded(nft_query),
+    ?assert(erlang:function_exported(nft_query, list_tables, 3)),
+    ?assert(erlang:function_exported(nft_query, list_chains, 4)),
+    ?assert(erlang:function_exported(nft_query, list_rules, 4)),
+    ?assert(erlang:function_exported(nft_query, get_ruleset, 3)),
+    ?assert(erlang:function_exported(nft_query, list_set_elems, 5)),
+    ?assert(erlang:function_exported(nft_query, list_tables, 2)),
+    ?assert(erlang:function_exported(nft_query, list_chains, 3)),
+    ?assert(erlang:function_exported(nft_query, list_set_elems, 4)).

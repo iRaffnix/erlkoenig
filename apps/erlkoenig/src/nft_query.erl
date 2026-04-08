@@ -31,11 +31,11 @@ get responses contain data, not just ACK/error codes.
 """.
 
 -export([
-    list_tables/2,
-    list_chains/3,
-    list_rules/3,
-    get_ruleset/2,
-    list_set_elems/4
+    list_tables/2, list_tables/3,
+    list_chains/3, list_chains/4,
+    list_rules/3, list_rules/4,
+    get_ruleset/2, get_ruleset/3,
+    list_set_elems/4, list_set_elems/5
 ]).
 
 -include("nft_constants.hrl").
@@ -339,7 +339,58 @@ strip_null(Bin) ->
 
 -spec seq() -> non_neg_integer().
 seq() ->
-    erlang:system_time(second) band 16#FFFFFFFF.
+    erlang:unique_integer([positive, monotonic]) band 16#FFFFFFFF.
+
+%% Seq-parameterized variants for unified sequence management.
+%% These are called by nfnl_server with the gen_server's seq counter.
+list_tables(Sock, Family, Seq) ->
+    Msg = nfnl_msg:build_hdr(?NFT_MSG_GETTABLE, Family,
+        ?NLM_F_REQUEST bor ?NLM_F_DUMP, Seq, <<>>),
+    case send_and_collect(Sock, Msg) of
+        {ok, Responses} ->
+            {ok, lists:filtermap(fun(Attrs) ->
+                case lists:keyfind(?NFTA_TABLE_NAME, 1, Attrs) of
+                    {_, NameBin} -> {true, strip_null(NameBin)};
+                    false -> false
+                end
+            end, Responses)};
+        {error, _} = Err -> Err
+    end.
+
+list_chains(Sock, Family, Table, Seq) ->
+    FilterAttrs = nfnl_attr:encode_str(?NFTA_CHAIN_TABLE, Table),
+    Msg = nfnl_msg:build_hdr(?NFT_MSG_GETCHAIN, Family,
+        ?NLM_F_REQUEST bor ?NLM_F_DUMP, Seq, FilterAttrs),
+    case send_and_collect(Sock, Msg) of
+        {ok, Responses} ->
+            {ok, lists:filtermap(fun(Attrs) ->
+                case lists:keyfind(?NFTA_CHAIN_NAME, 1, Attrs) of
+                    {_, NameBin} -> {true, #{name => strip_null(NameBin)}};
+                    false -> false
+                end
+            end, Responses)};
+        {error, _} = Err -> Err
+    end.
+
+list_rules(Sock, Family, Table, Seq) ->
+    FilterAttrs = nfnl_attr:encode_str(?NFTA_RULE_TABLE, Table),
+    Msg = nfnl_msg:build_hdr(?NFT_MSG_GETRULE, Family,
+        ?NLM_F_REQUEST bor ?NLM_F_DUMP, Seq, FilterAttrs),
+    send_and_collect(Sock, Msg).
+
+get_ruleset(Sock, Family, Seq) ->
+    Msg = nfnl_msg:build_hdr(?NFT_MSG_GETRULE, Family,
+        ?NLM_F_REQUEST bor ?NLM_F_DUMP, Seq, <<>>),
+    send_and_collect(Sock, Msg).
+
+list_set_elems(Sock, Family, Table, SetName, Seq) ->
+    Attrs = iolist_to_binary([
+        nfnl_attr:encode_str(?NFTA_SET_ELEM_LIST_TABLE, Table),
+        nfnl_attr:encode_str(?NFTA_SET_ELEM_LIST_SET, SetName)
+    ]),
+    Msg = nfnl_msg:build_hdr(?NFT_MSG_GETSETELEM, Family,
+        ?NLM_F_REQUEST bor ?NLM_F_DUMP, Seq, Attrs),
+    send_and_collect(Sock, Msg).
 
 -doc """
 List all elements in a named set.

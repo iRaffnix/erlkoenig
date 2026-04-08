@@ -181,21 +181,31 @@ handle_call({apply_msgs, MsgFuns}, _From, #{socket := Sock, seq := Seq} = State)
                 Err
         end,
     {reply, Result, State#{seq => BatchEndSeq}};
-handle_call({get_counter, Family, Table, Name}, _From, #{socket := Sock} = State) ->
-    Result = nft_object:get_counter(Sock, Family, Table, Name),
-    {reply, Result, State};
-handle_call({get_counter_reset, Family, Table, Name}, _From, #{socket := Sock} = State) ->
-    Result = nft_object:get_counter_reset(Sock, Family, Table, Name),
-    {reply, Result, State};
-handle_call({list_set_elems, Family, Table, SetName}, _From, #{socket := Sock} = State) ->
-    Result = nft_query:list_set_elems(Sock, Family, Table, SetName),
-    {reply, Result, State};
-handle_call({list_chains, Family, Table}, _From, #{socket := Sock} = State) ->
-    Result = nft_query:list_chains(Sock, Family, Table),
-    {reply, Result, State};
-handle_call({get_ruleset, Family}, _From, #{socket := Sock} = State) ->
-    Result = nft_query:get_ruleset(Sock, Family),
-    {reply, Result, State};
+handle_call({get_counter, Family, Table, Name}, _From,
+            #{socket := Sock, seq := Seq} = State) ->
+    QuerySeq = next_seq(Seq),
+    Result = nft_object:get_counter(Sock, Family, Table, Name, QuerySeq),
+    {reply, Result, State#{seq => next_seq(QuerySeq)}};
+handle_call({get_counter_reset, Family, Table, Name}, _From,
+            #{socket := Sock, seq := Seq} = State) ->
+    QuerySeq = next_seq(Seq),
+    Result = nft_object:get_counter_reset(Sock, Family, Table, Name, QuerySeq),
+    {reply, Result, State#{seq => next_seq(QuerySeq)}};
+handle_call({list_set_elems, Family, Table, SetName}, _From,
+            #{socket := Sock, seq := Seq} = State) ->
+    QuerySeq = next_seq(Seq),
+    Result = nft_query:list_set_elems(Sock, Family, Table, SetName, QuerySeq),
+    {reply, Result, State#{seq => next_seq(QuerySeq)}};
+handle_call({list_chains, Family, Table}, _From,
+            #{socket := Sock, seq := Seq} = State) ->
+    QuerySeq = next_seq(Seq),
+    Result = nft_query:list_chains(Sock, Family, Table, QuerySeq),
+    {reply, Result, State#{seq => next_seq(QuerySeq)}};
+handle_call({get_ruleset, Family}, _From,
+            #{socket := Sock, seq := Seq} = State) ->
+    QuerySeq = next_seq(Seq),
+    Result = nft_query:get_ruleset(Sock, Family, QuerySeq),
+    {reply, Result, State#{seq => next_seq(QuerySeq)}};
 handle_call(_Request, _From, State) ->
     {reply, {error, unknown_call}, State}.
 

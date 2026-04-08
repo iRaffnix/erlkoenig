@@ -39,9 +39,9 @@ Usage:
 -export([
     add_counter/4,
     delete/4,
-    get_counter/4,
-    get_counter_reset/4,
-    get_all_counters/3
+    get_counter/4, get_counter/5,
+    get_counter_reset/4, get_counter_reset/5,
+    get_all_counters/3, get_all_counters/4
 ]).
 
 -include("nft_constants.hrl").
@@ -95,6 +95,10 @@ Returns {ok, #{packets => N, bytes => N}} or {error, Reason}.
 get_counter(Sock, Family, Table, Name) ->
     query_counter(Sock, ?NFT_MSG_GETOBJ, Family, Table, Name).
 
+%% @doc get_counter with explicit sequence number (for unified seq management).
+get_counter(Sock, Family, Table, Name, Seq) ->
+    query_counter(Sock, ?NFT_MSG_GETOBJ, Family, Table, Name, Seq).
+
 -doc """
 Read a named counter and atomically reset it to zero.
 
@@ -107,6 +111,10 @@ exact count since the last reset, with no race conditions.
 get_counter_reset(Sock, Family, Table, Name) ->
     query_counter(Sock, ?NFT_MSG_GETOBJ_RESET, Family, Table, Name).
 
+%% @doc get_counter_reset with explicit sequence number.
+get_counter_reset(Sock, Family, Table, Name, Seq) ->
+    query_counter(Sock, ?NFT_MSG_GETOBJ_RESET, Family, Table, Name, Seq).
+
 -doc """
 Get all named counters in a table.
 
@@ -115,6 +123,9 @@ Returns {ok, [#{name => Name, packets => N, bytes => N}]}.
 -spec get_all_counters(socket:socket(), 0..255, binary()) ->
     {ok, [map()]} | {error, atom()}.
 get_all_counters(Sock, Family, Table) ->
+    get_all_counters(Sock, Family, Table, seq()).
+
+get_all_counters(Sock, Family, Table, Seq) ->
     FilterAttrs = iolist_to_binary([
         nfnl_attr:encode_str(?NFTA_OBJ_TABLE, Table),
         nfnl_attr:encode_u32(?NFTA_OBJ_TYPE, ?NFT_OBJECT_COUNTER)
@@ -123,7 +134,7 @@ get_all_counters(Sock, Family, Table) ->
         ?NFT_MSG_GETOBJ,
         Family,
         ?NLM_F_REQUEST bor ?NLM_F_DUMP,
-        seq(),
+        Seq,
         FilterAttrs
     ),
     case send_and_collect(Sock, Msg) of
@@ -146,6 +157,9 @@ get_all_counters(Sock, Family, Table) ->
 -spec query_counter(socket:socket(), 0..255, 0..255, binary(), binary()) ->
     {ok, map()} | {error, atom()}.
 query_counter(Sock, MsgType, Family, Table, Name) ->
+    query_counter(Sock, MsgType, Family, Table, Name, seq()).
+
+query_counter(Sock, MsgType, Family, Table, Name, Seq) ->
     Attrs = iolist_to_binary([
         nfnl_attr:encode_str(?NFTA_OBJ_TABLE, Table),
         nfnl_attr:encode_str(?NFTA_OBJ_NAME, Name),
@@ -155,7 +169,7 @@ query_counter(Sock, MsgType, Family, Table, Name) ->
         MsgType,
         Family,
         ?NLM_F_REQUEST bor ?NLM_F_ACK,
-        seq(),
+        Seq,
         Attrs
     ),
     maybe
@@ -285,6 +299,8 @@ strip_null(Bin) ->
         [Name] -> Name
     end.
 
+%% Sequence number for standalone use (outside gen_server).
+%% When called through nfnl_server, the server provides the seq.
 -spec seq() -> non_neg_integer().
 seq() ->
-    erlang:system_time(second) band 16#FFFFFFFF.
+    erlang:unique_integer([positive, monotonic]) band 16#FFFFFFFF.

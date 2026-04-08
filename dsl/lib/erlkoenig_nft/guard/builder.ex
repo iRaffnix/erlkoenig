@@ -5,18 +5,56 @@
 
 defmodule ErlkoenigNft.Guard.Builder do
   @moduledoc """
-  Pure functional builder for the guard DSL.
+  Builder for the reactive threat detection DSL.
 
-  Produces terms compatible with `erlkoenig_nft_ct_guard:start_link/1`.
+  erlkoenig's guard system creates **one Erlang process per suspicious
+  source IP** (`erlkoenig_threat_actor`, gen_statem). Each actor tracks
+  the IP's behavior through a lifecycle:
+
+      observing → suspicious → banned → probation → forgotten
+
+  Actors never speak to the kernel directly. Ban/unban intentions flow
+  through `erlkoenig_threat_mesh`, which is the single process that
+  writes to the nftables blocklist. This architecture prevents race
+  conditions and enables cluster-wide ban propagation.
+
+  ## DSL Structure
 
   The guard DSL has three semantic blocks:
 
-      detect   — what patterns to look for
-      respond  — what to do when detected
-      allowlist — who is exempt
+      guard do
+        detect do         # what patterns to look for
+          flood over: 50, within: s(10)
+          port_scan over: 20, within: m(1)
+          slow_scan over: 5, within: h(1)
+          honeypot [21, 22, 23, 445, ...]
+        end
 
-  This builder accumulates state from DSL macros and compiles it
-  to a flat config map in `to_term/1`.
+        respond do        # what happens when detected
+          suspect after: 3, distinct: :ports
+          ban_for h(1)
+          honeypot_ban_for h(24)
+          escalate [h(1), h(6), h(24), d(7)]
+          observe_after_unban m(2)
+          forget_after m(5)
+        end
+
+        allowlist [...]   # who is exempt
+      end
+
+  Time units: `s()` seconds, `m()` minutes, `h()` hours, `d()` days.
+
+  ## How It Works
+
+  1. Conntrack events flow from the kernel to `erlkoenig_nft_ct_guard`
+  2. ct_guard routes each event to a per-IP threat actor (created on demand)
+  3. The actor checks flood, scan, slow_scan, and honeypot thresholds
+  4. On ban: actor sends intention to threat_mesh, mesh writes to kernel
+  5. Kernel blocklist has timeout — auto-expiry even if BEAM crashes
+  6. On unban: actor enters probation, then dies if no new events
+
+  This builder accumulates DSL macro calls and compiles them to a flat
+  config map via `to_term/1`.
   """
 
   @doc "Create a new builder with default detect/respond/allowlist settings."

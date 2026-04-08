@@ -636,39 +636,40 @@ defmodule Erlkoenig.Stack do
   # ═══════════════════════════════════════════════════════════
 
   @doc """
-  Configure the threat detection guard.
+  Configure the reactive threat detection guard.
 
-  Reactive threat detection with per-IP tracking.
+  Each suspicious source IP gets its own Erlang process
+  (`erlkoenig_threat_actor`, gen_statem) with a lifecycle:
 
-  The guard monitors conntrack events and automatically bans source IPs
-  that exceed detection thresholds. Each suspicious IP gets its own
-  Erlang process with a lifecycle: observing → suspicious → banned →
-  probation → forgotten. Bans are enforced via nft kernel sets.
+      observing → suspicious → banned → probation → forgotten
 
-  Three semantic blocks:
+  Actors detect floods, port scans, slow scans, and honeypot probes.
+  Ban decisions flow through `erlkoenig_threat_mesh` — the single
+  process that writes to the kernel blocklist. Kernel bans have
+  built-in timeouts and auto-expire even if the BEAM crashes.
 
-  - `detect` — what patterns to look for
-  - `respond` — what happens when detected
-  - `allowlist` — who is exempt
+  ## Structure
+
+  Three blocks — what we detect, how we respond, who we exempt:
 
   ## Examples
 
       guard do
         detect do
-          flood over: 50, within: 10.seconds
-          port_scan over: 20, within: 1.minute
-          slow_scan over: 5, within: 1.hour
+          flood over: 50, within: s(10)
+          port_scan over: 20, within: m(1)
+          slow_scan over: 5, within: h(1)
           honeypot [21, 22, 23, 445, 1433, 1521, 3306,
                     3389, 5900, 6379, 8080, 8888, 9200, 27017]
         end
 
         respond do
           suspect after: 3, distinct: :ports
-          ban_for 1.hour
-          honeypot_ban_for 24.hours
-          escalate [1.hour, 6.hours, 24.hours, 7.days]
-          observe_after_unban 2.minutes
-          forget_after 5.minutes
+          ban_for h(1)
+          honeypot_ban_for h(24)
+          escalate [h(1), h(6), h(24), d(7)]
+          observe_after_unban m(2)
+          forget_after m(5)
         end
 
         allowlist [

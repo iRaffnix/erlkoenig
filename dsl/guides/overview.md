@@ -30,6 +30,8 @@ Container Runtime auf Erlang/OTP 28. Ein 168KB C-Binary spawnt Linux-Namespaces,
 │  erlkoenig_zone (gen_server)   bridge + IP pool      │
 │  erlkoenig_cgroup (gen_server) cgroup v2 hierarchy   │
 │  erlkoenig_nft (netlink)       nftables firewall     │
+│  erlkoenig_threat_actor        per-IP threat detection│
+│  erlkoenig_threat_mesh         kernel ban gateway     │
 │  erlkoenig_amqp_*              AMQP event bridge     │
 │                                                      │
 │  ┌────────────────────────────┐                      │

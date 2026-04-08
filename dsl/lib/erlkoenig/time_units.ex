@@ -5,14 +5,14 @@
 
 defmodule Erlkoenig.TimeUnits do
   @moduledoc """
-  Short time unit functions for readable DSL durations.
+  Time unit macros for readable DSL durations.
 
       flood over: 50, within: s(10)
       ban_for h(1)
       escalate [h(1), h(6), h(24), d(7)]
       forget_after m(5)
 
-  Each function returns seconds as an integer.
+  Each macro expands to seconds at compile time.
   """
 
   @doc "Seconds (identity)."

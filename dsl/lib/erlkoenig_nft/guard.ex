@@ -5,9 +5,13 @@
 
 defmodule ErlkoenigNft.Guard do
   @moduledoc """
-  Standalone guard DSL (for use without Erlkoenig.Stack).
+  Guard outer wrapper for standalone use.
 
-  Prefer `use Erlkoenig.Stack` which includes guard macros automatically.
+  Only provides the `guard do ... end` block. The inner macros
+  (`detect`, `flood`, `respond`, `suspect`, `allowlist`, etc.)
+  are defined in `Erlkoenig.Stack`.
+
+  **Use `Erlkoenig.Stack` instead** — it includes everything.
   """
 
   alias ErlkoenigNft.Guard.Builder

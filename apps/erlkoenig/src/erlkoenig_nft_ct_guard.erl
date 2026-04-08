@@ -133,6 +133,7 @@ init(Config) ->
     Whitelist = normalize_whitelist(maps:get(whitelist, Config, ?DEFAULT_WHITELIST)),
     HoneypotPorts = sets:from_list(maps:get(honeypot_ports, Config, ?DEFAULT_HONEYPOT_PORTS)),
     Escalation = maps:get(escalation, Config, [3600, 21600, 86400, 604800]),
+    SuspectAfter = maps:get(suspect_after, Config, 3),
 
     %% Create ETS tables (defensive: handle restart race where table still exists)
     %% Conn tracking: ordered_set for efficient time-range queries
@@ -164,6 +165,7 @@ init(Config) ->
         cleanup_ms => CleanupMs,
         whitelist => Whitelist,
         escalation => Escalation,
+        suspect_after => SuspectAfter,
         %% Stats (detection counts updated by actors via ct_guard_events broadcast)
         events_seen => 0,
         floods_detected => 0,
@@ -458,11 +460,13 @@ build_actor_config(State) ->
       ban_duration := BD, honeypot_ban_duration := HBD,
       honeypot_ports := HP} = State,
     Escalation = maps:get(escalation, State, [3600, 21600, 86400, 604800]),
+    SuspectAfter = maps:get(suspect_after, State, 3),
     #{flood_max => FM, flood_window => FW,
       scan_max => SM, scan_window => SW,
       slow_max => SlM, slow_window => SlW,
       ban_duration => BD, honeypot_ban_duration => HBD,
-      honeypot_ports => HP, escalation => Escalation}.
+      honeypot_ports => HP, escalation => Escalation,
+      suspect_after => SuspectAfter}.
 
 %% Defensive ETS creation: if the table already exists (restart race),
 %% reuse it instead of crashing with badarg.

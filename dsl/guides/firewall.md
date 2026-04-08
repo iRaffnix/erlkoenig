@@ -197,7 +197,7 @@ IP gets its own Erlang process (`erlkoenig_threat_actor`, gen_statem) that
 tracks the IP's behavior over time:
 
 ```
-observing → suspicious → banned → probation → forgotten
+observing → suspicious → banned → probation → (process dies)
 ```
 
 Bans are applied in the kernel via nft set elements with kernel-side
@@ -252,7 +252,7 @@ Each suspicious IP gets its own process with isolated state:
 - **suspicious** — 3+ distinct ports seen, AMQP alert fired
 - **banned** — threshold exceeded, kernel-level block active
 - **probation** — ban expired, watching for recidivism
-- **forgotten** — no traffic for 5 minutes, process dies (automatic cleanup)
+- **idle** — no traffic for 5 minutes, process dies (automatic cleanup)
 
 Repeat offenders restart with escalated ban durations (1h → 6h → 24h → 7d).
 

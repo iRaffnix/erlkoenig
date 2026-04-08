@@ -64,11 +64,9 @@ Container Runtime auf Erlang/OTP 28. Ein 168KB C-Binary spawnt Linux-Namespaces,
 
 | Repo | Language | Description |
 |------|----------|-------------|
-| **erlkoenig** | Erlang + Elixir | Core runtime, DSL, OTP application |
-| **erlkoenig_rt** | C (musl) | Container spawner, namespace setup |
-| **erlkoenig_nft** | Erlang | Pure Netlink nftables implementation |
+| **erlkoenig** | Erlang + Elixir | Core runtime, nft firewall, threat detection, DSL |
+| **erlkoenig_rt** | C (musl) | 168KB container spawner, namespace setup |
 | **erlkoenigin** | Markdown | Specs, ADRs, system designs |
-| **erlkoenig_nfnl** | Erlang | Low-level Netfilter Netlink protocol |
 
 ## Quick Start
 

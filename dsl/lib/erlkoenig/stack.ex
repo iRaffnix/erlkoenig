@@ -641,7 +641,7 @@ defmodule Erlkoenig.Stack do
   Each suspicious source IP gets its own Erlang process
   (`erlkoenig_threat_actor`, gen_statem) with a lifecycle:
 
-      observing → suspicious → banned → probation → forgotten
+      observing → suspicious → banned → probation → (process dies)
 
   Actors detect floods, port scans, slow scans, and honeypot probes.
   Ban decisions flow through `erlkoenig_threat_mesh` — the single

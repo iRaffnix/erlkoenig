@@ -11,7 +11,7 @@ defmodule ErlkoenigNft.Guard.Builder do
   source IP** (`erlkoenig_threat_actor`, gen_statem). Each actor tracks
   the IP's behavior through a lifecycle:
 
-      observing → suspicious → banned → probation → forgotten
+      observing → suspicious → banned → probation → (process dies)
 
   Actors never speak to the kernel directly. Ban/unban intentions flow
   through `erlkoenig_threat_mesh`, which is the single process that

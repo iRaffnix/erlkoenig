@@ -247,8 +247,9 @@ check_slow_scan(#data{ports_seen = Ports, first_seen = FirstSeen,
             check_suspect(Data)
     end.
 
-check_suspect(#data{ports_seen = Ports}) ->
-    case sets:size(Ports) >= 3 of
+check_suspect(#data{ports_seen = Ports, config = Config}) ->
+    SuspectAfter = maps:get(suspect_after, Config, 3),
+    case sets:size(Ports) >= SuspectAfter of
         true -> suspect;
         false -> clear
     end.

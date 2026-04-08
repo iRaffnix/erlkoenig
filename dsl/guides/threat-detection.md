@@ -5,7 +5,7 @@ automatically. Each suspicious IP gets its own Erlang process
 that tracks behavior through a lifecycle:
 
 ```
-observing → suspicious → banned → probation → forgotten
+observing → suspicious → banned → probation → (process dies)
 ```
 
 No log files, no manual intervention. The kernel bans IPs at

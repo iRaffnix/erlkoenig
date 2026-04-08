@@ -822,15 +822,13 @@ compile_nft_chain_split(Family, Table, #{name := Name, rules := Rules} = Chain,
 -spec maybe_collapse_to_vmaps([term()], non_neg_integer(), binary(), binary()) ->
     {[term()], [fun()]}.
 maybe_collapse_to_vmaps(Rules, Family, Table, ChainBin) ->
-    %% Partition rules into collapsible and non-collapsible
-    {FwdAccepts, JumpRules, OtherRules} = partition_rules(Rules),
-
-    %% 1. Collapse saddr+daddr+dport accept rules into concat vmap
-    {ResultRules2, VmapMsgs2} = case length(FwdAccepts) >= 3 of
+    %% Count collapsible rules (saddr+daddr+tcp accept)
+    Collapsible = [R || {rule, accept, #{saddr := _, daddr := _, tcp := _}} = R <- Rules],
+    case length(Collapsible) >= 3 of
         true ->
             VmapName = <<"__fwd_", ChainBin/binary>>,
             VmapId = erlang:phash2(VmapName) band 16#FFFF,
-            %% Create concat vmap: ip saddr . ip daddr . tcp dport → verdict
+            %% Create concat vmap
             CreateVmap = fun(S) ->
                 nft_set:add_concat_vmap(Family, #{
                     table => Table,
@@ -839,53 +837,47 @@ maybe_collapse_to_vmaps(Rules, Family, Table, ChainBin) ->
                     id => VmapId
                 }, VmapId, S)
             end,
-            %% Add elements
+            %% Collect elements from collapsible rules
             Elements = lists:filtermap(fun({rule, accept, Opts}) ->
                 case {maps:find(saddr, Opts), maps:find(daddr, Opts), maps:find(tcp, Opts)} of
                     {{ok, SA}, {ok, DA}, {ok, Port}} ->
                         SABin = ip_to_binary(SA),
                         DABin = ip_to_binary(DA),
-                        %% Key: saddr(4) . daddr(4) . dport(2) . pad(2) = 12 bytes
                         Key = <<SABin/binary, DABin/binary, Port:16/big, 0:16>>,
                         {true, {Key, accept}};
                     _ -> false
                 end
-            end, FwdAccepts),
+            end, Collapsible),
             AddElems = fun(S) ->
                 nft_set_elem:add_vmap_elems(Family, Table, VmapName, Elements, S)
             end,
             %% Track map name for cleanup
             OldNames = persistent_term:get(erlkoenig_dsl_map_names_tmp, []),
             persistent_term:put(erlkoenig_dsl_map_names_tmp, [VmapName | OldNames]),
-            %% Replace all fwd accepts with one vmap lookup rule
+            %% Replace collapsible rules in-place, preserving order.
+            %% First collapsible rule becomes the vmap lookup,
+            %% subsequent collapsible rules are removed.
             LookupRule = {rule, vmap_concat_lookup, #{
                 set => VmapName,
                 set_id => VmapId,
                 fields => [ip_saddr, ip_daddr, tcp_dport]
             }},
-            {[LookupRule | OtherRules], [CreateVmap, AddElems]};
+            CollapsibleSet = sets:from_list(Collapsible),
+            {Replaced, _} = lists:foldl(fun(Rule, {Acc, Inserted}) ->
+                case sets:is_element(Rule, CollapsibleSet) of
+                    true when not Inserted ->
+                        {[LookupRule | Acc], true};
+                    true ->
+                        {Acc, Inserted};  %% skip subsequent collapsible rules
+                    false ->
+                        {[Rule | Acc], Inserted}
+                end
+            end, {[], false}, Rules),
+            {lists:reverse(Replaced), [CreateVmap, AddElems]};
         false ->
-            {FwdAccepts ++ OtherRules, []}
-    end,
+            {Rules, []}
+    end.
 
-    %% 2. iifname jump rules stay as individual rules for now.
-    %% Collapsing them into an iifname vmap requires the IFNAME set type
-    %% which libnftnl encodes differently (variable-length string keys).
-    {JumpRules ++ ResultRules2, VmapMsgs2}.
-
-%% Partition expanded rules into three groups:
-%% - Forward accepts: {rule, accept, #{saddr, daddr, tcp}} — collapsible
-%% - Jump rules: {rule, jump, #{iif, chain}} — potentially collapsible
-%% - Other rules: everything else — keep as-is
-partition_rules(Rules) ->
-    lists:foldl(fun
-        ({rule, accept, #{saddr := _, daddr := _, tcp := _}} = R, {FA, JR, OR}) ->
-            {[R | FA], JR, OR};
-        ({rule, jump, #{iif := _, chain := _}} = R, {FA, JR, OR}) ->
-            {FA, [R | JR], OR};
-        (R, {FA, JR, OR}) ->
-            {FA, JR, [R | OR]}
-    end, {[], [], []}, Rules).
 
 %% Expand a single nft rule, resolving {:veth_of,...} and {:replica_ips,...}.
 %% Returns a list of rules (one per replica IP when expanded).

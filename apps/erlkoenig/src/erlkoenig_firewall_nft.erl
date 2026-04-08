@@ -921,6 +921,9 @@ compile_generic_special(connlimit_drop, #{max := Max}) ->
     {ok, nft_rules:connlimit_drop(Max, Flags)};
 compile_generic_special(vmap_dispatch, #{proto := Proto, name := Name}) ->
     {ok, nft_rules:vmap_dispatch(Proto, iolist_to_binary(Name))};
+compile_generic_special(vmap_concat_lookup, #{set := SetName, fields := Fields} = Opts) ->
+    SetId = maps:get(set_id, Opts, 0),
+    {ok, nft_rules:concat_vmap_lookup(iolist_to_binary(SetName), Fields, SetId)};
 compile_generic_special(accept, #{tcp_range := {From, To}}) ->
     {ok, nft_rules:tcp_port_range_accept(From, To)};
 compile_generic_special(accept, #{protocol := Proto}) ->

@@ -111,6 +111,7 @@ wrap each rule separately:
     notrack_rule/2,
     %% Verdict map dispatch
     vmap_dispatch/2,
+    concat_vmap_lookup/3,
     %% Flow offload
     flow_offload/1,
     %% Concatenated set lookup
@@ -989,6 +990,31 @@ vmap_dispatch(udp, VmapName) ->
         nft_expr_ir:cmp(eq, ?REG1, <<?UDP>>),
         nft_expr_ir:udp_dport(?REG1),
         nft_expr_ir:vmap_lookup(?REG1, VmapName)
+    ].
+
+-doc """
+Concatenated verdict map lookup: ip saddr . ip daddr . tcp dport vmap @name.
+
+Loads source IP into REG1, destination IP into REG2, TCP destination port
+into REG3, then performs a concatenated verdict map lookup. The kernel
+matches all three fields as one composite key in O(1).
+""".
+-spec concat_vmap_lookup(binary(), [atom()], non_neg_integer()) -> rule().
+concat_vmap_lookup(VmapName, [ip_saddr, ip_daddr, tcp_dport], SetId) ->
+    %% Concat lookups require consecutive 32-bit registers (NFT_REG32_xx).
+    %% Old 128-bit registers (REG_1=1..REG_4=4) are too wide.
+    %% NFT_REG32_00 = 8, NFT_REG32_01 = 9, etc.
+    R32_0 = 8,   %% NFT_REG32_00
+    R32_1 = 9,   %% NFT_REG32_01
+    R32_2 = 10,  %% NFT_REG32_02
+    [
+        nft_expr_ir:meta(nfproto, ?REG1),
+        nft_expr_ir:cmp(eq, ?REG1, <<2>>),     %% AF_INET
+        nft_expr_ir:ip_saddr(R32_0),            %% REG32_00 = saddr (4 bytes)
+        nft_expr_ir:ip_daddr(R32_1),            %% REG32_01 = daddr (4 bytes)
+        nft_expr_ir:tcp_dport(R32_2),           %% REG32_02 = dport (2 bytes)
+        %% Concat lookup: reads 12 bytes starting at REG32_00
+        {lookup, #{sreg => R32_0, set => VmapName, dreg => 0, set_id => SetId}}
     ].
 -doc """
 Offload established connections to a named flowtable.

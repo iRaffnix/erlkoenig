@@ -783,29 +783,109 @@ compile_nft_chain_split(Family, Table, #{name := Name, rules := Rules} = Chain,
             }, S) end]
     end,
 
-    %% Compile rules — collect Map messages for dnat_lb rules
-    {RuleMsgs, MapMsgs} = lists:foldl(fun({Action, Opts}, {RAcc, MAcc}) ->
-        ExpandedRules = expand_nft_rule(Action, Opts, VethMap, ReplicaIpMap),
-        {NewRules, NewMaps} = lists:foldl(fun(Rule, {RA, MA}) ->
-            try
-                %% For dnat_lb: create data map before rule
-                {Rule2, ExtraMaps} = maybe_create_lb_map(Rule, Family, Table),
-                Compiled = erlkoenig_firewall_nft:compile_rule(Rule2),
-                RuleMsg = nft_encode:rule_fun(Family, Table, ChainBin, Compiled),
-                {[RuleMsg | RA], ExtraMaps ++ MA}
-            catch C:Err ->
-                logger:warning("erlkoenig_config: nft rule compile error: ~p:~p for ~p",
-                               [C, Err, Rule]),
-                {RA, MA}
-            end
-        end, {RAcc, MAcc}, ExpandedRules),
-        {NewRules, NewMaps}
-    end, {[], []}, Rules),
+    %% Phase 1: Expand all rules (resolve veth_of, replica_ips)
+    AllExpanded = lists:flatmap(fun({Action, Opts}) ->
+        expand_nft_rule(Action, Opts, VethMap, ReplicaIpMap)
+    end, Rules),
 
-    %% MapMsgs are accumulated with prepend (ExtraMaps ++ MA), so they're
-    %% already in correct order [CreateMap, AddElems, ...]. Don't reverse!
-    %% RuleMsgs are accumulated with prepend ([Msg | RA]), so reverse.
-    {ChainMsg, MapMsgs, lists:reverse(RuleMsgs)}.
+    %% Phase 2: Collapse eligible rules into verdict maps
+    %% - accept rules with saddr+daddr+tcp → concat vmap
+    %% - jump rules with iif → iifname vmap
+    {CollapsedRules, VmapMsgs} = maybe_collapse_to_vmaps(
+        AllExpanded, Family, Table, ChainBin),
+
+    %% Phase 3: Compile remaining rules (including non-collapsible ones)
+    {RuleMsgs, MapMsgs} = lists:foldl(fun(Rule, {RA, MA}) ->
+        try
+            {Rule2, ExtraMaps} = maybe_create_lb_map(Rule, Family, Table),
+            Compiled = erlkoenig_firewall_nft:compile_rule(Rule2),
+            RuleMsg = nft_encode:rule_fun(Family, Table, ChainBin, Compiled),
+            {[RuleMsg | RA], ExtraMaps ++ MA}
+        catch C:Err ->
+            logger:warning("erlkoenig_config: nft rule compile error: ~p:~p for ~p",
+                           [C, Err, Rule]),
+            {RA, MA}
+        end
+    end, {[], []}, CollapsedRules),
+
+    %% MapMsgs: dnat_lb maps. VmapMsgs: concat/iifname vmaps.
+    %% RuleMsgs are accumulated with prepend, so reverse.
+    {ChainMsg, VmapMsgs ++ MapMsgs, lists:reverse(RuleMsgs)}.
+
+%% ===================================================================
+%% VMap Collapsing — replace repetitive rules with O(1) lookups
+%% ===================================================================
+
+%% Scan expanded rules and collapse eligible patterns into verdict maps:
+%%  - Multiple {rule, accept, #{saddr, daddr, tcp}} → concat vmap
+%%  - Multiple {rule, jump, #{iif, chain}} → iifname vmap
+-spec maybe_collapse_to_vmaps([term()], non_neg_integer(), binary(), binary()) ->
+    {[term()], [fun()]}.
+maybe_collapse_to_vmaps(Rules, Family, Table, ChainBin) ->
+    %% Partition rules into collapsible and non-collapsible
+    {FwdAccepts, JumpRules, OtherRules} = partition_rules(Rules),
+
+    %% 1. Collapse saddr+daddr+dport accept rules into concat vmap
+    {ResultRules2, VmapMsgs2} = case length(FwdAccepts) >= 3 of
+        true ->
+            VmapName = <<"__fwd_", ChainBin/binary>>,
+            VmapId = erlang:phash2(VmapName) band 16#FFFF,
+            %% Create concat vmap: ip saddr . ip daddr . tcp dport → verdict
+            CreateVmap = fun(S) ->
+                nft_set:add_concat_vmap(Family, #{
+                    table => Table,
+                    name => VmapName,
+                    fields => [ipv4_addr, ipv4_addr, inet_service],
+                    id => VmapId
+                }, VmapId, S)
+            end,
+            %% Add elements
+            Elements = lists:filtermap(fun({rule, accept, Opts}) ->
+                case {maps:find(saddr, Opts), maps:find(daddr, Opts), maps:find(tcp, Opts)} of
+                    {{ok, SA}, {ok, DA}, {ok, Port}} ->
+                        SABin = ip_to_binary(SA),
+                        DABin = ip_to_binary(DA),
+                        %% Key: saddr(4) . daddr(4) . dport(2) . pad(2) = 12 bytes
+                        Key = <<SABin/binary, DABin/binary, Port:16/big, 0:16>>,
+                        {true, {Key, accept}};
+                    _ -> false
+                end
+            end, FwdAccepts),
+            AddElems = fun(S) ->
+                nft_set_elem:add_vmap_elems(Family, Table, VmapName, Elements, S)
+            end,
+            %% Track map name for cleanup
+            OldNames = persistent_term:get(erlkoenig_dsl_map_names_tmp, []),
+            persistent_term:put(erlkoenig_dsl_map_names_tmp, [VmapName | OldNames]),
+            %% Replace all fwd accepts with one vmap lookup rule
+            LookupRule = {rule, vmap_concat_lookup, #{
+                set => VmapName,
+                set_id => VmapId,
+                fields => [ip_saddr, ip_daddr, tcp_dport]
+            }},
+            {[LookupRule | OtherRules], [CreateVmap, AddElems]};
+        false ->
+            {FwdAccepts ++ OtherRules, []}
+    end,
+
+    %% 2. iifname jump rules stay as individual rules for now.
+    %% Collapsing them into an iifname vmap requires the IFNAME set type
+    %% which libnftnl encodes differently (variable-length string keys).
+    {JumpRules ++ ResultRules2, VmapMsgs2}.
+
+%% Partition expanded rules into three groups:
+%% - Forward accepts: {rule, accept, #{saddr, daddr, tcp}} — collapsible
+%% - Jump rules: {rule, jump, #{iif, chain}} — potentially collapsible
+%% - Other rules: everything else — keep as-is
+partition_rules(Rules) ->
+    lists:foldl(fun
+        ({rule, accept, #{saddr := _, daddr := _, tcp := _}} = R, {FA, JR, OR}) ->
+            {[R | FA], JR, OR};
+        ({rule, jump, #{iif := _, chain := _}} = R, {FA, JR, OR}) ->
+            {FA, [R | JR], OR};
+        (R, {FA, JR, OR}) ->
+            {FA, JR, [R | OR]}
+    end, {[], [], []}, Rules).
 
 %% Expand a single nft rule, resolving {:veth_of,...} and {:replica_ips,...}.
 %% Returns a list of rules (one per replica IP when expanded).

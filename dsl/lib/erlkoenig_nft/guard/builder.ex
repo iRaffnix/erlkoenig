@@ -1,85 +1,144 @@
 #
 # Copyright 2026 Erlkoenig Contributors
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
+# Licensed under the Apache License, Version 2.0
 
 defmodule ErlkoenigNft.Guard.Builder do
   @moduledoc """
-  Pure functional builder for threat detection configs.
+  Pure functional builder for the guard DSL.
 
   Produces terms compatible with `erlkoenig_nft_ct_guard:start_link/1`.
+
+  The guard DSL has three semantic blocks:
+
+      detect   — what patterns to look for
+      respond  — what to do when detected
+      allowlist — who is exempt
+
+  This builder accumulates state from DSL macros and compiles it
+  to a flat config map in `to_term/1`.
   """
 
+  @doc "Create a new builder with default detect/respond/allowlist settings."
   def new do
     %{
+      # detect block
       detectors: [],
-      ban_duration: 3600,
       honeypot_ports: [],
+      # respond block
+      ban_duration: 3600,
       honeypot_ban_duration: 86400,
       escalation: [3600, 21600, 86400, 604800],
-      whitelist: [{127, 0, 0, 1}],
+      suspect_after: 3,
+      suspect_by: :distinct_ports,
+      probation: 120,
+      forget_after: 300,
+      # allowlist
+      allowlist: [{127, 0, 0, 1}],
+      # internal
       cleanup_interval: 30_000
     }
   end
 
-  def add_detector(state, type, threshold, window)
-      when type in [:conn_flood, :port_scan, :slow_scan] and
-           is_integer(threshold) and is_integer(window) do
-    %{state | detectors: state.detectors ++ [{type, threshold, window}]}
+  # ── detect block ──────────────────────────────
+
+  @doc "Add a connection flood detector with `over` threshold in `within` seconds."
+  def add_flood(state, over, within) when is_integer(over) and is_integer(within) do
+    %{state | detectors: state.detectors ++ [{:conn_flood, over, within}]}
   end
 
-  def set_ban_duration(state, seconds) when is_integer(seconds) and seconds > 0 do
-    %{state | ban_duration: seconds}
+  @doc "Add a port scan detector with `over` threshold in `within` seconds."
+  def add_port_scan(state, over, within) when is_integer(over) and is_integer(within) do
+    %{state | detectors: state.detectors ++ [{:port_scan, over, within}]}
   end
 
+  @doc "Add a slow scan detector with `over` threshold in `within` seconds."
+  def add_slow_scan(state, over, within) when is_integer(over) and is_integer(within) do
+    %{state | detectors: state.detectors ++ [{:slow_scan, over, within}]}
+  end
+
+  @doc "Set the list of honeypot ports to monitor."
   def set_honeypot_ports(state, ports) when is_list(ports) do
     %{state | honeypot_ports: ports}
   end
 
+  @doc "Legacy: add a detector by type atom (`:conn_flood`, `:port_scan`, `:slow_scan`)."
+  def add_detector(state, :conn_flood, threshold, window), do: add_flood(state, threshold, window)
+  def add_detector(state, :port_scan, threshold, window), do: add_port_scan(state, threshold, window)
+  def add_detector(state, :slow_scan, threshold, window), do: add_slow_scan(state, threshold, window)
+
+  # ── respond block ─────────────────────────────
+
+  @doc "Set the default ban duration in seconds."
+  def set_ban_duration(state, seconds) when is_integer(seconds) and seconds > 0 do
+    %{state | ban_duration: seconds}
+  end
+
+  @doc "Set the ban duration for honeypot hits in seconds."
   def set_honeypot_ban_duration(state, seconds) when is_integer(seconds) and seconds > 0 do
     %{state | honeypot_ban_duration: seconds}
   end
 
+  @doc "Set the list of escalating ban durations for repeat offenders."
   def set_escalation(state, durations) when is_list(durations) do
     %{state | escalation: durations}
   end
 
-  def add_whitelist(state, ip) when is_tuple(ip) do
-    %{state | whitelist: state.whitelist ++ [ip]}
+  @doc "Set the suspect threshold and classification criteria."
+  def set_suspect(state, after_count, by) when is_integer(after_count) and is_atom(by) do
+    %{state | suspect_after: after_count, suspect_by: by}
   end
 
+  @doc "Set the probation period in seconds after an actor is unbanned."
+  def set_probation(state, seconds) when is_integer(seconds) and seconds > 0 do
+    %{state | probation: seconds}
+  end
+
+  @doc "Set the idle timeout in seconds before an actor's state is forgotten."
+  def set_forget_after(state, seconds) when is_integer(seconds) and seconds > 0 do
+    %{state | forget_after: seconds}
+  end
+
+  # ── allowlist ─────────────────────────────────
+
+  @doc "Set the allowlist to the given IPs (localhost is always included)."
+  def set_allowlist(state, ips) when is_list(ips) do
+    %{state | allowlist: [{127, 0, 0, 1} | ips]}
+  end
+
+  @doc "Append a single IP tuple to the allowlist."
+  def add_allowlist(state, ip) when is_tuple(ip) do
+    %{state | allowlist: state.allowlist ++ [ip]}
+  end
+
+  @doc "Legacy alias for `add_allowlist/2`."
+  def add_whitelist(state, ip), do: add_allowlist(state, ip)
+
+  # ── internal ──────────────────────────────────
+
+  @doc "Set the cleanup timer interval in milliseconds."
   def set_cleanup_interval(state, ms) when is_integer(ms) and ms > 0 do
     %{state | cleanup_interval: ms}
   end
 
+  # ── compile ──────────────────────────────────
+
+  @doc "Compile the builder state into a flat config map for `ct_guard`."
   def to_term(state) do
     base = %{
       ban_duration: state.ban_duration,
-      whitelist: state.whitelist,
+      honeypot_ban_duration: state.honeypot_ban_duration,
+      escalation: state.escalation,
+      suspect_after: state.suspect_after,
+      suspect_by: state.suspect_by,
+      probation: state.probation,
+      forget_after: state.forget_after,
+      whitelist: Enum.uniq(state.allowlist),
       cleanup_interval: state.cleanup_interval
     }
 
     base = if state.honeypot_ports != [] do
-      base
-      |> Map.put(:honeypot_ports, state.honeypot_ports)
-      |> Map.put(:honeypot_ban_duration, state.honeypot_ban_duration)
-    else
-      base
-    end
-
-    base = if state.escalation != [3600, 21600, 86400, 604800] do
-      Map.put(base, :escalation, state.escalation)
+      Map.put(base, :honeypot_ports, state.honeypot_ports)
     else
       base
     end

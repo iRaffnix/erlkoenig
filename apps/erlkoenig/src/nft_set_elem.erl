@@ -39,6 +39,7 @@ Corresponds to libnftnl src/set_elem.c.
     add/5, add/6,
     add_elems/5,
     add_vmap_elems/5,
+    add_vmap_elems/6,
     add_data_map_elems/6,
     del/5
 ]).
@@ -159,6 +160,24 @@ Example:
     non_neg_integer()
 ) -> nfnl_msg:nl_msg().
 add_vmap_elems(Family, Table, Set, Elements, Seq) ->
+    add_vmap_elems(Family, Table, Set, Elements, 0, Seq).
+
+-doc """
+Add multiple verdict map elements with SET_ID for intra-batch references.
+
+When the vmap and its elements are created in the same batch, the kernel
+cannot find the vmap by name (not committed yet). SET_ID correlates the
+element addition with the pending vmap creation. Use 0 for committed vmaps.
+""".
+-spec add_vmap_elems(
+    0..255,
+    binary(),
+    binary(),
+    [{binary(), atom() | {atom(), binary()}}],
+    non_neg_integer(),
+    non_neg_integer()
+) -> nfnl_msg:nl_msg().
+add_vmap_elems(Family, Table, Set, Elements, SetId, Seq) ->
     ElemList = iolist_to_binary([
         nfnl_attr:encode_nested(
             ?NFTA_LIST_ELEM,
@@ -175,11 +194,16 @@ add_vmap_elems(Family, Table, Set, Elements, Seq) ->
         )
      || {Key, Verdict} <- Elements
     ]),
-    Attrs = iolist_to_binary([
+    SetIdAttr = case SetId of
+        0 -> [];
+        _ -> [nfnl_attr:encode_u32(?NFTA_SET_ELEM_LIST_SET_ID, SetId)]
+    end,
+    Attrs = iolist_to_binary(lists:flatten([
         nfnl_attr:encode_str(?NFTA_SET_ELEM_LIST_TABLE, Table),
         nfnl_attr:encode_str(?NFTA_SET_ELEM_LIST_SET, Set),
+        SetIdAttr,
         nfnl_attr:encode_nested(?NFTA_SET_ELEM_LIST_ELEMENTS, ElemList)
-    ]),
+    ])),
     NlFlags = ?NLM_F_REQUEST bor ?NLM_F_ACK bor ?NLM_F_CREATE,
     nfnl_msg:build_hdr(?NFT_MSG_NEWSETELEM, Family, NlFlags, Seq, Attrs).
 

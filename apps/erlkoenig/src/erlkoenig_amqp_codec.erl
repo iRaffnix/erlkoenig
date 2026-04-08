@@ -297,6 +297,28 @@ encode_payload({ct_guard_unban, #{ip := Ip}}) ->
 encode_payload({ct_guard_unban, Details}) when is_map(Details) ->
     {ok, <<"guard.threat.unban">>, encode_map(Details)};
 
+encode_payload({ct_guard_suspect, #{ip := Ip, ports := Ports}}) ->
+    {ok, <<"guard.threat.suspect">>, #{
+        <<"ip">> => format_ip(Ip),
+        <<"ports">> => [P || P <- Ports, is_integer(P)],
+        <<"reason">> => <<"suspect">>
+    }};
+
+encode_payload({ct_guard_ban_failed, #{ip := Ip, reason := Reason}}) ->
+    {ok, <<"guard.threat.ban_failed">>, #{
+        <<"ip">> => format_ip(Ip),
+        <<"reason">> => atom_to_binary(Reason)
+    }};
+
+encode_payload({guard_stats, #{actors := Actors, bans := Bans,
+                                events_seen := Events} = Stats}) ->
+    {ok, <<"guard.stats.summary">>, #{
+        <<"actors">> => Actors,
+        <<"bans">> => Bans,
+        <<"events_seen">> => Events,
+        <<"tracked_events">> => maps:get(tracked_events, Stats, 0)
+    }};
+
 %% ── System events ──────────────────────────────────────────────
 %% Routing: system.<scope>.<event>
 

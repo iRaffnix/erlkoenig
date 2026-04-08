@@ -59,6 +59,7 @@ Corresponds to libnftnl src/set.c.
     | inet_proto
     | inet_service
     | mark
+    | ifname
     | non_neg_integer().
 
 -type set_opts() :: #{
@@ -177,6 +178,11 @@ add_vmap(Family, Opts, Id, Seq) when is_map(Opts), is_integer(Seq), Seq >= 0 ->
     {KeyType, KeyLen} = type_info(Type),
     FlagVal = ?NFT_SET_MAP,
 
+    %% NFTA_SET_USERDATA (attr 13): typeof metadata for nft CLI display.
+    %% Without this, nft cannot reconstruct the key type for display
+    %% and shows raw data (e.g., ifname keys as empty strings).
+    UserData = build_vmap_userdata(Type),
+
     Attrs = iolist_to_binary(
         lists:flatten([
             nfnl_attr:encode_str(?NFTA_SET_TABLE, Table),
@@ -185,7 +191,9 @@ add_vmap(Family, Opts, Id, Seq) when is_map(Opts), is_integer(Seq), Seq >= 0 ->
             nfnl_attr:encode_u32(?NFTA_SET_KEY_TYPE, KeyType),
             nfnl_attr:encode_u32(?NFTA_SET_KEY_LEN, KeyLen),
             nfnl_attr:encode_u32(?NFTA_SET_DATA_TYPE, ?NFT_DATA_VERDICT),
-            nfnl_attr:encode_u32(?NFTA_SET_ID, Id)
+            nfnl_attr:encode_u32(7, 0),  %% NFTA_SET_DATA_LEN = 0
+            nfnl_attr:encode_u32(?NFTA_SET_ID, Id),
+            nfnl_attr:encode(13, UserData)  %% NFTA_SET_USERDATA
         ])
     ),
 
@@ -367,6 +375,7 @@ type_info(ether_addr) -> {9, 6};
 type_info(inet_proto) -> {12, 1};
 type_info(inet_service) -> {13, 2};
 type_info(mark) -> {19, 4};
+type_info(ifname) -> {41, 16};
 type_info(N) when is_integer(N) -> {N, 4}.
 
 -spec encode_flags([atom()]) -> non_neg_integer().
@@ -425,6 +434,35 @@ build_concat_userdata(FieldInfos) ->
 
 udata_entry(Type, Data) ->
     <<Type:8, (byte_size(Data)):8, Data/binary>>.
+
+%% Build USERDATA for simple (non-concat) verdict maps.
+%% Encodes key byte order and typeof metadata so nft CLI can
+%% reconstruct the key type for display (e.g., ifname, inet_service).
+%%
+%% Byte order values (NFTNL_UDATA_SET_KEYBYTEORDER):
+%%   1 = HOST_ENDIAN  (strings: ifname, mark)
+%%   2 = BIG_ENDIAN   (network types: ipv4_addr, inet_service)
+-spec build_vmap_userdata(set_type()) -> binary().
+build_vmap_userdata(Type) ->
+    KeyByteOrder = key_byte_order(Type),
+    GenericTypeof = <<(udata_entry(0, <<16#04:32/little>>))/binary,
+                      (udata_entry(1, <<>>))/binary>>,
+    iolist_to_binary([
+        udata_entry(0, <<KeyByteOrder:32/little>>),  %% KEYBYTEORDER
+        udata_entry(1, <<0:32/little>>),              %% DATABYTEORDER = host
+        udata_entry(3, GenericTypeof),                %% KEY_TYPEOF
+        udata_entry(4, GenericTypeof),                %% DATA_TYPEOF
+        udata_entry(6, <<0:32/little>>)               %% MERGE_ELEMENTS = 0
+    ]).
+
+key_byte_order(ifname) -> 1;       %% host endian (string)
+key_byte_order(mark) -> 1;         %% host endian (u32)
+key_byte_order(ipv4_addr) -> 2;    %% big endian (network)
+key_byte_order(ipv6_addr) -> 2;    %% big endian (network)
+key_byte_order(inet_service) -> 2; %% big endian (network)
+key_byte_order(inet_proto) -> 2;   %% big endian (network)
+key_byte_order(ether_addr) -> 2;   %% big endian (network)
+key_byte_order(_) -> 1.            %% default: host endian
 
 %% Build KEY_TYPEOF from libnftnl typeof serialization.
 %% Source: libnftnl/src/set.c → set_build_udata_key()

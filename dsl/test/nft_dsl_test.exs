@@ -670,9 +670,14 @@ defmodule NftDslTest do
     assert length(ek_table.counters) == 4
     assert length(ek_table.chains) == 6  # prerouting_nat + 3 egress + forward + postrouting
 
-    # forward chain has jump rules
+    # forward chain has egress vmap lookup + fwd policy vmap lookup
     fwd = Enum.find(ek_table.chains, & &1.name == "forward")
-    jumps = Enum.filter(fwd.rules, fn {action, _} -> action == :jump end)
-    assert length(jumps) == 3
+    vmap_lookups = Enum.filter(fwd.rules, fn {action, _} -> action == :vmap_lookup end)
+    assert length(vmap_lookups) == 2
+
+    # egress dispatch is ifname vmap
+    assert length(ek_table.vmaps) == 2
+    egress = Enum.find(ek_table.vmaps, & &1.name == "egress_dispatch")
+    assert egress.type == :ifname
   end
 end

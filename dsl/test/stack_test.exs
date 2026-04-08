@@ -190,17 +190,26 @@ defmodule StackTest do
       use Erlkoenig.Stack
 
       guard do
-        detect :conn_flood, threshold: 50, window: 10
-        detect :port_scan, threshold: 20, window: 60
-        ban_duration 3600
-        whitelist {127, 0, 0, 1}
+        detect do
+          flood over: 50, within: s(10)
+          port_scan over: 20, within: m(1)
+        end
+
+        respond do
+          ban_for h(1)
+          suspect after: 3, distinct: :ports
+        end
+
+        allowlist [{127, 0, 0, 1}]
       end
     end
     """)
 
     guard = mod.config().ct_guard
     assert guard.conn_flood == {50, 10}
+    assert guard.port_scan == {20, 60}
     assert guard.ban_duration == 3600
+    assert guard.suspect_after == 3
     assert {127, 0, 0, 1} in guard.whitelist
   end
 

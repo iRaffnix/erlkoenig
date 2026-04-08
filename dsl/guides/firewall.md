@@ -190,72 +190,104 @@ nft_table :inet, "erlkoenig" do
 end
 ```
 
-## Threat Detection (ct_guard)
+## Reactive Threat Detection
 
-erlkoenig monitors conntrack events in real time and automatically bans
-malicious source IPs. Bans are applied in the kernel via nft set elements
-in the `blocklist` set, dropped at raw priority (-300) — before conntrack
-processes the packet. Zero kernel state consumed for banned traffic.
+erlkoenig monitors conntrack events in real time. Each suspicious source
+IP gets its own Erlang process (`erlkoenig_threat_actor`, gen_statem) that
+tracks the IP's behavior over time:
+
+```
+observing → suspicious → banned → probation → forgotten
+```
+
+Bans are applied in the kernel via nft set elements with kernel-side
+timeouts. The `erlkoenig_threat_mesh` process is the single source of
+truth for all kernel ban operations — actors send intentions, mesh
+executes.
+
+### DSL
+
+```elixir
+guard do
+  detect do
+    flood over: 50, within: s(10)
+    port_scan over: 20, within: m(1)
+    slow_scan over: 5, within: h(1)
+    honeypot [21, 22, 23, 445, 1433, 1521, 3306,
+              3389, 5900, 6379, 8080, 8888, 9200, 27017]
+  end
+
+  respond do
+    suspect after: 3, distinct: :ports
+    ban_for h(1)
+    honeypot_ban_for h(24)
+    escalate [h(1), h(6), h(24), d(7)]
+    observe_after_unban m(2)
+    forget_after m(5)
+  end
+
+  allowlist [
+    {127, 0, 0, 1},
+    {10, 0, 0, 1}
+  ]
+end
+```
+
+Time units: `s()` seconds, `m()` minutes, `h()` hours, `d()` days.
 
 ### Detection Types
 
-| Type | Threshold | Ban Duration | What It Catches |
-|------|-----------|-------------|----------------|
-| Connection flood | 50 connections / 10s | 1 hour | SYN floods, HTTP floods, brute force |
-| Port scan | 20 distinct ports / 60s | 1 hour | Nmap, Masscan |
-| Slow scan | 5 distinct ports / 1 hour | 2 hours | Shodan, Censys, manual recon |
-| Honeypot port | 1 connection | 24 hours | Any probe to unused ports (22, 23, 445, 3389, ...) |
+| Type | Default | What It Catches |
+|------|---------|----------------|
+| `flood` | 50 connections / 10s | SYN floods, HTTP floods, brute force |
+| `port_scan` | 20 distinct ports / 60s | Nmap, Masscan |
+| `slow_scan` | 5 distinct ports / 1 hour | Shodan, Censys, manual recon |
+| `honeypot` | 1 connection to unused port | Any probe to ports no service uses |
 
-### Repeat Offender Escalation
+### Per-IP Actor Lifecycle
 
-IPs that are banned repeatedly get exponentially longer bans:
+Each suspicious IP gets its own process with isolated state:
 
-| Ban # | Duration |
-|-------|----------|
-| 1st | 1 hour |
-| 2nd | 6 hours |
-| 3rd | 24 hours |
-| 4th+ | 7 days |
+- **observing** — first contact, tracking connections
+- **suspicious** — 3+ distinct ports seen, AMQP alert fired
+- **banned** — threshold exceeded, kernel-level block active
+- **probation** — ban expired, watching for recidivism
+- **forgotten** — no traffic for 5 minutes, process dies (automatic cleanup)
 
-### Honeypot Ports
+Repeat offenders restart with escalated ban durations (1h → 6h → 24h → 7d).
 
-Ports that no service on the host uses. Any single connection attempt
-triggers an instant 24-hour ban. Default honeypot ports:
-
-21 (FTP), 22 (SSH on non-standard hosts), 23 (Telnet), 445 (SMB),
-1433 (MSSQL), 3306 (MySQL), 3389 (RDP), 5900 (VNC), 6379 (Redis),
-8080/8888 (HTTP alt), 9200 (Elasticsearch), 27017 (MongoDB).
-
-Ports actually used by services on the host are automatically excluded.
-
-### Packet Flow
+### Architecture
 
 ```
-Incoming packet
-    │
-    ▼
-prerouting_ban (priority -300, raw)
-    ├── ip saddr @blocklist → DROP
-    │         ↑
-    │    ct_guard adds IPs here
-    │
-    ▼
-conntrack → ct_guard monitors new flows
-    ├── honeypot port? → instant ban
-    ├── flood threshold? → ban
-    ├── port scan threshold? → ban
-    ├── slow scan threshold? → ban
-    └── repeat offender? → escalated ban
+Conntrack event → ct_guard (router) → ensure_actor(IP) → threat_actor
+                                                              │
+                                                    {local_ban, IP, BanUntil}
+                                                              │
+                                                              ▼
+                                                        threat_mesh
+                                                              │
+                                                    erlkoenig_nft:ban(IP)
+                                                              │
+                                                              ▼
+                                                  Kernel: blocklist set
+                                                  (timeout, auto-expiry)
 ```
+
+The actor never speaks to the kernel directly. This prevents the
+micro-unban race where a local timer expiry would briefly open the
+firewall while a remote ban is still active.
 
 ### AMQP Events
 
 All guard actions publish events to `erlkoenig.events`:
 
-- `guard.threat.ban` — flood or port scan detected
-- `guard.threat.honeypot` — honeypot port triggered
-- `guard.threat.slow_scan` — slow scanner detected
+- `guard.threat.ban` — IP banned (reason, duration, ban count)
 - `guard.threat.unban` — ban expired
+- `guard.threat.honeypot` — honeypot port triggered, instant ban
+- `guard.threat.slow_scan` — slow scanner detected
+- `guard.threat.suspect` — 3+ ports seen, not yet banned (early warning)
+- `guard.threat.ban_failed` — kernel ban attempt failed
+- `guard.stats.summary` — periodic stats (actor count, ban count, events/s)
 
 ## Data Maps and Verdict Maps
 

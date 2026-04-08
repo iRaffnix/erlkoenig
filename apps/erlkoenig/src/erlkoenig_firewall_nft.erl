@@ -941,6 +941,14 @@ compile_generic_special(dnat_jhash, #{map := MapName, dport := Port, mod := Mod}
     MapNameBin = iolist_to_binary(MapName),
     MapId = erlang:phash2(MapNameBin) band 16#FFFF,
     {ok, nft_rules:dnat_jhash_rule(Mod, Port, MapNameBin, MapId)};
+compile_generic_special(vmap_lookup, #{vmap := VmapName, type := ifname}) ->
+    VmapNameBin = iolist_to_binary(VmapName),
+    VmapId = erlang:phash2(VmapNameBin) band 16#FFFF,
+    {ok, nft_rules:ifname_vmap_lookup(VmapNameBin, VmapId)};
+compile_generic_special(vmap_lookup, #{vmap := VmapName, fields := Fields}) ->
+    VmapNameBin = iolist_to_binary(VmapName),
+    VmapId = erlang:phash2(VmapNameBin) band 16#FFFF,
+    {ok, nft_rules:concat_vmap_lookup(VmapNameBin, Fields, VmapId)};
 compile_generic_special(vmap_lookup, #{vmap := VmapName}) ->
     VmapNameBin = iolist_to_binary(VmapName),
     VmapId = erlang:phash2(VmapNameBin) band 16#FFFF,

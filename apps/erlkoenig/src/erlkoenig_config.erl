@@ -745,12 +745,23 @@ apply_nft_table(#{name := TableName, chains := Chains} = Table, VethMap, Replica
     %% 4c. Compile explicit vmaps (nft_vmap) from DSL
     ExplicitVmaps = maps:get(vmaps, Table, []),
     ExplicitVmapMsgs = lists:flatmap(fun(V) ->
-        compile_explicit_vmap(FamilyNum, TableBin, V, ReplicaIpMap)
+        compile_explicit_vmap(FamilyNum, TableBin, V, VethMap, ReplicaIpMap)
     end, ExplicitVmaps),
 
-    %% 5. Single atomic batch: counters → maps → vmaps → chains → rules.
-    AllMsgs = CounterMsgs ++ ExplicitMapMsgs ++ ExplicitVmapMsgs
-        ++ AllMapCreates ++ AllChainCreates ++ AllRuleCreates,
+    %% 5. Single atomic batch.
+    %% Order matters for intra-batch references:
+    %%   1. Counters (idempotent, no deps)
+    %%   2. Map/VMap creation (NEWSET — must exist before rules reference them)
+    %%   3. Chains (must exist before jump verdicts in vmap elements)
+    %%   4. Map/VMap elements (NEWSETELEM — jump verdicts need chains, SET_ID links to maps)
+    %%   5. Rules (lookup expressions reference maps/vmaps by SET_ID)
+    {VmapCreates, VmapElems} = split_create_elems(ExplicitVmapMsgs),
+    {MapCreates, MapElems} = split_create_elems(ExplicitMapMsgs),
+    AllMsgs = CounterMsgs
+        ++ MapCreates ++ VmapCreates ++ AllMapCreates
+        ++ AllChainCreates
+        ++ MapElems ++ VmapElems
+        ++ AllRuleCreates,
     logger:notice("erlkoenig_config: nft_table ~s: ~p counters, ~p maps, ~p chains, ~p rules",
                 [TableName, length(CounterMsgs), length(AllMapCreates),
                  length(AllChainCreates), length(AllRuleCreates)]),
@@ -841,11 +852,24 @@ compile_explicit_map(Family, Table, #{name := Name, key_type := KT,
     end,
     [CreateMap, AddElems].
 
+%% Split [Create, AddElems, Create, AddElems, ...] into two lists.
+%% compile_explicit_map/vmap always return [CreateMsg, AddElemsMsg] pairs.
+split_create_elems(Funs) ->
+    split_create_elems(Funs, [], []).
+
+split_create_elems([], Creates, Elems) ->
+    {lists:reverse(Creates), lists:reverse(Elems)};
+split_create_elems([Create, AddElems | Rest], Creates, Elems) ->
+    split_create_elems(Rest, [Create | Creates], [AddElems | Elems]);
+split_create_elems([Single | Rest], Creates, Elems) ->
+    %% Safety: single-element case
+    split_create_elems(Rest, [Single | Creates], Elems).
+
 %% Compile an explicit verdict map (nft_vmap) from DSL.
--spec compile_explicit_vmap(non_neg_integer(), binary(), map(), map()) -> [fun()].
+-spec compile_explicit_vmap(non_neg_integer(), binary(), map(), map(), map()) -> [fun()].
 compile_explicit_vmap(Family, Table, #{name := Name, concat := true,
                                         fields := Fields, entries := Entries},
-                      ReplicaIpMap) ->
+                      _VethMap, ReplicaIpMap) ->
     VmapName = iolist_to_binary(Name),
     VmapId = erlang:phash2(VmapName) band 16#FFFF,
     FieldAtoms = [binary_to_existing_atom(F, utf8) || F <- Fields,
@@ -859,15 +883,21 @@ compile_explicit_vmap(Family, Table, #{name := Name, concat := true,
     end,
     AddElems = fun(S) ->
         nft_set_elem:add_vmap_elems(Family, Table, VmapName,
-            ResolvedEntries, S)
+            ResolvedEntries, VmapId, S)
     end,
     [CreateVmap, AddElems];
 compile_explicit_vmap(Family, Table, #{name := Name, type := Type,
-                                        entries := Entries}, _ReplicaIpMap) ->
-    %% Simple (non-concat) vmap
+                                        entries := Entries},
+                      VethMap, _ReplicaIpMap) ->
+    %% Simple (non-concat) vmap — resolve {veth_of, Pod, Ct} keys
     VmapName = iolist_to_binary(Name),
     VmapId = erlang:phash2(VmapName) band 16#FFFF,
-    BinEntries = [{vmap_key(Type, K), verdict_atom(V)} || {K, V} <- Entries],
+    BinEntries = lists:filtermap(fun({K, V}) ->
+        case resolve_vmap_key(Type, K, VethMap) of
+            {ok, BinKey} -> {true, {BinKey, verdict_atom(V)}};
+            skip -> false
+        end
+    end, Entries),
     CreateVmap = fun(S) ->
         nft_set:add_vmap(Family, #{
             table => Table, name => VmapName, type => Type
@@ -875,7 +905,7 @@ compile_explicit_vmap(Family, Table, #{name := Name, type := Type,
     end,
     AddElems = fun(S) ->
         nft_set_elem:add_vmap_elems(Family, Table, VmapName,
-            BinEntries, S)
+            BinEntries, VmapId, S)
     end,
     [CreateVmap, AddElems].
 
@@ -912,7 +942,25 @@ verdict_atom({goto, Chain}) -> {goto, iolist_to_binary(Chain)}.
 vmap_key(ipv4_addr, {A, B, C, D}) -> <<A, B, C, D>>;
 vmap_key(inet_service, Port) -> <<Port:16/big>>;
 vmap_key(mark, Val) -> <<Val:32/big>>;
+vmap_key(ifname, Name) ->
+    Bin = iolist_to_binary(Name),
+    Pad = 16 - byte_size(Bin),
+    <<Bin/binary, 0:(Pad*8)>>;
 vmap_key(_, Val) when is_binary(Val) -> Val.
+
+%% Resolve a vmap key — expand {veth_of, Pod, Ct} via VethMap
+resolve_vmap_key(Type, {veth_of, Pod, Ct}, VethMap) ->
+    PodBin = iolist_to_binary(Pod),
+    CtBin = iolist_to_binary(Ct),
+    case maps:find({PodBin, CtBin}, VethMap) of
+        {ok, Veth} -> {ok, vmap_key(Type, Veth)};
+        error ->
+            logger:warning("erlkoenig_config: veth_of ~s.~s not found for vmap",
+                           [Pod, Ct]),
+            skip
+    end;
+resolve_vmap_key(Type, Key, _VethMap) ->
+    {ok, vmap_key(Type, Key)}.
 
 nft_type_atom_to_int(mark) -> 19;
 nft_type_atom_to_int(ipv4_addr) -> 7;
@@ -948,9 +996,18 @@ expand_nft_rule(jump, #{to := Target} = Opts, VethMap, _ReplicaIpMap) ->
             [{rule, jump, #{chain => TargetBin}}]
     end;
 
-%% vmap_lookup: explicit concat verdict map lookup
-expand_nft_rule(vmap_lookup, #{vmap := VmapName}, _VethMap, _ReplicaIpMap) ->
-    [{rule, vmap_lookup, #{vmap => VmapName}}];
+%% vmap_lookup: explicit verdict map lookup (concat or simple)
+expand_nft_rule(vmap_lookup, #{vmap := VmapName} = Opts, _VethMap, _ReplicaIpMap) ->
+    Base = #{vmap => VmapName},
+    Base2 = case maps:find(fields, Opts) of
+        {ok, Fields} -> Base#{fields => Fields};
+        error -> Base
+    end,
+    Base3 = case maps:find(type, Opts) of
+        {ok, Type} -> Base2#{type => Type};
+        error -> Base2
+    end,
+    [{rule, vmap_lookup, Base3}];
 
 %% dnat_jhash: explicit map reference, no implicit map creation
 expand_nft_rule(dnat_jhash, Opts, VethMap, _ReplicaIpMap) ->
@@ -1410,6 +1467,13 @@ maybe_configure_guard(#{guard := GuardConfig}) when is_map(GuardConfig) ->
             ok;
         _Pid ->
             erlkoenig_nft_ct_guard:reconfigure(GuardConfig),
+            %% Forward whitelist to threat mesh
+            case erlang:whereis(erlkoenig_threat_mesh) of
+                undefined -> ok;
+                _ ->
+                    Whitelist = maps:get(whitelist, GuardConfig, []),
+                    erlkoenig_threat_mesh:reconfigure(#{whitelist => Whitelist})
+            end,
             ok
     end;
 maybe_configure_guard(_) ->

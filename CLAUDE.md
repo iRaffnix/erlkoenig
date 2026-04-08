@@ -43,6 +43,10 @@ tests/
 | `erlkoenig_zone_sup` | Per-zone supervisor tree |
 | `erlkoenig_ctl` | Control socket API (Unix domain) |
 | `erlkoenig_cgroup` | cgroup v2 resource limits and accounting |
+| `erlkoenig_threat_actor` | Per-IP threat detection (gen_statem, one process per suspicious IP) |
+| `erlkoenig_threat_mesh` | Single source of truth for kernel bans (pg broadcast, source model) |
+| `erlkoenig_threat_sup` | Dynamic supervisor for threat actors |
+| `erlkoenig_nft_ct_guard` | Conntrack event router, delegates to threat actors |
 
 ## Scheduler Iron Rules
 

@@ -1375,8 +1375,8 @@ default_config() ->
     #{
         table => <<"erlkoenig">>,
         sets => [
-            {<<"blocklist">>, ipv4_addr},
-            {<<"blocklist6">>, ipv6_addr}
+            {<<"blocklist">>, ipv4_addr, #{flags => [timeout]}},
+            {<<"blocklist6">>, ipv6_addr, #{flags => [timeout]}}
         ],
         counters => [input, forward, output, dropped, banned],
         chains => [

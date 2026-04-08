@@ -89,6 +89,8 @@ Usage:
 -define(GUARD_CONNS, erlkoenig_nft_ct_guard_conns).
 %% {SrcIP, BannedAt, ExpiresAt, Reason}
 -define(GUARD_BANS, erlkoenig_nft_ct_guard_bans).
+%% Per-IP threat actor registry: {SrcIP, Pid | starting}
+-define(ACTOR_REGISTRY, erlkoenig_threat_actor_registry).
 
 %% --- Public API ---
 
@@ -130,18 +132,24 @@ init(Config) ->
     CleanupMs = maps:get(cleanup_interval, Config, ?DEFAULT_CLEANUP_INTERVAL),
     Whitelist = normalize_whitelist(maps:get(whitelist, Config, ?DEFAULT_WHITELIST)),
     HoneypotPorts = sets:from_list(maps:get(honeypot_ports, Config, ?DEFAULT_HONEYPOT_PORTS)),
+    Escalation = maps:get(escalation, Config, [3600, 21600, 86400, 604800]),
 
     %% Create ETS tables (defensive: handle restart race where table still exists)
     %% Conn tracking: ordered_set for efficient time-range queries
     _ = ensure_ets(?GUARD_CONNS, [named_table, ordered_set, public]),
     %% Ban tracking: set keyed by IP
     _ = ensure_ets(?GUARD_BANS, [named_table, set, public]),
+    %% Threat actor registry: IP → Pid (owned by ct_guard, not by threat_sup)
+    _ = ensure_ets(?ACTOR_REGISTRY, [named_table, set, public, {read_concurrency, true}]),
 
     %% Subscribe to conntrack events
     pg:join(erlkoenig_nft, ct_events, self()),
 
     %% Start cleanup timer
     erlang:send_after(CleanupMs, self(), cleanup),
+
+    %% Start stats broadcast timer (every 5s)
+    erlang:send_after(5000, self(), broadcast_stats),
 
     State = #{
         flood_max => FloodMax,
@@ -155,11 +163,8 @@ init(Config) ->
         honeypot_ports => HoneypotPorts,
         cleanup_ms => CleanupMs,
         whitelist => Whitelist,
-        %% Slow-scan tracker: #{SrcIP => #{ports => sets:set(), first_seen => Ts}}
-        slow_tracker => #{},
-        %% Ban history for repeat offender: #{SrcIP => BanCount}
-        ban_history => #{},
-        %% Stats
+        escalation => Escalation,
+        %% Stats (detection counts updated by actors via ct_guard_events broadcast)
         events_seen => 0,
         floods_detected => 0,
         scans_detected => 0,
@@ -196,6 +201,10 @@ handle_call(stats, _From, State) ->
         honeypot_ban_duration := HBD,
         honeypot_ports := HP
     } = State,
+    %% Threat actor stats
+    ActorCount = try ets:info(?ACTOR_REGISTRY, size) catch error:badarg -> 0 end,
+    MeshBans = try map_size(erlkoenig_threat_mesh:active_bans())
+               catch exit:{noproc, _} -> 0 end,
     Stats = #{
         events_seen => Seen,
         floods_detected => Floods,
@@ -204,7 +213,8 @@ handle_call(stats, _From, State) ->
         honeypots_triggered => Honeypots,
         bans_issued => Issued,
         bans_expired => Expired,
-        active_bans => ets:info(?GUARD_BANS, size),
+        active_bans => MeshBans,
+        active_actors => ActorCount,
         tracked_events => ets:info(?GUARD_CONNS, size),
         config => #{
             conn_flood => {FM, FW},
@@ -217,25 +227,23 @@ handle_call(stats, _From, State) ->
     },
     {reply, Stats, State};
 handle_call(banned, _From, State) ->
-    Now = erlang:system_time(second),
-    Bans = ets:foldl(
-        fun({IP, BannedAt, ExpiresAt, Reason}, Acc) ->
-            Remaining = max(0, ExpiresAt - Now),
-            [
-                #{
-                    ip => erlkoenig_nft_ip:format(IP),
-                    ip_raw => IP,
-                    reason => Reason,
-                    banned_at => BannedAt,
-                    expires_at => ExpiresAt,
-                    remaining_seconds => Remaining
-                }
-                | Acc
-            ]
-        end,
-        [],
-        ?GUARD_BANS
-    ),
+    Now = os:system_time(millisecond),
+    ActiveBans = try erlkoenig_threat_mesh:active_bans()
+                 catch exit:{noproc, _} -> #{}
+                 end,
+    Bans = maps:fold(fun(IP, Sources, Acc) ->
+        EffExpiry = lists:max(maps:values(Sources)),
+        RemainingMs = max(0, EffExpiry - Now),
+        case RemainingMs > 0 of
+            true ->
+                [#{ip => erlkoenig_nft_ip:format(IP),
+                   ip_raw => IP,
+                   sources => maps:keys(Sources),
+                   remaining_seconds => RemainingMs div 1000} | Acc];
+            false ->
+                Acc
+        end
+    end, [], ActiveBans),
     {reply, Bans, State};
 handle_call({reconfigure, Config}, _From, State) ->
     {FloodMax, FloodWindow} = maps:get(conn_flood, Config, {
@@ -274,277 +282,73 @@ handle_info({ct_new, #{src := SrcIP} = Event}, State) ->
     #{events_seen := Seen, whitelist := WL} = State,
     State2 = State#{events_seen := Seen + 1},
 
-    case is_whitelisted(SrcIP, WL) orelse is_banned(SrcIP) of
+    case is_whitelisted(SrcIP, WL) of
         true ->
-            %% Skip whitelisted or already-banned IPs
             {noreply, State2};
         false ->
             DstPort = maps:get(dport, Event, 0),
             Now = erlang:system_time(second),
 
-            %% Record connection event
-            %% Key: {SrcIP, Timestamp, Unique} to allow multiple per second
+            %% Record connection event (kept for stats/cleanup)
             Key = {SrcIP, Now, erlang:unique_integer([positive])},
             ets:insert(?GUARD_CONNS, {Key, DstPort}),
 
-            %% Check honeypot FIRST (instant ban, skip other checks)
-            case check_honeypot(SrcIP, DstPort, State2) of
-                {banned, State3} ->
-                    {noreply, State3};
-                {ok, State3} ->
-                    %% Check other thresholds
-                    State4 = check_flood(SrcIP, Now, State3),
-                    State5 = check_port_scan(SrcIP, Now, State4),
-                    State6 = check_slow_scan(SrcIP, DstPort, Now, State5),
-                    {noreply, State6}
-            end
+            %% Delegate detection to per-IP threat actor
+            case ensure_actor(SrcIP, State2) of
+                {ok, Pid} ->
+                    erlkoenig_threat_actor:connection(Pid, DstPort);
+                drop ->
+                    ok
+            end,
+            {noreply, State2}
     end;
 handle_info({ct_destroy, _}, State) ->
     {noreply, State};
 handle_info({ct_alert, _}, State) ->
+    {noreply, State};
+%% --- Periodic stats broadcast (every 5s) ---
+handle_info(broadcast_stats, #{events_seen := Seen} = State) ->
+    ActorCount = try ets:info(?ACTOR_REGISTRY, size) catch error:badarg -> 0 end,
+    MeshBans = try map_size(erlkoenig_threat_mesh:active_bans())
+               catch exit:{noproc, _} -> 0 end,
+    StatsEvent = {guard_stats, #{
+        actors => ActorCount,
+        bans => MeshBans,
+        events_seen => Seen,
+        tracked_events => ets:info(?GUARD_CONNS, size)
+    }},
+    try
+        Members = pg:get_members(erlkoenig_nft, ct_guard_events),
+        _ = [Pid ! StatsEvent || Pid <- Members],
+        ok
+    catch _:_ -> ok
+    end,
+    erlang:send_after(5000, self(), broadcast_stats),
     {noreply, State};
 %% --- Cleanup timer ---
 handle_info(cleanup, #{cleanup_ms := Ms} = State) ->
     State2 = do_cleanup(State),
     erlang:send_after(Ms, self(), cleanup),
     {noreply, State2};
-%% --- Unban timer ---
-handle_info({unban, SrcIP}, #{bans_expired := Exp} = State) ->
-    case ets:lookup(?GUARD_BANS, SrcIP) of
-        [{_, _, _, _}] ->
-            ets:delete(?GUARD_BANS, SrcIP),
-            _ = try_unban(SrcIP),
-            broadcast({ct_guard_unban, #{ip => SrcIP}}),
-            logger:notice("[ct_guard] Auto-unban ~s (expired)", [erlkoenig_nft_ip:format(SrcIP)]),
-            {noreply, State#{bans_expired := Exp + 1}};
-        [] ->
-            {noreply, State}
-    end;
+%% Unban timers are now managed by threat_mesh, not ct_guard.
+%% Legacy {unban, _} messages are ignored.
+handle_info({unban, _SrcIP}, State) ->
+    {noreply, State};
 handle_info(_Info, State) ->
     {noreply, State}.
 
 terminate(_Reason, _State) ->
     pg:leave(erlkoenig_nft, ct_events, self()),
-    ets:delete(?GUARD_CONNS),
-    ets:delete(?GUARD_BANS),
+    try ets:delete(?GUARD_CONNS) catch error:badarg -> ok end,
+    %% GUARD_BANS kept for backward compat but no longer written by ct_guard.
+    %% ACTOR_REGISTRY survives ct_guard restart (owned by this process).
     ok.
 
 %% ===================================================================
-%% Detection: Connection Flood
+%% Detection is now handled by erlkoenig_threat_actor (per-IP gen_statem).
+%% Ban execution goes through erlkoenig_threat_mesh (single source of truth).
+%% ct_guard's role is: event routing + stats + cleanup.
 %% ===================================================================
-
-check_flood(SrcIP, Now, #{flood_max := Max, flood_window := Window} = State) ->
-    Cutoff = Now - Window,
-    Count = count_events(SrcIP, Cutoff),
-    case Count >= Max of
-        true ->
-            ban_ip(SrcIP, conn_flood, State);
-        false ->
-            State
-    end.
-
-%% ===================================================================
-%% Detection: Port Scan
-%% ===================================================================
-
-check_port_scan(SrcIP, Now, #{scan_max := Max, scan_window := Window} = State) ->
-    Cutoff = Now - Window,
-    Ports = distinct_ports(SrcIP, Cutoff),
-    case length(Ports) >= Max of
-        true ->
-            ban_ip(SrcIP, port_scan, State);
-        false ->
-            State
-    end.
-
-%% ===================================================================
-%% Detection: Honeypot Ports (instant ban on any connection)
-%% ===================================================================
-
-check_honeypot(SrcIP, DstPort, #{honeypot_ports := Ports,
-                                  honeypot_ban_duration := Duration,
-                                  honeypots_triggered := Count} = State) ->
-    case sets:is_element(DstPort, Ports) of
-        true ->
-            logger:warning("[ct_guard] HONEYPOT ~s port=~p → instant ban ~ps",
-                           [erlkoenig_nft_ip:format(SrcIP), DstPort, Duration]),
-            State2 = ban_ip_with_duration(SrcIP, honeypot, Duration, State),
-            broadcast({ct_guard_honeypot, #{ip => SrcIP, port => DstPort,
-                                            duration => Duration}}),
-            {banned, State2#{honeypots_triggered := Count + 1}};
-        false ->
-            {ok, State}
-    end.
-
-%% ===================================================================
-%% Detection: Slow Scan (long window, low threshold)
-%% ===================================================================
-
-check_slow_scan(SrcIP, DstPort, Now,
-                #{slow_max := Max, slow_window := Window,
-                  slow_tracker := Tracker,
-                  slow_scans_detected := Count} = State) ->
-    Entry = maps:get(SrcIP, Tracker, #{ports => sets:new(), first_seen => Now}),
-    #{ports := Ports, first_seen := FirstSeen} = Entry,
-    case Now - FirstSeen > Window of
-        true ->
-            %% Window expired, reset
-            NewEntry = #{ports => sets:from_list([DstPort]), first_seen => Now},
-            State#{slow_tracker := maps:put(SrcIP, NewEntry, Tracker)};
-        false ->
-            NewPorts = sets:add_element(DstPort, Ports),
-            case sets:size(NewPorts) >= Max of
-                true ->
-                    logger:warning("[ct_guard] SLOW_SCAN ~s ~p ports in ~ps",
-                                   [erlkoenig_nft_ip:format(SrcIP),
-                                    sets:size(NewPorts), Now - FirstSeen]),
-                    broadcast({ct_guard_slow_scan, #{
-                        ip => SrcIP,
-                        ports => sets:to_list(NewPorts),
-                        window => Now - FirstSeen
-                    }}),
-                    %% Ban with 2x normal duration
-                    State2 = ban_ip(SrcIP, slow_scan, State),
-                    State2#{slow_tracker := maps:remove(SrcIP, Tracker),
-                            slow_scans_detected := Count + 1};
-                false ->
-                    NewEntry = Entry#{ports => NewPorts},
-                    State#{slow_tracker := maps:put(SrcIP, NewEntry, Tracker)}
-            end
-    end.
-
-%% ===================================================================
-%% Ban Management
-%% ===================================================================
-
-ban_ip(SrcIP, Reason, #{ban_duration := BaseDuration} = State) ->
-    %% Apply repeat-offender escalation
-    Duration = escalate_duration(SrcIP, BaseDuration, State),
-    ban_ip_with_duration(SrcIP, Reason, Duration, State).
-
-ban_ip_with_duration(SrcIP, Reason, Duration,
-                     #{bans_issued := Issued, ban_history := History} = State) ->
-    case is_banned(SrcIP) of
-        true ->
-            State;
-        false ->
-            Now = erlang:system_time(second),
-            ExpiresAt = Now + Duration,
-
-            %% Record ban
-            ets:insert(?GUARD_BANS, {SrcIP, Now, ExpiresAt, Reason}),
-
-            %% Apply ban in firewall
-            _ = try_ban(SrcIP),
-
-            %% Schedule auto-unban
-            erlang:send_after(Duration * 1000, self(), {unban, SrcIP}),
-
-            %% Update ban history (repeat offender tracking)
-            BanCount = maps:get(SrcIP, History, 0) + 1,
-            History2 = maps:put(SrcIP, BanCount, History),
-
-            %% Update stats
-            StatKey =
-                case Reason of
-                    conn_flood -> floods_detected;
-                    port_scan -> scans_detected;
-                    slow_scan -> slow_scans_detected;
-                    honeypot -> honeypots_triggered;
-                    _ -> bans_issued
-                end,
-            DetectCount = maps:get(StatKey, State, 0),
-
-            logger:warning(
-                "[ct_guard] BANNED ~s reason=~p duration=~ps ban_count=~p",
-                [erlkoenig_nft_ip:format(SrcIP), Reason, Duration, BanCount]
-            ),
-
-            %% Broadcast alert
-            broadcast(
-                {ct_guard_ban, #{
-                    ip => SrcIP,
-                    reason => Reason,
-                    duration => Duration,
-                    ban_count => BanCount,
-                    expires_at => ExpiresAt
-                }}
-            ),
-
-            State#{bans_issued := Issued + 1, StatKey := DetectCount + 1,
-                   ban_history := History2}
-    end.
-
-%% Repeat offender: escalate ban duration based on ban count
-escalate_duration(SrcIP, BaseDuration, #{ban_history := History}) ->
-    BanCount = maps:get(SrcIP, History, 0),
-    Multiplier = lists:nth(min(BanCount + 1, length(?ESCALATION)), ?ESCALATION),
-    BaseDuration * Multiplier.
-
-is_banned(SrcIP) ->
-    ets:member(?GUARD_BANS, SrcIP).
-
-try_ban(SrcIP) ->
-    try
-        erlkoenig_nft:ban(SrcIP)
-    catch
-        C:R ->
-            logger:error(
-                "[ct_guard] ban crashed for ~s: ~p:~p",
-                [erlkoenig_nft_ip:format(SrcIP), C, R]
-            )
-    end.
-
-try_unban(SrcIP) ->
-    try
-        erlkoenig_nft:unban(SrcIP)
-    catch
-        C:R ->
-            logger:error(
-                "[ct_guard] unban crashed for ~s: ~p:~p",
-                [erlkoenig_nft_ip:format(SrcIP), C, R]
-            )
-    end.
-
-%% ===================================================================
-%% ETS Queries
-%% ===================================================================
-
-%% Count events from SrcIP since Cutoff
-count_events(SrcIP, Cutoff) ->
-    %% Keys are {SrcIP, Timestamp, Unique}, ordered
-    %% We want all keys where element 1 = SrcIP, element 2 >= Cutoff
-    StartKey = {SrcIP, Cutoff, 0},
-    EndKey = {SrcIP, infinity, 0},
-    count_range(ets:next(?GUARD_CONNS, StartKey), SrcIP, EndKey, 0).
-
-count_range('$end_of_table', _, _, Count) ->
-    Count;
-count_range({IP, _, _} = Key, SrcIP, EndKey, Count) when IP =:= SrcIP ->
-    count_range(ets:next(?GUARD_CONNS, Key), SrcIP, EndKey, Count + 1);
-count_range(_, _, _, Count) ->
-    Count.
-
-%% Get distinct destination ports from SrcIP since Cutoff
-distinct_ports(SrcIP, Cutoff) ->
-    StartKey = {SrcIP, Cutoff, 0},
-    collect_ports(ets:next(?GUARD_CONNS, StartKey), SrcIP, sets:new()).
-
-collect_ports('$end_of_table', _, Ports) ->
-    sets:to_list(Ports);
-collect_ports({IP, _, _} = Key, SrcIP, Ports) when IP =:= SrcIP ->
-    case ets:lookup(?GUARD_CONNS, Key) of
-        [{_, DstPort}] ->
-            collect_ports(
-                ets:next(?GUARD_CONNS, Key),
-                SrcIP,
-                sets:add_element(DstPort, Ports)
-            );
-        [] ->
-            collect_ports(ets:next(?GUARD_CONNS, Key), SrcIP, Ports)
-    end;
-collect_ports(_, _, Ports) ->
-    sets:to_list(Ports).
 
 %% ===================================================================
 %% Cleanup
@@ -554,9 +358,7 @@ do_cleanup(
     #{
         flood_window := FW,
         scan_window := SW,
-        slow_window := SlW,
-        slow_tracker := Tracker,
-        bans_expired := Exp
+        slow_window := SlW
     } = State
 ) ->
     Now = erlang:system_time(second),
@@ -566,26 +368,15 @@ do_cleanup(
     Cutoff = Now - MaxWindow,
     ExpiredConns = delete_before(ets:first(?GUARD_CONNS), Cutoff, 0),
 
-    %% Remove expired bans
-    ExpiredBans = cleanup_bans(Now),
-
-    case ExpiredConns > 0 orelse ExpiredBans > 0 of
+    case ExpiredConns > 0 of
         true ->
-            logger:debug(
-                "[ct_guard] Cleanup: ~p events, ~p bans expired",
-                [ExpiredConns, ExpiredBans]
-            );
+            logger:debug("[ct_guard] Cleanup: ~p events expired", [ExpiredConns]);
         false ->
             ok
     end,
 
-    %% Clean up expired slow-scan tracker entries
-    SlowCutoff = Now - SlW,
-    Tracker2 = maps:filter(fun(_IP, #{first_seen := FS}) ->
-        FS > SlowCutoff
-    end, Tracker),
-
-    State#{bans_expired := Exp + ExpiredBans, slow_tracker := Tracker2}.
+    %% Bans are managed by threat_mesh, not ct_guard.
+    State.
 
 delete_before('$end_of_table', _, Count) ->
     Count;
@@ -595,23 +386,6 @@ delete_before({_IP, Ts, _} = Key, Cutoff, Count) when Ts < Cutoff ->
     delete_before(Next, Cutoff, Count + 1);
 delete_before(_, _, Count) ->
     Count.
-
-cleanup_bans(Now) ->
-    ets:foldl(
-        fun({IP, _, ExpiresAt, _}, Count) ->
-            case ExpiresAt =< Now of
-                true ->
-                    ets:delete(?GUARD_BANS, IP),
-                    _ = try_unban(IP),
-                    broadcast({ct_guard_unban, #{ip => IP}}),
-                    Count + 1;
-                false ->
-                    Count
-            end
-        end,
-        0,
-        ?GUARD_BANS
-    ).
 
 %% ===================================================================
 %% Whitelist
@@ -635,16 +409,60 @@ is_whitelisted(SrcIP, Whitelist) ->
 %% Helpers
 %% ===================================================================
 
-broadcast(Msg) ->
-    try
-        Members = pg:get_members(erlkoenig_nft, ct_guard_events),
-        _ = [Pid ! Msg || Pid <- Members],
-        ok
-    catch
-        C:R ->
-            logger:warning("[ct_guard] broadcast failed: ~p:~p", [C, R]),
-            ok
+%% broadcast/1 removed — detection events are now broadcast by
+%% erlkoenig_threat_actor and erlkoenig_threat_mesh directly.
+
+%% Race-free actor creation. ets:insert_new is atomic — only one caller
+%% wins. The winner starts the actor and replaces `starting` with the
+%% real pid. Losers retry (max 2 times).
+-spec ensure_actor(binary(), map()) -> {ok, pid()} | drop.
+ensure_actor(SrcIP, Config) ->
+    ensure_actor(SrcIP, Config, 0).
+
+ensure_actor(_SrcIP, _Config, Retries) when Retries > 2 ->
+    drop;
+ensure_actor(SrcIP, Config, Retries) ->
+    case ets:lookup(?ACTOR_REGISTRY, SrcIP) of
+        [{_, Pid}] when is_pid(Pid) ->
+            case is_process_alive(Pid) of
+                true -> {ok, Pid};
+                false ->
+                    ets:delete(?ACTOR_REGISTRY, SrcIP),
+                    ensure_actor(SrcIP, Config, Retries + 1)
+            end;
+        [{_, starting}] ->
+            timer:sleep(1),
+            ensure_actor(SrcIP, Config, Retries + 1);
+        [] ->
+            case ets:insert_new(?ACTOR_REGISTRY, {SrcIP, starting}) of
+                true ->
+                    ActorConfig = build_actor_config(Config),
+                    try
+                        {ok, Pid} = erlkoenig_threat_sup:start_actor(SrcIP, ActorConfig),
+                        ets:update_element(?ACTOR_REGISTRY, SrcIP, {2, Pid}),
+                        {ok, Pid}
+                    catch _:_ ->
+                        ets:delete(?ACTOR_REGISTRY, SrcIP),
+                        drop
+                    end;
+                false ->
+                    ensure_actor(SrcIP, Config, Retries + 1)
+            end
     end.
+
+%% Build config map for threat actor from ct_guard state.
+build_actor_config(State) ->
+    #{flood_max := FM, flood_window := FW,
+      scan_max := SM, scan_window := SW,
+      slow_max := SlM, slow_window := SlW,
+      ban_duration := BD, honeypot_ban_duration := HBD,
+      honeypot_ports := HP} = State,
+    Escalation = maps:get(escalation, State, [3600, 21600, 86400, 604800]),
+    #{flood_max => FM, flood_window => FW,
+      scan_max => SM, scan_window => SW,
+      slow_max => SlM, slow_window => SlW,
+      ban_duration => BD, honeypot_ban_duration => HBD,
+      honeypot_ports => HP, escalation => Escalation}.
 
 %% Defensive ETS creation: if the table already exists (restart race),
 %% reuse it instead of crashing with badarg.

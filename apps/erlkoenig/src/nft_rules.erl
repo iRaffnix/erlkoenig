@@ -112,6 +112,7 @@ wrap each rule separately:
     %% Verdict map dispatch
     vmap_dispatch/2,
     concat_vmap_lookup/3,
+    ifname_vmap_lookup/2,
     dnat_jhash_rule/4,
     %% Flow offload
     flow_offload/1,
@@ -1035,6 +1036,24 @@ concat_vmap_lookup(VmapName, [ip_saddr, ip_daddr, tcp_dport], SetId) ->
         %% Concat lookup: reads 12 bytes starting at REG32_00
         {lookup, #{sreg => R32_0, set => VmapName, dreg => 0, set_id => SetId}}
     ].
+
+-doc """
+Simple ifname verdict map lookup.
+
+Loads iifname into REG1, then does a verdict map lookup.
+The ifname type is 16 bytes (IFNAMSIZ), matching meta iifname output.
+
+Example:
+    Rule = nft_rules:ifname_vmap_lookup(<<"egress_dispatch">>, 42).
+    %% Equivalent nft: iifname vmap @egress_dispatch
+""".
+-spec ifname_vmap_lookup(binary(), non_neg_integer()) -> rule().
+ifname_vmap_lookup(VmapName, SetId) ->
+    [
+        nft_expr_ir:meta(iifname, ?REG1),
+        {lookup, #{sreg => ?REG1, set => VmapName, dreg => 0, set_id => SetId}}
+    ].
+
 -doc """
 Offload established connections to a named flowtable.
 

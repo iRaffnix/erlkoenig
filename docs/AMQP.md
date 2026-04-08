@@ -175,7 +175,10 @@ All internal erlkoenig events are forwarded as JSON to the `erlkoenig.events` to
 | `guard.threat.honeypot` | Connection to honeypot port |
 | `guard.threat.slow_scan` | 5+ distinct ports in 1 hour |
 | `guard.threat.repeat_offender` | Nth ban with escalating duration |
+| `guard.threat.suspect` | IP contacted 3+ distinct ports, not yet banned |
+| `guard.threat.ban_failed` | Kernel ban attempt failed (nft set error) |
 | `guard.threat.unban` | Ban expired |
+| `guard.stats.summary` | Periodic guard stats (every 5s) |
 
 #### Guard Event Payloads
 
@@ -185,7 +188,10 @@ All internal erlkoenig events are forwarded as JSON to the `erlkoenig.events` to
 | `guard.threat.honeypot` | `ip`, `port`, `duration`, `reason` |
 | `guard.threat.slow_scan` | `ip`, `ports[]`, `window`, `reason` |
 | `guard.threat.repeat_offender` | `ip`, `ban_count`, `escalated_duration` |
+| `guard.threat.suspect` | `ip`, `ports[]`, `port_count` |
+| `guard.threat.ban_failed` | `ip`, `reason`, `error` |
 | `guard.threat.unban` | `ip` |
+| `guard.stats.summary` | `actor_count`, `ban_count`, `events_seen` |
 
 ### JSON Envelope
 

@@ -91,7 +91,7 @@ init([]) ->
             type => worker,
             modules => [erlkoenig_nft_ct]
         },
-        %% 5. Conntrack guard — automatic threat detection
+        %% 5. Conntrack guard — event router, owns actor registry ETS
         #{
             id => erlkoenig_nft_ct_guard,
             start => {erlkoenig_nft_ct_guard, start_link, [#{}]},
@@ -99,6 +99,25 @@ init([]) ->
             shutdown => 5000,
             type => worker,
             modules => [erlkoenig_nft_ct_guard]
+        },
+        %% 5a. Dynamic supervisor for per-IP threat actors
+        #{
+            id => erlkoenig_threat_sup,
+            start => {erlkoenig_threat_sup, start_link, []},
+            restart => permanent,
+            shutdown => infinity,
+            type => supervisor,
+            modules => [erlkoenig_threat_sup]
+        },
+        %% 5b. Threat mesh — single source of truth for kernel bans
+        %% Whitelist is configured later via erlkoenig_config:maybe_configure_guard
+        #{
+            id => erlkoenig_threat_mesh,
+            start => {erlkoenig_threat_mesh, start_link, [#{}]},
+            restart => transient,
+            shutdown => 5000,
+            type => worker,
+            modules => [erlkoenig_threat_mesh]
         },
         %% 6. Dynamic supervisor for per-counter workers
         #{

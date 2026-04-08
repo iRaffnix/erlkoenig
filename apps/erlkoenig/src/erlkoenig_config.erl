@@ -687,8 +687,6 @@ apply_nft_table(#{name := TableName, chains := Chains} = Table, VethMap, Replica
     ]),
 
     %% 1. Build the new state first (we need map names to know what to delete)
-    %% Clear tmp map name accumulator before compilation
-    persistent_term:put(erlkoenig_dsl_map_names_tmp, []),
     %% Regular chains first (jump targets), then base chains
     OrderedChains = lists:sort(fun(A, _B) ->
         not maps:is_key(hook, A)
@@ -702,13 +700,12 @@ apply_nft_table(#{name := TableName, chains := Chains} = Table, VethMap, Replica
         end, {[], [], []}, OrderedChains),
 
     %% 2. Collect names of DSL objects for selective cleanup.
-    %% Chain names from the config, map names from the compiled output.
     ChainNames = [iolist_to_binary(maps:get(name, C)) || C <- Chains],
-    NewMapNames = collect_compiled_map_names(AllMapCreates),
-
-    %% 3. Also collect map names from the persistent_term (previous load's maps).
-    %% On reload, container IPs change → map names change (phash2 of targets).
-    %% We need to delete OLD maps, not just new ones.
+    ExplicitMapNames = [iolist_to_binary(maps:get(name, M))
+                        || M <- maps:get(maps, Table, [])],
+    ExplicitVmapNames = [iolist_to_binary(maps:get(name, V))
+                         || V <- maps:get(vmaps, Table, [])],
+    NewMapNames = ExplicitMapNames ++ ExplicitVmapNames,
     OldMapNames = persistent_term:get({erlkoenig_dsl_maps, TableBin}, []),
 
     %% 4. Selectively delete old DSL objects.
@@ -739,10 +736,21 @@ apply_nft_table(#{name := TableName, chains := Chains} = Table, VethMap, Replica
         nft_object:add_counter(FamilyNum, TableBin, iolist_to_binary(C), S)
     end || C <- Counters],
 
-    %% 5. Single atomic batch: counters → maps+elements → chains → rules.
-    %% Maps and elements use SET_ID for same-batch correlation.
-    %% Rules use SET_ID in lookup expressions to reference pending maps.
-    AllMsgs = CounterMsgs ++ AllMapCreates ++ AllChainCreates ++ AllRuleCreates,
+    %% 4b. Compile explicit maps (nft_map) from DSL
+    ExplicitMaps = maps:get(maps, Table, []),
+    ExplicitMapMsgs = lists:flatmap(fun(M) ->
+        compile_explicit_map(FamilyNum, TableBin, M, ReplicaIpMap)
+    end, ExplicitMaps),
+
+    %% 4c. Compile explicit vmaps (nft_vmap) from DSL
+    ExplicitVmaps = maps:get(vmaps, Table, []),
+    ExplicitVmapMsgs = lists:flatmap(fun(V) ->
+        compile_explicit_vmap(FamilyNum, TableBin, V, ReplicaIpMap)
+    end, ExplicitVmaps),
+
+    %% 5. Single atomic batch: counters → maps → vmaps → chains → rules.
+    AllMsgs = CounterMsgs ++ ExplicitMapMsgs ++ ExplicitVmapMsgs
+        ++ AllMapCreates ++ AllChainCreates ++ AllRuleCreates,
     logger:notice("erlkoenig_config: nft_table ~s: ~p counters, ~p maps, ~p chains, ~p rules",
                 [TableName, length(CounterMsgs), length(AllMapCreates),
                  length(AllChainCreates), length(AllRuleCreates)]),
@@ -783,100 +791,138 @@ compile_nft_chain_split(Family, Table, #{name := Name, rules := Rules} = Chain,
             }, S) end]
     end,
 
-    %% Phase 1: Expand all rules (resolve veth_of, replica_ips)
+    %% Expand all rules (resolve veth_of, replica_ips)
     AllExpanded = lists:flatmap(fun({Action, Opts}) ->
         expand_nft_rule(Action, Opts, VethMap, ReplicaIpMap)
     end, Rules),
 
-    %% Phase 2: Collapse eligible rules into verdict maps
-    %% - accept rules with saddr+daddr+tcp → concat vmap
-    %% - jump rules with iif → iifname vmap
-    {CollapsedRules, VmapMsgs} = maybe_collapse_to_vmaps(
-        AllExpanded, Family, Table, ChainBin),
-
-    %% Phase 3: Compile remaining rules (including non-collapsible ones)
+    %% Compile rules — no implicit collapsing, no auto-generated maps.
+    %% Maps and vmaps are created explicitly from DSL nft_map/nft_vmap blocks.
     {RuleMsgs, MapMsgs} = lists:foldl(fun(Rule, {RA, MA}) ->
         try
-            {Rule2, ExtraMaps} = maybe_create_lb_map(Rule, Family, Table),
-            Compiled = erlkoenig_firewall_nft:compile_rule(Rule2),
+            Compiled = erlkoenig_firewall_nft:compile_rule(Rule),
             RuleMsg = nft_encode:rule_fun(Family, Table, ChainBin, Compiled),
-            {[RuleMsg | RA], ExtraMaps ++ MA}
+            {[RuleMsg | RA], MA}
         catch C:Err ->
             logger:warning("erlkoenig_config: nft rule compile error: ~p:~p for ~p",
                            [C, Err, Rule]),
             {RA, MA}
         end
-    end, {[], []}, CollapsedRules),
+    end, {[], []}, AllExpanded),
 
-    %% MapMsgs: dnat_lb maps. VmapMsgs: concat/iifname vmaps.
     %% RuleMsgs are accumulated with prepend, so reverse.
-    {ChainMsg, VmapMsgs ++ MapMsgs, lists:reverse(RuleMsgs)}.
+    {ChainMsg, MapMsgs, lists:reverse(RuleMsgs)}.
 
 %% ===================================================================
-%% VMap Collapsing — replace repetitive rules with O(1) lookups
+%% Explicit Map/VMap Compilation (from DSL nft_map/nft_vmap blocks)
 %% ===================================================================
 
-%% Scan expanded rules and collapse eligible patterns into verdict maps:
-%%  - Multiple {rule, accept, #{saddr, daddr, tcp}} → concat vmap
-%%  - Multiple {rule, jump, #{iif, chain}} → iifname vmap
--spec maybe_collapse_to_vmaps([term()], non_neg_integer(), binary(), binary()) ->
-    {[term()], [fun()]}.
-maybe_collapse_to_vmaps(Rules, Family, Table, ChainBin) ->
-    %% Count collapsible rules (saddr+daddr+tcp accept)
-    Collapsible = [R || {rule, accept, #{saddr := _, daddr := _, tcp := _}} = R <- Rules],
-    case length(Collapsible) >= 3 of
-        true ->
-            VmapName = <<"__fwd_", ChainBin/binary>>,
-            VmapId = erlang:phash2(VmapName) band 16#FFFF,
-            %% Create concat vmap
-            CreateVmap = fun(S) ->
-                nft_set:add_concat_vmap(Family, #{
-                    table => Table,
-                    name => VmapName,
-                    fields => [ipv4_addr, ipv4_addr, inet_service],
-                    id => VmapId
-                }, VmapId, S)
-            end,
-            %% Collect elements from collapsible rules
-            Elements = lists:filtermap(fun({rule, accept, Opts}) ->
-                case {maps:find(saddr, Opts), maps:find(daddr, Opts), maps:find(tcp, Opts)} of
-                    {{ok, SA}, {ok, DA}, {ok, Port}} ->
-                        SABin = ip_to_binary(SA),
-                        DABin = ip_to_binary(DA),
-                        Key = <<SABin/binary, DABin/binary, Port:16/big, 0:16>>,
-                        {true, {Key, accept}};
-                    _ -> false
-                end
-            end, Collapsible),
-            AddElems = fun(S) ->
-                nft_set_elem:add_vmap_elems(Family, Table, VmapName, Elements, S)
-            end,
-            %% Track map name for cleanup
-            OldNames = persistent_term:get(erlkoenig_dsl_map_names_tmp, []),
-            persistent_term:put(erlkoenig_dsl_map_names_tmp, [VmapName | OldNames]),
-            %% Replace collapsible rules in-place, preserving order.
-            %% First collapsible rule becomes the vmap lookup,
-            %% subsequent collapsible rules are removed.
-            LookupRule = {rule, vmap_concat_lookup, #{
-                set => VmapName,
-                set_id => VmapId,
-                fields => [ip_saddr, ip_daddr, tcp_dport]
-            }},
-            CollapsibleSet = sets:from_list(Collapsible),
-            {Replaced, _} = lists:foldl(fun(Rule, {Acc, Inserted}) ->
-                case sets:is_element(Rule, CollapsibleSet) of
-                    true when not Inserted ->
-                        {[LookupRule | Acc], true};
-                    true ->
-                        {Acc, Inserted};  %% skip subsequent collapsible rules
-                    false ->
-                        {[Rule | Acc], Inserted}
-                end
-            end, {[], false}, Rules),
-            {lists:reverse(Replaced), [CreateVmap, AddElems]};
-        false ->
-            {Rules, []}
-    end.
+%% Compile an explicit data map (nft_map) from DSL.
+%% Used for jhash loadbalancing: hash result → container IP.
+-spec compile_explicit_map(non_neg_integer(), binary(), map(), map()) -> [fun()].
+compile_explicit_map(Family, Table, #{name := Name, key_type := KT,
+                                       data_type := DT, entries := Entries},
+                     ReplicaIpMap) ->
+    MapName = iolist_to_binary(Name),
+    MapId = erlang:phash2(MapName) band 16#FFFF,
+    %% Resolve replica_ips entries
+    ResolvedEntries = resolve_map_entries(Entries, ReplicaIpMap, KT, DT),
+    CreateMap = fun(S) ->
+        nft_set:add_data_map(Family, #{
+            table => Table, name => MapName,
+            key_type => nft_type_atom_to_int(KT),
+            key_len => nft_type_len(KT),
+            data_type => DT
+        }, MapId, S)
+    end,
+    AddElems = fun(S) ->
+        nft_set_elem:add_data_map_elems(Family, Table, MapName,
+            ResolvedEntries, MapId, S)
+    end,
+    [CreateMap, AddElems].
+
+%% Compile an explicit verdict map (nft_vmap) from DSL.
+-spec compile_explicit_vmap(non_neg_integer(), binary(), map(), map()) -> [fun()].
+compile_explicit_vmap(Family, Table, #{name := Name, concat := true,
+                                        fields := Fields, entries := Entries},
+                      ReplicaIpMap) ->
+    VmapName = iolist_to_binary(Name),
+    VmapId = erlang:phash2(VmapName) band 16#FFFF,
+    FieldAtoms = [binary_to_existing_atom(F, utf8) || F <- Fields,
+                  is_binary(F)] ++ [F || F <- Fields, is_atom(F)],
+    ResolvedEntries = resolve_vmap_entries(Entries, ReplicaIpMap, FieldAtoms),
+    CreateVmap = fun(S) ->
+        nft_set:add_concat_vmap(Family, #{
+            table => Table, name => VmapName,
+            fields => FieldAtoms, id => VmapId
+        }, VmapId, S)
+    end,
+    AddElems = fun(S) ->
+        nft_set_elem:add_vmap_elems(Family, Table, VmapName,
+            ResolvedEntries, S)
+    end,
+    [CreateVmap, AddElems];
+compile_explicit_vmap(Family, Table, #{name := Name, type := Type,
+                                        entries := Entries}, _ReplicaIpMap) ->
+    %% Simple (non-concat) vmap
+    VmapName = iolist_to_binary(Name),
+    VmapId = erlang:phash2(VmapName) band 16#FFFF,
+    BinEntries = [{vmap_key(Type, K), verdict_atom(V)} || {K, V} <- Entries],
+    CreateVmap = fun(S) ->
+        nft_set:add_vmap(Family, #{
+            table => Table, name => VmapName, type => Type
+        }, VmapId, S)
+    end,
+    AddElems = fun(S) ->
+        nft_set_elem:add_vmap_elems(Family, Table, VmapName,
+            BinEntries, S)
+    end,
+    [CreateVmap, AddElems].
+
+%% Resolve map entries — expand {:replica_ips, Pod, Ct}
+resolve_map_entries({replica_ips, Pod, Ct}, ReplicaIpMap, _KT, _DT) ->
+    IpList = maps:get({iolist_to_binary(Pod), iolist_to_binary(Ct)},
+                      ReplicaIpMap, []),
+    lists:zip(
+        [<<Idx:32/big>> || Idx <- lists:seq(0, length(IpList) - 1)],
+        [ip_to_binary(Ip) || Ip <- IpList]
+    );
+resolve_map_entries(Entries, _ReplicaIpMap, _KT, _DT) when is_list(Entries) ->
+    Entries.
+
+%% Resolve vmap entries — convert tuples to binary keys
+resolve_vmap_entries(Entries, _ReplicaIpMap, _Fields) when is_list(Entries) ->
+    lists:map(fun(Entry) when is_tuple(Entry) ->
+        L = tuple_to_list(Entry),
+        Verdict = lists:last(L),
+        KeyParts = lists:droplast(L),
+        Key = iolist_to_binary([vmap_field_to_bin(P) || P <- KeyParts]),
+        {Key, verdict_atom(Verdict)}
+    end, Entries).
+
+vmap_field_to_bin({A, B, C, D}) -> <<A, B, C, D>>;
+vmap_field_to_bin(Port) when is_integer(Port) -> <<Port:16/big, 0:16>>;
+vmap_field_to_bin(Bin) when is_binary(Bin) -> Bin.
+
+verdict_atom(accept) -> accept;
+verdict_atom(drop) -> drop;
+verdict_atom({jump, Chain}) -> {jump, iolist_to_binary(Chain)};
+verdict_atom({goto, Chain}) -> {goto, iolist_to_binary(Chain)}.
+
+vmap_key(ipv4_addr, {A, B, C, D}) -> <<A, B, C, D>>;
+vmap_key(inet_service, Port) -> <<Port:16/big>>;
+vmap_key(mark, Val) -> <<Val:32/big>>;
+vmap_key(_, Val) when is_binary(Val) -> Val.
+
+nft_type_atom_to_int(mark) -> 19;
+nft_type_atom_to_int(ipv4_addr) -> 7;
+nft_type_atom_to_int(inet_service) -> 13;
+nft_type_atom_to_int(_) -> 0.
+
+nft_type_len(mark) -> 4;
+nft_type_len(ipv4_addr) -> 4;
+nft_type_len(inet_service) -> 2;
+nft_type_len(_) -> 4.
 
 
 %% Expand a single nft rule, resolving {:veth_of,...} and {:replica_ips,...}.
@@ -902,7 +948,32 @@ expand_nft_rule(jump, #{to := Target} = Opts, VethMap, _ReplicaIpMap) ->
             [{rule, jump, #{chain => TargetBin}}]
     end;
 
-%% dnat_lb: collect ALL replica IPs into one rule (not expanded to N rules)
+%% vmap_lookup: explicit concat verdict map lookup
+expand_nft_rule(vmap_lookup, #{vmap := VmapName}, _VethMap, _ReplicaIpMap) ->
+    [{rule, vmap_lookup, #{vmap => VmapName}}];
+
+%% dnat_jhash: explicit map reference, no implicit map creation
+expand_nft_rule(dnat_jhash, Opts, VethMap, _ReplicaIpMap) ->
+    MapName = maps:get(map, Opts),
+    Port = maps:get(port, Opts, 0),
+    Mod = maps:get(mod, Opts),
+    BaseOpts = maps:fold(fun
+        (iifname, {veth_of, P, C}, Acc) ->
+            case maps:find({P, C}, VethMap) of
+                {ok, Veth} -> Acc#{iif => Veth};
+                error -> Acc
+            end;
+        (iifname, V, Acc) -> Acc#{iif => iolist_to_binary(V)};
+        (tcp_dport, P, Acc) -> Acc#{tcp => P};
+        (counter, N, Acc) -> Acc#{counter => iolist_to_binary(N)};
+        (map, _, Acc) -> Acc;
+        (port, _, Acc) -> Acc;
+        (mod, _, Acc) -> Acc;
+        (K, V, Acc) -> Acc#{K => V}
+    end, #{}, Opts),
+    [{rule, dnat_jhash, BaseOpts#{map => MapName, dport => Port, mod => Mod}}];
+
+%% dnat_lb: legacy — collect ALL replica IPs into one rule (not expanded to N rules)
 expand_nft_rule(dnat_lb, Opts, VethMap, ReplicaIpMap) ->
     Port = maps:get(port, Opts, 0),
     Targets = case maps:get(targets, Opts, undefined) of
@@ -990,19 +1061,6 @@ ip_to_binary(B) when is_binary(B) -> B.
 
 
 %% Extract map names from the compiled AllMapCreates list.
-%% AllMapCreates contains [CreateMap1, AddElems1, CreateMap2, AddElems2, ...].
-%% The CreateMap funs create maps with names like __lb_XXXX.
-%% We extract the names by running the split and inspecting maybe_create_lb_map output.
-%% Simpler approach: the map names are embedded in the compiled rules via map_name key.
--spec collect_compiled_map_names([fun()]) -> [binary()].
-collect_compiled_map_names([]) -> [];
-collect_compiled_map_names(_MapMsgs) ->
-    %% MapMsgs are [Create, Elems, Create, Elems, ...] pairs.
-    %% We can't inspect funs, so we track map names at creation time.
-    %% This is called AFTER compile_nft_chain_split, so we extract from
-    %% the accumulated data. For now, use the persistent_term set in
-    %% maybe_create_lb_map.
-    persistent_term:get(erlkoenig_dsl_map_names_tmp, []).
 
 priority_to_int(filter) -> 0;
 priority_to_int(dstnat) -> -100;
@@ -1511,49 +1569,6 @@ wait_for_ips_loop(Remaining, IpMap, Deadline) ->
             end
     end.
 
-%% For dnat_lb rules: create a named data map and inject map_name into rule opts.
-%% Returns {UpdatedRule, [MapMessages]}.
--spec maybe_create_lb_map(term(), non_neg_integer(), binary()) ->
-    {term(), [fun()]}.
-maybe_create_lb_map({rule, dnat_lb, #{targets := Targets, dport := Port} = Opts}, Family, Table)
-  when is_list(Targets), length(Targets) > 1 ->
-    %% Generate deterministic map name from rule opts
-    MapName = <<"__lb_", (integer_to_binary(erlang:phash2({Targets, Port})))/binary>>,
-    MapId = erlang:phash2(MapName) band 16#FFFF,
-
-    %% 1. Create the data map: mark (u32) → ipv4_addr
-    %% key_type = mark (19) is a u32 that matches the hash output.
-    %% key_type = 0 (untyped) is rejected by some kernel versions.
-    CreateMap = fun(S) ->
-        nft_set:add_data_map(Family, #{
-            table => Table,
-            name => MapName,
-            key_type => 19,    %% mark = u32
-            key_len => 4,      %% 4 bytes
-            data_type => ipv4_addr
-        }, MapId, S)
-    end,
-
-    %% 2. Add elements: {<<0:32>> → IP1, <<1:32>> → IP2, ...}
-    Elements = lists:zip(
-        [<<Idx:32/big>> || Idx <- lists:seq(0, length(Targets) - 1)],
-        Targets
-    ),
-    AddElems = fun(S) ->
-        nft_set_elem:add_data_map_elems(Family, Table, MapName, Elements, MapId, S)
-    end,
-
-    %% 3. Track map name for cleanup on next reload
-    OldNames = persistent_term:get(erlkoenig_dsl_map_names_tmp, []),
-    persistent_term:put(erlkoenig_dsl_map_names_tmp, [MapName | OldNames]),
-
-    %% 4. Inject map_name and map_id for same-batch SET_ID correlation.
-    %% Maps, elements, and rules are all in one atomic Netlink batch.
-    Rule2 = {rule, dnat_lb, Opts#{map_name => MapName, map_id => MapId}},
-    {Rule2, [CreateMap, AddElems]};
-
-maybe_create_lb_map(Rule, _Family, _Table) ->
-    {Rule, []}.
 
 -spec force_stop_zone_containers(atom()) -> ok.
 force_stop_zone_containers(ZoneName) ->

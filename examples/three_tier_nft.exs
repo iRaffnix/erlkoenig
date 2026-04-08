@@ -168,25 +168,31 @@ defmodule ThreeTierNft do
       # Ban-Set (-300) ist in der host-Tabelle.
       # ════════════════════════════════════════════════════
 
-      # ── 1. DNAT: priority -100 ──────────────────────
+      # ── 1. jhash Loadbalancing Map ─────────────────
+      #
+      # Explizite Data Map: Jenkins Hash Result → Container-IP.
+      # Der Entwickler sieht die Map, benennt sie, kontrolliert die Eintraege.
+      # {:replica_ips, "web", "nginx"} wird zur Deploy-Zeit in die
+      # tatsaechlichen Container-IPs expandiert (z.B. 10.0.0.2, 10.0.0.3, 10.0.0.4).
+
+      nft_map "web_jhash", :mark, :ipv4_addr,
+        entries: {:replica_ips, "web", "nginx"}
+
+      # ── 2. DNAT: priority -100 ──────────────────────
       #
       # Schreibt die Ziel-IP um BEVOR das Routing entscheidet.
-      # Paket an PUBLIC_IP:8443 → 10.0.0.2:8443 (nginx).
-      # Ohne DNAT landet das Paket in der Input-Chain (Host),
-      # nicht in der Forward-Chain (Container).
+      # jhash(ip saddr) mod 3 → Lookup in web_jhash Map → DNAT.
+      # Gleiche Source-IP → immer gleicher Container (sticky).
+      # mod: 3 = Anzahl der Replicas — muss explizit angegeben werden.
 
       base_chain "prerouting_nat", hook: :prerouting, type: :nat,
         priority: :dstnat, policy: :accept do
 
-        # Source-IP Hash Loadbalancing:
-        # jhash(ip saddr) mod N → DNAT auf eine von N Container-IPs.
-        # Gleiche Source-IP → immer gleicher Container (sticky).
-        # Bei replicas: 1 → degeneriert zu einfachem DNAT.
-        # Bei replicas: 3 → Kernel-native Verteilung, ~10ns pro Paket.
-        nft_rule :dnat_lb,
+        nft_rule :dnat_jhash,
           iifname: "eth0",
           tcp_dport: 8443,
-          targets: {:replica_ips, "web", "nginx"},
+          map: "web_jhash",
+          mod: 3,
           port: 8443
       end
 
@@ -222,6 +228,24 @@ defmodule ThreeTierNft do
       # Evaluiert NACH DNAT — Pakete haben bereits die
       # Container-IP als Ziel.
 
+      # ── Forward-Policy als Concat Verdict Map ─────
+      #
+      # Statt 7 einzelner accept Rules: ein O(1) Hashtable-Lookup.
+      # ip saddr . ip daddr . tcp dport → accept
+      # Jeder Pfad ist ein expliziter Eintrag.
+      # Bei Autoscaling: neuer Container = neues Entry, kein Rule-Rebuild.
+
+      nft_vmap "fwd_policy",
+        fields: [:ipv4_addr, :ipv4_addr, :inet_service],
+        entries: [
+          # web → app:4000
+          {{10, 0, 0, 2}, {10, 0, 1, 2}, 4000, :accept},
+          {{10, 0, 0, 3}, {10, 0, 1, 2}, 4000, :accept},
+          {{10, 0, 0, 4}, {10, 0, 1, 2}, 4000, :accept},
+          # app → data:5432
+          {{10, 0, 1, 2}, {10, 0, 2, 2}, 5432, :accept}
+        ]
+
       base_chain "forward",
         hook: :forward, type: :filter,
         priority: :filter, policy: :drop do
@@ -240,17 +264,8 @@ defmodule ThreeTierNft do
           ip_daddr: {:replica_ips, "web", "nginx"},
           tcp_dport: 8443
 
-        # Nginx → API
-        nft_rule :accept,
-          ip_saddr: {:replica_ips, "web", "nginx"},
-          ip_daddr: {:replica_ips, "app", "api"},
-          tcp_dport: 4000
-
-        # API → Postgres
-        nft_rule :accept,
-          ip_saddr: {:replica_ips, "app", "api"},
-          ip_daddr: {:replica_ips, "data", "postgres"},
-          tcp_dport: 5432
+        # Container-zu-Container Policy: O(1) Lookup
+        nft_rule :vmap_lookup, vmap: "fwd_policy"
 
         # DMZ → Internet (Updates, DNS)
         nft_rule :accept, iifname: "dmz", oifname: "eth0"

@@ -112,6 +112,7 @@ wrap each rule separately:
     %% Verdict map dispatch
     vmap_dispatch/2,
     concat_vmap_lookup/3,
+    dnat_jhash_rule/4,
     %% Flow offload
     flow_offload/1,
     %% Concatenated set lookup
@@ -990,6 +991,24 @@ vmap_dispatch(udp, VmapName) ->
         nft_expr_ir:cmp(eq, ?REG1, <<?UDP>>),
         nft_expr_ir:udp_dport(?REG1),
         nft_expr_ir:vmap_lookup(?REG1, VmapName)
+    ].
+
+-doc """
+jhash DNAT rule using an explicit named data map.
+
+The map must be created separately via nft_map in the DSL.
+Mod is the jhash modulus (number of map entries).
+""".
+-spec dnat_jhash_rule(pos_integer(), 0..65535, binary(), non_neg_integer()) -> rule().
+dnat_jhash_rule(Mod, Port, MapName, MapId) ->
+    [
+        nft_expr_ir:meta(nfproto, ?REG1),
+        nft_expr_ir:cmp(eq, ?REG1, <<2>>),
+        nft_expr_ir:ip_saddr(?REG2),
+        nft_expr_ir:hash(?REG2, 4, Mod, ?REG1),
+        nft_expr_ir:lookup_data(?REG1, MapName, ?REG1, MapId),
+        nft_expr_ir:immediate_data(?REG2, <<Port:16/big>>),
+        nft_expr_ir:dnat(?REG1, ?REG2, 2)
     ].
 
 -doc """

@@ -14,6 +14,7 @@ defmodule Erlkoenig.Nft.TableBuilder do
             name: nil,
             counters: [],
             sets: [],
+            maps: [],
             vmaps: [],
             chains: []
 
@@ -37,8 +38,18 @@ defmodule Erlkoenig.Nft.TableBuilder do
     %{t | sets: ss ++ [set]}
   end
 
+  def add_map(%__MODULE__{maps: ms} = t, name, key_type, data_type, entries) do
+    map = %{name: name, key_type: key_type, data_type: data_type, entries: entries}
+    %{t | maps: ms ++ [map]}
+  end
+
   def add_vmap(%__MODULE__{vmaps: vs} = t, name, type, entries) do
     vmap = %{name: name, type: type, entries: entries}
+    %{t | vmaps: vs ++ [vmap]}
+  end
+
+  def add_concat_vmap(%__MODULE__{vmaps: vs} = t, name, fields, entries) do
+    vmap = %{name: name, fields: fields, entries: entries, concat: true}
     %{t | vmaps: vs ++ [vmap]}
   end
 
@@ -76,6 +87,7 @@ defmodule Erlkoenig.Nft.TableBuilder do
       chains: Enum.map(t.chains, &chain_to_term/1)
     }
     base = if t.sets != [], do: Map.put(base, :sets, t.sets), else: base
+    base = if t.maps != [], do: Map.put(base, :maps, t.maps), else: base
     base = if t.vmaps != [], do: Map.put(base, :vmaps, t.vmaps), else: base
     base
   end

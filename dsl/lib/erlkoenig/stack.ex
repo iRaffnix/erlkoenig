@@ -1297,4 +1297,79 @@ defmodule Erlkoenig.Stack do
         var!(ek_nft_table), unquote(name), unquote(type), unquote(entries))
     end
   end
+
+  @doc """
+  Declare a named data map at table level.
+
+  Data maps associate keys with data values (not verdicts). Used for
+  jhash loadbalancing: hash result (integer) → container IP.
+
+  The developer explicitly defines the map and its entries. No implicit
+  map creation — what you write is what the kernel gets.
+
+  ## Arguments
+
+  | Argument | Type | Description |
+  |----------|------|-------------|
+  | `name` | `string` | Map name (e.g., `"web_jhash"`) |
+  | `key_type` | `atom` | Key type: `:mark`, `:ipv4_addr`, etc. |
+  | `data_type` | `atom` | Value type: `:ipv4_addr`, `:inet_service`, etc. |
+  | `entries` | `list` | Static entries or `{:replica_ips, pod, ct}` |
+
+  ## Examples
+
+      # jhash loadbalancing map
+      nft_map "web_jhash", :mark, :ipv4_addr,
+        entries: {:replica_ips, "web", "nginx"}
+
+      # Rule references the map explicitly
+      nft_rule :dnat_jhash,
+        iifname: "eth0",
+        tcp_dport: 8443,
+        map: "web_jhash",
+        port: 8443
+  """
+  defmacro nft_map(name, key_type, data_type, opts \\ []) do
+    entries = Keyword.get(opts, :entries, [])
+    quote do
+      var!(ek_nft_table) = Erlkoenig.Nft.TableBuilder.add_map(
+        var!(ek_nft_table), unquote(name), unquote(key_type),
+        unquote(data_type), unquote(entries))
+    end
+  end
+
+  @doc """
+  Declare a concatenated verdict map at table level.
+
+  Concat verdict maps use composite keys (e.g., ip saddr . ip daddr . tcp dport)
+  for O(1) policy lookups. Replaces multiple individual accept/drop rules
+  with a single hashtable lookup.
+
+  ## Arguments
+
+  | Argument | Type | Description |
+  |----------|------|-------------|
+  | `name` | `string` | Map name (e.g., `"fwd_policy"`) |
+  | `fields` | `[atom]` | Key fields: `[:ipv4_addr, :ipv4_addr, :inet_service]` |
+  | `entries` | `[tuple]` | `[{saddr, daddr, port, verdict}, ...]` |
+
+  ## Examples
+
+      nft_vmap "fwd_policy",
+        fields: [:ipv4_addr, :ipv4_addr, :inet_service],
+        entries: [
+          {{10,0,0,2}, {10,0,1,2}, 4000, :accept},
+          {{10,0,1,2}, {10,0,2,2}, 5432, :accept}
+        ]
+
+      nft_rule :vmap_lookup, vmap: "fwd_policy"
+  """
+  defmacro nft_vmap(name, opts) when is_list(opts) do
+    fields = Keyword.fetch!(opts, :fields)
+    entries = Keyword.get(opts, :entries, [])
+    quote do
+      var!(ek_nft_table) = Erlkoenig.Nft.TableBuilder.add_concat_vmap(
+        var!(ek_nft_table), unquote(name), unquote(fields), unquote(entries))
+    end
+  end
 end

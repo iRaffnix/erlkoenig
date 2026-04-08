@@ -937,6 +937,15 @@ compile_generic_special(dnat_lb, #{targets := Targets, dport := Port,
                                     map_name := MapName, map_id := MapId})
   when is_list(Targets), length(Targets) > 0 ->
     {ok, nft_rules:dnat_lb_rule(Targets, Port, MapName, MapId)};
+compile_generic_special(dnat_jhash, #{map := MapName, dport := Port, mod := Mod}) ->
+    MapNameBin = iolist_to_binary(MapName),
+    MapId = erlang:phash2(MapNameBin) band 16#FFFF,
+    {ok, nft_rules:dnat_jhash_rule(Mod, Port, MapNameBin, MapId)};
+compile_generic_special(vmap_lookup, #{vmap := VmapName}) ->
+    VmapNameBin = iolist_to_binary(VmapName),
+    VmapId = erlang:phash2(VmapNameBin) band 16#FFFF,
+    {ok, nft_rules:concat_vmap_lookup(VmapNameBin,
+        [ip_saddr, ip_daddr, tcp_dport], VmapId)};
 compile_generic_special(_, _) -> false.
 
 -spec compile_generic_matches(map()) -> list().

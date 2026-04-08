@@ -75,12 +75,15 @@ jobs:
           restore-keys: |
             erlang-
 
-      - name: Setup Elixir (for DSL escript)
+      - name: Setup Elixir
         uses: erlef/setup-beam@v1
         with:
           otp-version: '28'
           elixir-version: '1.18'
           rebar3-version: '3.24'
+
+      - name: Build DSL
+        run: cd dsl && mix deps.get && mix compile
 
       - name: Install nft
         run: sudo apt-get update && sudo apt-get install -y nftables

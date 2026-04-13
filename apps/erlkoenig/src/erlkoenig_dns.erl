@@ -84,8 +84,16 @@ lookup(Name) ->
 %% =================================================================
 
 init([]) ->
-    do_init(default, application:get_env(erlkoenig, gateway, {10, 0, 0, 1}));
+    %% ADR-0020: IPVLAN-only, no bridge. Bind on loopback for default zone.
+    do_init(default, {127, 0, 0, 1});
 
+init({zone, #{zone := ZoneName, network := #{gateway := Gateway}} = _Config})
+  when Gateway =/= undefined ->
+    do_init(ZoneName, Gateway);
+init({zone, #{zone := ZoneName, network := #{}} = _Config}) ->
+    %% IPVLAN without gateway: bind on loopback (containers reach DNS via lo)
+    do_init(ZoneName, {127, 0, 0, 1});
+%% Legacy: flat config
 init({zone, #{zone := ZoneName, gateway := Gateway} = _Config}) ->
     do_init(ZoneName, Gateway).
 

@@ -197,21 +197,19 @@ apply_config_with_reconciliation(OldConfig, Config) ->
     end, StaleZones),
     Report2 = ensure_zones(Zones, Report1),
 
-    %% 3b. Rebuild nft table with zone-aware bridges
+    %% 3b. Rebuild nft table with zone-aware network config (IPVLAN-only, ADR-0020)
     ZoneNftConfigs = [begin
-        ZName = iolist_to_binary(maps:get(name, Z, <<"default">>)),
-        Bridge = iolist_to_binary(maps:get(bridge, Z,
-                    <<"ek_br_", ZName/binary>>)),
-        #{bridge => Bridge,
-          subnet => maps:get(subnet, Z, {10, 0, 0, 0}),
-          netmask => maps:get(netmask, Z, 24),
+        Net = maps:get(network, Z, #{}),
+        #{network => #{mode => ipvlan,
+                       parent => maps:get(parent, Net, <<"ek_default">>),
+                       subnet => maps:get(subnet, Z, maps:get(subnet, Net, {10,0,0,0})),
+                       netmask => maps:get(netmask, Z, maps:get(netmask, Net, 24))},
           policy => allow_outbound}
     end || Z <- Zones],
     case ZoneNftConfigs of
         [] -> ok;
         _ ->
             _ = erlkoenig_firewall_nft:setup_table(ZoneNftConfigs),
-            _ = os:cmd("ip link delete erlkoenig_br0 2>/dev/null"),
             ok
     end,
 
@@ -316,7 +314,8 @@ flatten_containers(Config) ->
 flatten_zone_containers(#{deployments := Deps} = Zone, PodMap) ->
     ZoneName = iolist_to_binary(maps:get(name, Zone, <<"default">>)),
     ZoneAtom = binary_to_atom(ZoneName),
-    Subnet = maps:get(subnet, Zone, {10, 0, 0, 0}),
+    Net = maps:get(network, Zone, #{}),
+    Subnet = maps:get(subnet, Zone, maps:get(subnet, Net, {10, 0, 0, 0})),
     {Sa, Sb, Sc, _} = Subnet,
 
     %% Expand all deployments, tracking IP counter across pods
@@ -407,18 +406,34 @@ validate_images(_, Report) ->
 ensure_zones(Zones, Report) ->
     Results = lists:map(fun(#{name := Name} = Zone) ->
         ZoneAtom = binary_to_atom(iolist_to_binary(Name)),
-        ZoneConfig = #{
-            bridge  => iolist_to_binary(maps:get(bridge, Zone, <<"ek_br_", Name/binary>>)),
-            subnet  => maps:get(subnet, Zone, {10, 0, 0, 0}),
-            gateway => maps:get(gateway, Zone, {10, 0, 0, 1}),
-            netmask => maps:get(netmask, Zone, 24),
-            policy  => maps:get(policy, Zone, allow_outbound)
-        },
+        ZoneConfig = case maps:get(network, Zone, #{}) of
+            #{mode := ipvlan} = Net ->
+                #{network => #{mode => ipvlan,
+                               parent => maps:get(parent, Net, <<"eth0">>),
+                               parent_type => maps:get(parent_type, Net, device),
+                               ipvlan_mode => maps:get(ipvlan_mode, Net, l3s),
+                               subnet => maps:get(subnet, Zone, maps:get(subnet, Net, {10,0,0,0})),
+                               gateway => maps:get(gateway, Net, maps:get(gateway, Zone, undefined)),
+                               netmask => maps:get(netmask, Zone, maps:get(netmask, Net, 24))},
+                  policy => maps:get(policy, Zone, allow_outbound)};
+            _ ->
+                %% Legacy format → IPVLAN with dummy (ADR-0020)
+                #{network => #{mode => ipvlan,
+                               parent => <<"ek_default">>,
+                               parent_type => dummy,
+                               ipvlan_mode => l3s,
+                               subnet => maps:get(subnet, Zone, {10,0,0,0}),
+                               gateway => undefined,
+                               netmask => maps:get(netmask, Zone, 24)},
+                  policy => maps:get(policy, Zone, allow_outbound)}
+        end,
         try erlkoenig_zone:zone_config(ZoneAtom) of
             OldCfg ->
                 %% Zone exists — check if config changed (subnet/gateway)
-                OldSubnet = maps:get(subnet, OldCfg, undefined),
-                NewSubnet = maps:get(subnet, ZoneConfig),
+                OldNet = maps:get(network, OldCfg, #{}),
+                OldSubnet = maps:get(subnet, OldNet, undefined),
+                NewNet = maps:get(network, ZoneConfig, #{}),
+                NewSubnet = maps:get(subnet, NewNet, undefined),
                 case OldSubnet =:= NewSubnet of
                     true ->
                         {Name, already_exists};
@@ -1071,8 +1086,13 @@ expand_nft_rule(Action, Opts, VethMap, ReplicaIpMap) ->
             Acc#{daddr => {replica_ips, Pod, Ct}};
         (ip_saddr, {A,B,C,D,Prefix}, Acc) ->
             Acc#{saddr => {A,B,C,D,Prefix}};
+        (ip_saddr, {A,B,C,D}, Acc) ->
+            Acc#{saddr => {A,B,C,D,32}};
         (ip_daddr, {A,B,C,D,Prefix}, Acc) ->
             Acc#{daddr => {A,B,C,D,Prefix}};
+        (ip_daddr, {A,B,C,D}, Acc) ->
+            Acc#{daddr => {A,B,C,D,32}};
+        (ip_protocol, Proto, Acc) -> Acc#{protocol => Proto};
         (tcp_dport, Port, Acc) -> Acc#{tcp => Port};
         (udp_dport, Port, Acc) -> Acc#{udp => Port};
         (ct_state, States, Acc) -> Acc#{ct => hd(States)};
@@ -1308,9 +1328,13 @@ apply_pod_forward_chains(Pods, Zones, SpawnedPids) ->
                 logger:info("erlkoenig_config: pod veth map: ~s → ~s ~p",
                             [Name, Veth, Ip]),
                 Acc#{Name => #{host_veth => Veth, ip => Ip}};
-            Other ->
+            Other when is_map(Other) ->
                 logger:warning("erlkoenig_config: inspect ~s: no net_info: ~p",
                                [Name, maps:keys(Other)]),
+                Acc;
+            Other ->
+                logger:warning("erlkoenig_config: inspect ~s: unexpected: ~p",
+                               [Name, Other]),
                 Acc
         catch C:E ->
             logger:warning("erlkoenig_config: inspect ~s failed: ~p:~p", [Name, C, E]),
@@ -1562,7 +1586,7 @@ run_action(Unknown, WatchName, _Counter, _Metric, _Value, _Threshold) ->
 -spec build_spawn_opts(map()) -> map().
 build_spawn_opts(Ct) ->
     Keys = [ip, ports, args, env, firewall, limits, seccomp,
-            restart, name, files, zone, volumes, image_path, publish, stream],
+            restart, name, files, zone, volumes, image_path, publish, stream, nft],
     lists:foldl(fun(K, Acc) -> copy_if(K, Ct, Acc) end, #{}, Keys).
 
 -spec copy_if(atom(), map(), map()) -> map().

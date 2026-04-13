@@ -199,10 +199,18 @@ inspect(Name) ->
                 Net ->
                     io:format("~n  ~s--- Network ---~s~n", [?DIM, ?RESET]),
                     print_kv("IP", format_ip4(maps:get(ip, Net))),
-                    print_kv("Gateway", format_ip4(maps:get(gateway, Net))),
-                    Veth = maps:get(host_veth, Net, "-"),
-                    print_kv("Host veth", Veth),
-                    print_kv("Container veth", maps:get(container_veth, Net, "-")),
+                    GwVal = maps:get(gateway, Net, undefined),
+                    print_kv("Gateway", case GwVal of
+                        undefined -> "-";
+                        _ -> format_ip4(GwVal)
+                    end),
+                    Veth = maps:get(host_veth, Net, undefined),
+                    Iface = maps:get(iface, Net, maps:get(container_veth, Net, "-")),
+                    print_kv("Interface", Iface),
+                    case Veth of
+                        undefined -> ok;
+                        _ -> print_kv("Host veth", Veth)
+                    end,
                     case State of
                         running when is_binary(Veth) ->
                             VethStats = read_all_veth_stats(Veth),
@@ -665,12 +673,16 @@ zones() ->
             io:format("~s", [?RESET]),
             lists:foreach(fun(Z) ->
                 Config = erlkoenig_zone:zone_config(Z),
-                Subnet = format_ip4(maps:get(subnet, Config, {0,0,0,0})),
-                Mask = integer_to_list(maps:get(netmask, Config, 24)),
-                Gateway = format_ip4(maps:get(gateway, Config, {0,0,0,0})),
-                Bridge = to_str(maps:get(bridge, Config, "-")),
+                Net = maps:get(network, Config, #{}),
+                Subnet = format_ip4(maps:get(subnet, Net, {0,0,0,0})),
+                Mask = integer_to_list(maps:get(netmask, Net, 24)),
+                Gateway = case maps:get(gateway, Net, undefined) of
+                    undefined -> "-";
+                    GwIp -> format_ip4(GwIp)
+                end,
+                Mode = to_str(maps:get(mode, Net, bridge)),
                 io:format("  ~-14s ~-18s ~-16s ~-16s~n",
-                          [atom_to_list(Z), Subnet ++ "/" ++ Mask, Gateway, Bridge])
+                          [atom_to_list(Z), Subnet ++ "/" ++ Mask, Gateway, Mode])
             end, ZoneNames),
             io:format("~n"),
             ok

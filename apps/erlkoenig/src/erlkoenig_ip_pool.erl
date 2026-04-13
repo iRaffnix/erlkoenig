@@ -89,6 +89,11 @@ init(legacy) ->
     register_zone_service(default),
     {ok, #state{zone = default, subnet = {A, B, C, 0}, next = 2, free = []}};
 
+init({zone, #{zone := ZoneName, network := #{subnet := {A, B, C, _}}} = _Config}) ->
+    proc_lib:set_label({erlkoenig_ip_pool, ZoneName}),
+    register_zone_service(ZoneName),
+    {ok, #state{zone = ZoneName, subnet = {A, B, C, 0}, next = 2, free = []}};
+%% Legacy: flat config
 init({zone, #{zone := ZoneName, subnet := {A, B, C, _}} = _Config}) ->
     proc_lib:set_label({erlkoenig_ip_pool, ZoneName}),
     register_zone_service(ZoneName),

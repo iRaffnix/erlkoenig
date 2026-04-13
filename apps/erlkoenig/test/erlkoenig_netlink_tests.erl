@@ -84,6 +84,63 @@ msg_create_veth_length_correct_test() ->
     ?assertEqual(byte_size(Msg), Len).
 
 %% =================================================================
+%% ipvlan creation
+%% =================================================================
+
+msg_create_ipvlan_contains_kind_test() ->
+    Msg = erlkoenig_netlink:msg_create_ipvlan(1, <<"ipv.echo">>, 2, l3s, undefined),
+    ?assertNotEqual(nomatch, binary:match(Msg, <<"ipvlan">>)).
+
+msg_create_ipvlan_contains_name_test() ->
+    Msg = erlkoenig_netlink:msg_create_ipvlan(1, <<"ipv.echo">>, 2, l3s, undefined),
+    ?assertNotEqual(nomatch, binary:match(Msg, <<"ipv.echo", 0>>)).
+
+msg_create_ipvlan_contains_parent_ifindex_test() ->
+    Msg = erlkoenig_netlink:msg_create_ipvlan(1, <<"ipv.echo">>, 42, l3s, undefined),
+    %% IFLA_LINK carries the parent ifindex as 32-bit native
+    ?assertNotEqual(nomatch, binary:match(Msg, <<42:32/native>>)).
+
+msg_create_ipvlan_length_correct_test() ->
+    Msg = erlkoenig_netlink:msg_create_ipvlan(1, <<"ipv.echo">>, 2, l3s, undefined),
+    <<Len:32/native, _/binary>> = Msg,
+    ?assertEqual(byte_size(Msg), Len).
+
+msg_create_ipvlan_header_flags_test() ->
+    Msg = erlkoenig_netlink:msg_create_ipvlan(1, <<"ipv.echo">>, 2, l3s, undefined),
+    <<_Len:32/native, Type:16/native, Flags:16/native, _/binary>> = Msg,
+    ?assertEqual(?RTM_NEWLINK, Type),
+    ?assertNotEqual(0, Flags band ?NLM_F_REQUEST),
+    ?assertNotEqual(0, Flags band ?NLM_F_ACK),
+    ?assertNotEqual(0, Flags band ?NLM_F_CREATE),
+    ?assertNotEqual(0, Flags band ?NLM_F_EXCL).
+
+msg_create_ipvlan_mode_l3s_test() ->
+    Msg = erlkoenig_netlink:msg_create_ipvlan(1, <<"ipv.x">>, 2, l3s, undefined),
+    %% IPVLAN_MODE_L3S = 2, encoded as 16-bit native inside IFLA_INFO_DATA
+    ?assertNotEqual(nomatch, binary:match(Msg, <<2:16/native>>)).
+
+msg_create_ipvlan_mode_l2_test() ->
+    Msg = erlkoenig_netlink:msg_create_ipvlan(1, <<"ipv.x">>, 2, l2, undefined),
+    %% IPVLAN_MODE_L2 = 0, encoded as 16-bit native
+    ?assertNotEqual(nomatch, binary:match(Msg, <<0:16/native>>)).
+
+msg_create_ipvlan_mode_l3_test() ->
+    Msg = erlkoenig_netlink:msg_create_ipvlan(1, <<"ipv.x">>, 2, l3, undefined),
+    %% IPVLAN_MODE_L3 = 1, encoded as 16-bit native
+    ?assertNotEqual(nomatch, binary:match(Msg, <<1:16/native>>)).
+
+msg_create_ipvlan_with_netns_pid_test() ->
+    Msg = erlkoenig_netlink:msg_create_ipvlan(1, <<"ipv.x">>, 2, l3s, 99999),
+    %% The OS PID should appear as IFLA_NET_NS_PID (32-bit native)
+    ?assertNotEqual(nomatch, binary:match(Msg, <<99999:32/native>>)).
+
+msg_create_ipvlan_without_netns_pid_test() ->
+    Msg = erlkoenig_netlink:msg_create_ipvlan(1, <<"ipv.x">>, 2, l3s, undefined),
+    %% Without NetnsPid, the message should be shorter (no IFLA_NET_NS_PID attr)
+    MsgWith = erlkoenig_netlink:msg_create_ipvlan(1, <<"ipv.x">>, 2, l3s, 12345),
+    ?assert(byte_size(MsgWith) > byte_size(Msg)).
+
+%% =================================================================
 %% Interface operations
 %% =================================================================
 

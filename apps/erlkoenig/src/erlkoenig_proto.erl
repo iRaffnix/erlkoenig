@@ -40,6 +40,7 @@ Replies from the C runtime use a simpler positional format.
          encode_cmd_go/0,
          encode_cmd_kill/1,
          encode_cmd_net_setup/4,
+         encode_cmd_nft_setup/1,
          encode_cmd_write_file/3,
          encode_cmd_query_status/0,
          encode_cmd_stdin/1,
@@ -89,6 +90,8 @@ Replies from the C runtime use a simpler positional format.
 -define(TAG_CMD_DEVICE_FILTER,   16#19).
 -define(TAG_CMD_METRICS_START,   16#1A).
 -define(TAG_CMD_METRICS_STOP,    16#1B).
+-define(TAG_CMD_NFT_SETUP,      16#1C).
+-define(TAG_CMD_NFT_LIST,       16#1D).
 
 %% -- TLV Attribute Types (from erlkoenig_proto.h) -----------------
 
@@ -371,6 +374,12 @@ encode_cmd_net_setup(IfName, {A, B, C, D}, Prefixlen, {GA, GB, GC, GD}) ->
         tlv_u32(?EK_ATTR_GATEWAY_IP, Gw),
         tlv_u8(?EK_ATTR_PREFIXLEN, Prefixlen)
     ]).
+
+-doc "Encode CMD_NFT_SETUP: apply nft batch in container netns.".
+-spec encode_cmd_nft_setup(binary()) -> binary().
+encode_cmd_nft_setup(BatchBinary) when is_binary(BatchBinary) ->
+    %% Attribute 0x01 with critical bit (0x8000) = 0x8001
+    msg(?TAG_CMD_NFT_SETUP, [tlv_str(16#8001, BatchBinary)]).
 
 -spec encode_cmd_write_file(binary(), non_neg_integer(), binary()) -> binary().
 encode_cmd_write_file(Path, Mode, Data) ->

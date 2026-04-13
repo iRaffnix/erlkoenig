@@ -25,10 +25,9 @@ default_zone_test_() ->
      fun(_Pid) -> [
         ?_assertEqual(default, erlkoenig_zone:default_zone()),
         ?_assertEqual([default], erlkoenig_zone:zones()),
-        ?_assertMatch(#{bridge  := <<"erlkoenig_br0">>,
-                        subnet  := {10, 0, 0, 0},
-                        gateway := {10, 0, 0, 1},
-                        netmask := 24,
+        ?_assertMatch(#{network := #{mode    := ipvlan,
+                                      subnet  := {10, 0, 0, 0},
+                                      netmask := 24},
                         policy  := allow_outbound},
                       erlkoenig_zone:zone_config(default))
      ] end}.
@@ -47,9 +46,9 @@ multi_zone_test_() ->
             ?assertEqual([default, dmz], Zones)
         end,
         fun() ->
-            Cfg = erlkoenig_zone:zone_config(dmz),
-            ?assertEqual(<<"erlkoenig_dmz">>, maps:get(bridge, Cfg)),
-            ?assertEqual({172, 16, 0, 0}, maps:get(subnet, Cfg))
+            #{network := Net} = erlkoenig_zone:zone_config(dmz),
+            ?assertEqual(ipvlan, maps:get(mode, Net)),
+            ?assertEqual({172, 16, 0, 0}, maps:get(subnet, Net))
         end
      ] end}.
 
@@ -76,9 +75,9 @@ register_and_lookup_service_test_() ->
      fun cleanup/1,
      fun(_Pid) -> [
         fun() ->
-            %% Register self() as bridge service for default zone
-            ok = erlkoenig_zone:register_service(default, bridge, self()),
-            ?assertEqual(self(), erlkoenig_zone:bridge(default))
+            %% Register self() as ip_pool service for default zone
+            ok = erlkoenig_zone:register_service(default, ip_pool, self()),
+            ?assertEqual(self(), erlkoenig_zone:ip_pool(default))
         end
      ] end}.
 
@@ -87,9 +86,8 @@ service_not_registered_test_() ->
      fun setup_legacy/0,
      fun cleanup/1,
      fun(_Pid) -> [
-        %% Looking up unregistered service must crash (assertive style)
-        ?_assertError({zone_service_not_registered, default, bridge},
-                      erlkoenig_zone:bridge(default))
+        ?_assertError({zone_service_not_registered, default, ip_pool},
+                      erlkoenig_zone:ip_pool(default))
      ] end}.
 
 register_unknown_zone_test_() ->
@@ -119,10 +117,11 @@ normalize_fills_defaults_test_() ->
      fun(_Pid) -> [
         fun() ->
             Cfg = erlkoenig_zone:zone_config(minimal),
-            ?assertEqual(<<"erlkoenig_br0">>, maps:get(bridge, Cfg)),
-            ?assertEqual({10, 0, 0, 0}, maps:get(subnet, Cfg)),
-            ?assertEqual({10, 0, 0, 1}, maps:get(gateway, Cfg)),
-            ?assertEqual(24, maps:get(netmask, Cfg)),
+            #{network := Net} = Cfg,
+            ?assertEqual(ipvlan, maps:get(mode, Net)),
+            ?assertEqual({10, 0, 0, 0}, maps:get(subnet, Net)),
+            ?assertEqual(undefined, maps:get(gateway, Net)),
+            ?assertEqual(24, maps:get(netmask, Net)),
             ?assertEqual(allow_outbound, maps:get(policy, Cfg))
         end
      ] end}.
@@ -140,13 +139,107 @@ normalize_override_test_() ->
      fun cleanup/1,
      fun(_Pid) -> [
         fun() ->
-            Cfg = erlkoenig_zone:zone_config(custom),
-            ?assertEqual(<<"my_br">>, maps:get(bridge, Cfg)),
-            ?assertEqual(16, maps:get(netmask, Cfg)),
-            %% Rest should be defaults
-            ?assertEqual({10, 0, 0, 0}, maps:get(subnet, Cfg)),
-            ?assertEqual({10, 0, 0, 1}, maps:get(gateway, Cfg))
+            #{network := Net} = erlkoenig_zone:zone_config(custom),
+            ?assertEqual(ipvlan, maps:get(mode, Net)),
+            ?assertEqual(16, maps:get(netmask, Net)),
+            ?assertEqual({10, 0, 0, 0}, maps:get(subnet, Net))
         end
+     ] end}.
+
+%% =================================================================
+%% IPVLAN zone config
+%% =================================================================
+
+normalize_ipvlan_test_() ->
+    {setup,
+     fun() ->
+         application:set_env(erlkoenig, zones,
+             [{edge, #{network => #{mode => ipvlan,
+                                    parent => <<"eth0">>,
+                                    parent_type => device,
+                                    ipvlan_mode => l3s,
+                                    subnet => {10, 50, 0, 0},
+                                    netmask => 24}}}]),
+         cleanup_zone_ets(),
+         {ok, Pid} = erlkoenig_zone:start_link(),
+         Pid
+     end,
+     fun cleanup/1,
+     fun(_Pid) -> [
+        fun() ->
+            Cfg = erlkoenig_zone:zone_config(edge),
+            #{network := Net} = Cfg,
+            ?assertEqual(ipvlan, maps:get(mode, Net)),
+            ?assertEqual(<<"eth0">>, maps:get(parent, Net)),
+            ?assertEqual(l3s, maps:get(ipvlan_mode, Net)),
+            ?assertEqual({10, 50, 0, 0}, maps:get(subnet, Net)),
+            ?assertEqual(24, maps:get(netmask, Net)),
+            ?assertEqual(undefined, maps:get(gateway, Net)),
+            ?assertEqual(allow_outbound, maps:get(policy, Cfg))
+        end
+     ] end}.
+
+normalize_ipvlan_subnet_from_outer_test_() ->
+    %% DSL puts subnet/netmask at zone level, not inside network sub-map
+    {setup,
+     fun() ->
+         application:set_env(erlkoenig, zones,
+             [{cloud, #{subnet => {172, 16, 0, 0},
+                        netmask => 16,
+                        network => #{mode => ipvlan,
+                                     parent => <<"bond0">>,
+                                     parent_type => device}}}]),
+         cleanup_zone_ets(),
+         {ok, Pid} = erlkoenig_zone:start_link(),
+         Pid
+     end,
+     fun cleanup/1,
+     fun(_Pid) -> [
+        fun() ->
+            #{network := Net} = erlkoenig_zone:zone_config(cloud),
+            ?assertEqual(ipvlan, maps:get(mode, Net)),
+            ?assertEqual(<<"bond0">>, maps:get(parent, Net)),
+            %% subnet/netmask should be pulled from outer map
+            ?assertEqual({172, 16, 0, 0}, maps:get(subnet, Net)),
+            ?assertEqual(16, maps:get(netmask, Net))
+        end
+     ] end}.
+
+normalize_ipvlan_with_gateway_test_() ->
+    {setup,
+     fun() ->
+         application:set_env(erlkoenig, zones,
+             [{gw, #{network => #{mode => ipvlan,
+                                  parent => <<"eth0">>,
+                                  parent_type => device,
+                                  gateway => {10, 0, 0, 1}}}}]),
+         cleanup_zone_ets(),
+         {ok, Pid} = erlkoenig_zone:start_link(),
+         Pid
+     end,
+     fun cleanup/1,
+     fun(_Pid) -> [
+        fun() ->
+            #{network := Net} = erlkoenig_zone:zone_config(gw),
+            ?assertEqual({10, 0, 0, 1}, maps:get(gateway, Net))
+        end
+     ] end}.
+
+network_mode_helper_test_() ->
+    {setup,
+     fun() ->
+         application:set_env(erlkoenig, zones,
+             [{ipv_zone, #{network => #{mode => ipvlan,
+                                        parent => <<"lo">>,
+                                        parent_type => device,
+                                        subnet => {10, 99, 0, 0}}}}]),
+         cleanup_zone_ets(),
+         {ok, Pid} = erlkoenig_zone:start_link(),
+         Pid
+     end,
+     fun cleanup/1,
+     fun(_Pid) -> [
+        ?_assertEqual(ipvlan, erlkoenig_zone:network_mode(ipv_zone))
      ] end}.
 
 %% =================================================================

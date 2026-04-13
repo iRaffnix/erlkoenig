@@ -48,6 +48,8 @@ defmodule Erlkoenig.Stack do
 
       Module.put_attribute(__MODULE__, :stack_host, nil)
       Module.put_attribute(__MODULE__, :stack_guard, nil)
+      Module.register_attribute(__MODULE__, :ek_container_nft, accumulate: false)
+      Module.put_attribute(__MODULE__, :ek_container_nft, false)
 
       @before_compile Erlkoenig.Stack
     end
@@ -78,18 +80,18 @@ defmodule Erlkoenig.Stack do
       Erlkoenig.Host.Builder.validate!(host, pod_names, all_container_names)
     end
 
-    # Validate attachments reference existing pods and bridges
-    bridge_names = if host, do: Enum.map(host.bridges, & &1.name), else: []
-    Enum.each(attachments, fn {pod_name, bridge_name, _replicas} ->
+    # Validate attachments reference existing pods and networks (bridges or ipvlans)
+    network_names = if host, do: Enum.map(host.ipvlans, & &1.name), else: []
+    Enum.each(attachments, fn {pod_name, network_name, _replicas} ->
       unless pod_name in pod_names do
         raise CompileError,
           description: "attach references unknown pod #{inspect(pod_name)}. " <>
             "Known: #{inspect(pod_names)}"
       end
-      unless bridge_name in bridge_names do
+      unless network_name in network_names do
         raise CompileError,
-          description: "attach references unknown bridge #{inspect(bridge_name)}. " <>
-            "Known: #{inspect(bridge_names)}"
+          description: "attach references unknown network #{inspect(network_name)}. " <>
+            "Known: #{inspect(network_names)}"
       end
     end)
 
@@ -97,26 +99,25 @@ defmodule Erlkoenig.Stack do
     # that erlkoenig_config understands.
     pods_term = Enum.map(pods, &Erlkoenig.Pod.Builder.to_term/1)
 
-    # Each bridge becomes a zone, each attach becomes a deployment in that zone
+    # Each ipvlan becomes a zone, each attach becomes a deployment
     zones_term = if host do
-      Enum.map(host.bridges, fn br ->
+      Enum.map(host.ipvlans, fn ipv ->
         deps = attachments
-          |> Enum.filter(fn {_pod, bridge, _r} -> bridge == br.name end)
-          |> Enum.map(fn {pod, _bridge, replicas} ->
-            %{pod: pod, replicas: replicas}
-          end)
+          |> Enum.filter(fn {_pod, net, _r} -> net == ipv.name end)
+          |> Enum.map(fn {pod, _net, replicas} -> %{pod: pod, replicas: replicas} end)
 
         zone = %{
-          name: br.name,
-          subnet: br.subnet,
-          gateway: br.gateway,
-          netmask: br.netmask,
-          bridge: br.name,
-          pool: %{start: put_elem(br.subnet, 3, 2),
-                  stop: put_elem(br.subnet, 3, 254)}
+          name: ipv.name,
+          subnet: ipv.subnet,
+          netmask: ipv.netmask,
+          network: %{mode: :ipvlan, parent: ipv.parent,
+                     parent_type: ipv.parent_type,
+                     ipvlan_mode: ipv.ipvlan_mode},
+          pool: %{start: put_elem(ipv.subnet, 3, 2),
+                  stop: put_elem(ipv.subnet, 3, 254)}
         }
-        zone = if deps != [], do: Map.put(zone, :deployments, deps), else: zone
-        zone
+        zone = if ipv.gateway, do: put_in(zone, [:network, :gateway], ipv.gateway), else: zone
+        if deps != [], do: Map.put(zone, :deployments, deps), else: zone
       end)
     else
       []
@@ -220,45 +221,29 @@ defmodule Erlkoenig.Stack do
   end
 
   @doc """
-  Create a virtual bridge — an isolated Layer 2 network segment.
+  @doc """
+  Declare an IPVLAN network segment on the host.
 
-  Each bridge is a separate broadcast domain. Containers attached to
-  a bridge get an IP from its subnet pool. Traffic between bridges
-  must pass through the forward chain (no implicit routing).
+  Creates IPVLAN L3S slaves for containers instead of veth+bridge.
+  Mutually exclusive with `bridge` — a stack must use one mode.
 
   ## Options
 
-  | Option | Type | Description |
-  |--------|------|-------------|
-  | `subnet:` | `{a, b, c, d, mask}` | IPv4 subnet in CIDR notation |
-  | `uplink:` | `string` | Physical interface for internet access (optional) |
+    * `:parent` — (required) host interface to create slaves on (e.g. "eth0")
+    * `:subnet` — (required) `{a, b, c, d, mask}` or `{a, b, c, d}` (default /24)
+    * `:mode` — `:l3s` (default), `:l3`, or `:l2`
+    * `:gateway` — optional upstream gateway IP
 
-  ## Network Details
-
-  - **Gateway**: automatically assigned as `.1` of the subnet (e.g. `10.0.0.1`)
-  - **IP Pool**: `.2` through `.254` allocated to containers
-  - **Bridge name**: same as the declared name (e.g. bridge `"dmz"` creates Linux bridge `dmz`)
-  - **Without uplink**: bridge is isolated (inter-container only)
-  - **With uplink**: bridge is connected to the physical interface for outbound traffic (requires masquerade NAT rule)
-
-  ## Examples
+  ## Example
 
       host do
-        interface "eth0", zone: :wan
-
-        # DMZ: internet-facing, connected to eth0
-        bridge "dmz", subnet: {10, 0, 0, 0, 24}, uplink: "eth0"
-
-        # App: internal only, no internet
-        bridge "app", subnet: {10, 0, 1, 0, 24}
-
-        # Data: isolated database tier
-        bridge "data", subnet: {10, 0, 2, 0, 24}
+        interface "eth0"
+        ipvlan "edge", parent: "eth0", subnet: {10, 20, 0, 0, 24}
       end
   """
-  defmacro bridge(name, opts) do
+  defmacro ipvlan(name, opts) do
     quote do
-      var!(ek_host_builder) = Erlkoenig.Host.Builder.add_bridge(
+      var!(ek_host_builder) = Erlkoenig.Host.Builder.add_ipvlan(
         var!(ek_host_builder), unquote(name), unquote(opts))
     end
   end
@@ -398,6 +383,9 @@ defmodule Erlkoenig.Stack do
   end
 
   defmacro container(name, opts, do: block) when is_list(opts) do
+    # Reset container nft context after expansion so host nft_rules
+    # in nft_table blocks don't dispatch to the pod builder
+    Module.put_attribute(__CALLER__.module, :ek_container_nft, false)
     quote do
       var!(ek_pod_builder) = Erlkoenig.Pod.Builder.begin_container(
         var!(ek_pod_builder), unquote(to_string(name)), unquote(opts))
@@ -562,7 +550,70 @@ defmodule Erlkoenig.Stack do
   end
 
   # ═══════════════════════════════════════════════════════════
-  # attach — connect pod to bridge
+  # nft — per-container firewall (SPEC-EK-023)
+  # ═══════════════════════════════════════════════════════════
+
+  @doc """
+  Define nftables firewall rules for this container.
+
+  Rules are installed inside the container's network namespace via
+  CMD_NFT_SETUP. Must be inside a `container` block with a `do` body.
+
+  Contains `output` and `input` sub-blocks that map to nft base chains
+  with the respective hooks.
+
+  ## Example
+
+      container "api", binary: "/opt/api", restart: :permanent do
+        nft do
+          output policy: :drop do
+            nft_rule :accept, ct_state: [:established, :related]
+            nft_rule :accept, iifname: "lo"
+            nft_rule :accept, tcp_dport: 5432
+          end
+          input policy: :drop do
+            nft_rule :accept, ct_state: [:established, :related]
+            nft_rule :accept, iifname: "lo"
+            nft_rule :accept, tcp_dport: 4000
+          end
+        end
+      end
+  """
+  defmacro nft(do: block) do
+    Module.put_attribute(__CALLER__.module, :ek_container_nft, true)
+    quote do
+      var!(ek_pod_builder) = Erlkoenig.Pod.Builder.begin_nft(
+        var!(ek_pod_builder))
+      unquote(block)
+      var!(ek_pod_builder) = Erlkoenig.Pod.Builder.end_nft(
+        var!(ek_pod_builder))
+    end
+  end
+
+  @doc "Define an OUTPUT chain inside an `nft` block."
+  defmacro output(opts, do: block) do
+    quote do
+      var!(ek_pod_builder) = Erlkoenig.Pod.Builder.begin_nft_chain(
+        var!(ek_pod_builder), :output, unquote(opts))
+      unquote(block)
+      var!(ek_pod_builder) = Erlkoenig.Pod.Builder.end_nft_chain(
+        var!(ek_pod_builder))
+    end
+  end
+
+  @doc "Define an INPUT chain inside an `nft` block."
+  defmacro input(opts, do: block) do
+    quote do
+      var!(ek_pod_builder) = Erlkoenig.Pod.Builder.begin_nft_chain(
+        var!(ek_pod_builder), :input, unquote(opts))
+      unquote(block)
+      var!(ek_pod_builder) = Erlkoenig.Pod.Builder.end_nft_chain(
+        var!(ek_pod_builder))
+    end
+  end
+
+  # ═══════════════════════════════════════════════════════════
+  # attach — connect pod to network
   # ═══════════════════════════════════════════════════════════
 
   @doc """
@@ -990,6 +1041,7 @@ defmodule Erlkoenig.Stack do
       end
   """
   defmacro base_chain(name, opts, do: block) do
+    Module.put_attribute(__CALLER__.module, :ek_container_nft, false)
     quote do
       var!(ek_nft_chain) = Erlkoenig.Nft.ChainBuilder.new_base(unquote(name), unquote(opts))
       unquote(block)
@@ -1025,6 +1077,7 @@ defmodule Erlkoenig.Stack do
       #   nft_rule :jump, iifname: {:veth_of, "web", "nginx"}, to: "from-web-nginx"
   """
   defmacro nft_chain(name, do: block) do
+    Module.put_attribute(__CALLER__.module, :ek_container_nft, false)
     quote do
       var!(ek_nft_chain) = Erlkoenig.Nft.ChainBuilder.new_regular(unquote(name))
       unquote(block)
@@ -1190,9 +1243,16 @@ defmodule Erlkoenig.Stack do
         port: 8443
   """
   defmacro nft_rule(action, opts \\ []) do
-    quote do
-      var!(ek_nft_chain) = Erlkoenig.Nft.ChainBuilder.add_rule(
-        var!(ek_nft_chain), unquote(action), unquote(opts))
+    if Module.get_attribute(__CALLER__.module, :ek_container_nft) do
+      quote do
+        var!(ek_pod_builder) = Erlkoenig.Pod.Builder.add_nft_rule(
+          var!(ek_pod_builder), unquote(action), unquote(opts))
+      end
+    else
+      quote do
+        var!(ek_nft_chain) = Erlkoenig.Nft.ChainBuilder.add_rule(
+          var!(ek_nft_chain), unquote(action), unquote(opts))
+      end
     end
   end
 

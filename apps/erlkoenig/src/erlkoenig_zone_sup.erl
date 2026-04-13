@@ -73,14 +73,10 @@ init(top) ->
              intensity => 5,
              period => 30}, Children}};
 
-%% Per-zone: bridge -> ip_pool -> dns (rest_for_one ordering).
+%% Per-zone: ip_pool -> dns (rest_for_one ordering).
+%% IPVLAN-only (ADR-0020): no bridge child.
 init({zone, ZoneName, Config}) ->
-    Children = [
-        #{id       => {erlkoenig_bridge, ZoneName},
-          start    => {erlkoenig_bridge, start_link, [Config]},
-          restart  => permanent,
-          type     => worker,
-          shutdown => 5000},
+    CommonChildren = [
         #{id       => {erlkoenig_ip_pool, ZoneName},
           start    => {erlkoenig_ip_pool, start_link, [Config]},
           restart  => permanent,
@@ -94,7 +90,7 @@ init({zone, ZoneName, Config}) ->
     ],
     {ok, {#{strategy => rest_for_one,
              intensity => 3,
-             period => 10}, Children}}.
+             period => 10}, CommonChildren}}.
 
 %%%===================================================================
 %%% Internal functions

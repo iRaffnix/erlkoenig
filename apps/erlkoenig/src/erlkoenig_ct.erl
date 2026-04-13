@@ -1055,6 +1055,7 @@ do_container_net_setup(#ct_data{id = Id, ip = Ip,
     case NetResult of
         {ok, NetInfo} ->
             firewall_add(Id, NetInfo, Data#ct_data.firewall, Data#ct_data.name),
+            maybe_apply_container_nft(Data),
             write_container_files(Data, Data#ct_data.files),
             send_to_rt(erlkoenig_proto:encode_cmd_go(), Data),
             Data2 = case Ip of
@@ -1288,13 +1289,9 @@ zone_bridge_name(default) ->
         Bin when is_binary(Bin) -> Bin;
         Str when is_list(Str) -> list_to_binary(Str)
     end;
-zone_bridge_name(ZoneName) ->
-    try
-        #{bridge := Bridge} = erlkoenig_zone:zone_config(ZoneName),
-        Bridge
-    catch _:_ ->
-        <<"erlkoenig_br0">>
-    end.
+zone_bridge_name(_ZoneName) ->
+    %% ADR-0020: IPVLAN-only, no bridges. Kept for DETS compat.
+    undefined.
 
 -spec cgroup_path_for_id(binary()) -> binary().
 cgroup_path_for_id(Id) ->
@@ -1419,7 +1416,8 @@ kill_os_pid(_) -> ok.
 firewall_add(_ContainerId, _NetInfo, skip_firewall, _Name) ->
     %% nft_tables mode (ADR-0015): firewall defined in DSL, not auto-generated
     ok;
-firewall_add(ContainerId, #{ip := Ip, host_veth := Veth} = _NetInfo, FwTerm, Name) ->
+firewall_add(ContainerId, #{ip := Ip} = NetInfo, FwTerm, Name) ->
+    Veth = maps:get(host_veth, NetInfo, undefined),
     Ports = [],  %% Port mappings handled via firewall term
     case erlkoenig_firewall_nft:add_container(ContainerId, Ip, Veth, Ports, FwTerm, Name) of
         ok -> ok;
@@ -1428,6 +1426,57 @@ firewall_add(ContainerId, #{ip := Ip, host_veth := Veth} = _NetInfo, FwTerm, Nam
                            [ContainerId, Reason])
     end,
     ok.
+
+%% -- Per-container nft (SPEC-EK-023) ---------------------------------
+
+-spec maybe_apply_container_nft(#ct_data{}) -> ok.
+maybe_apply_container_nft(#ct_data{extra_opts = Opts} = Data) ->
+    case maps:find(nft, Opts) of
+        {ok, NftConfig} when is_map(NftConfig) ->
+            TableName = <<"ct_", (Data#ct_data.name)/binary>>,
+            Batch = erlkoenig_nft_container:build_batch(
+                      NftConfig#{table => TableName}),
+            Handle = rt_io_handle(Data),
+            ok = maybe_set_active(Data, false),
+            Cmd = erlkoenig_proto:encode_cmd_nft_setup(Batch),
+            case Handle of
+                {socket, Sock} ->
+                    ok = gen_tcp:send(Sock, Cmd),
+                    case gen_tcp:recv(Sock, 0, 10000) of
+                        {ok, Reply} ->
+                            case erlkoenig_proto:decode(Reply) of
+                                {ok, reply_ok, _} ->
+                                    logger:info("container ~s: nft applied (~b bytes)",
+                                                [Data#ct_data.name, byte_size(Batch)]);
+                                {ok, reply_error, #{code := Code, message := Msg}} ->
+                                    logger:warning("container ~s: nft failed: ~p ~s",
+                                                   [Data#ct_data.name, Code, Msg])
+                            end;
+                        {error, Reason} ->
+                            logger:warning("container ~s: nft recv failed: ~p",
+                                           [Data#ct_data.name, Reason])
+                    end;
+                Port when is_port(Port) ->
+                    port_command(Port, Cmd),
+                    receive
+                        {Port, {data, Reply}} ->
+                            case erlkoenig_proto:decode(Reply) of
+                                {ok, reply_ok, _} ->
+                                    logger:info("container ~s: nft applied (~b bytes)",
+                                                [Data#ct_data.name, byte_size(Batch)]);
+                                {ok, reply_error, #{code := Code, message := Msg}} ->
+                                    logger:warning("container ~s: nft failed: ~p ~s",
+                                                   [Data#ct_data.name, Code, Msg])
+                            end
+                    after 10000 ->
+                        logger:warning("container ~s: nft timeout", [Data#ct_data.name])
+                    end
+            end,
+            ok = maybe_set_active(Data, true),
+            ok;
+        _ ->
+            ok
+    end.
 
 -spec firewall_remove(binary()) -> ok.
 firewall_remove(ContainerId) ->
@@ -1461,8 +1510,12 @@ disk_limit_mb(_) ->
 zone_dns_ip(default) ->
     ip4_to_u32(application:get_env(erlkoenig, gateway, {10, 0, 0, 1}));
 zone_dns_ip(ZoneName) ->
-    #{gateway := Gw} = erlkoenig_zone:zone_config(ZoneName),
-    ip4_to_u32(Gw).
+    #{network := Net} = erlkoenig_zone:zone_config(ZoneName),
+    Gw = maps:get(gateway, Net, {10, 0, 0, 1}),
+    case Gw of
+        undefined -> ip4_to_u32({10, 0, 0, 1});
+        _         -> ip4_to_u32(Gw)
+    end.
 
 -spec ip4_to_u32(inet:ip4_address()) -> non_neg_integer().
 ip4_to_u32({A, B, C, D}) ->

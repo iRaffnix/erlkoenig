@@ -162,19 +162,15 @@ maybe_migrate_cgroup(_Id, Info) ->
     Info.
 
 -spec verify_network(map()) -> ok.
-verify_network(#{veth_host := Veth}) ->
-    VethPath = "/sys/class/net/" ++ binary_to_list(Veth),
-    case filelib:is_dir(VethPath) of
-        true -> ok;
-        false ->
-            logger:warning("veth ~s missing", [Veth]),
-            ok
-    end;
-verify_network(_) -> ok.
+verify_network(_) ->
+    %% ADR-0020: IPVLAN-only. IPVLAN slaves live in the container's netns
+    %% and survive BEAM crashes as long as the container process is alive.
+    %% No host-side interface to verify.
+    ok.
 
 -spec rebuild_firewall(binary(), map()) -> ok.
 rebuild_firewall(_Id, #{config := _Config}) ->
-    %% Placeholder: full implementation in WP-CR6.
+    %% Placeholder: full implementation in SPEC-NFT-018 (firewall-rebuild).
     %% erlkoenig_firewall_nft:add_container(Id, ...) will be called here.
     ok;
 rebuild_firewall(_, _) -> ok.

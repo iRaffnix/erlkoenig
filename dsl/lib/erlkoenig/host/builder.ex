@@ -7,7 +7,7 @@ defmodule Erlkoenig.Host.Builder do
   """
 
   defstruct interfaces: [],
-            bridges: [],
+            ipvlans: [],
             chains: [],
             rules_acc: []
 
@@ -23,23 +23,39 @@ defmodule Erlkoenig.Host.Builder do
     %{h | interfaces: ifs ++ [iface]}
   end
 
-  # --- Bridges ---
+  # --- IPVLAN ---
 
-  def add_bridge(%__MODULE__{bridges: brs} = h, name, opts) do
+  def add_ipvlan(%__MODULE__{ipvlans: ipvs} = h, name, opts) do
+    {parent_type, parent_name} = case Keyword.fetch!(opts, :parent) do
+      {:dummy, n}  -> {:dummy, to_string(n)}
+      {:device, n} -> {:device, to_string(n)}
+      n when is_binary(n) or is_atom(n) ->
+        raise CompileError,
+          description: "ipvlan #{inspect(name)}: parent must be {:dummy, name} " <>
+            "or {:device, name}, got #{inspect(n)}"
+    end
+
     {subnet, netmask} = case Keyword.fetch!(opts, :subnet) do
       {a, b, c, d, mask} -> {{a, b, c, d}, mask}
       {a, b, c, d} -> {{a, b, c, d}, 24}
     end
-    {sa, sb, sc, _} = subnet
 
-    bridge = %{
+    if netmask != 24 do
+      raise CompileError,
+        description: "ipvlan #{inspect(name)}: only /24 subnets are supported " <>
+          "(got /#{netmask}). erlkoenig_ip_pool allocates from the last octet."
+    end
+
+    ipv = %{
       name: to_string(name),
+      parent: parent_name,
+      parent_type: parent_type,
       subnet: subnet,
       netmask: netmask,
-      gateway: Keyword.get(opts, :gateway, {sa, sb, sc, 1}),
-      uplink: Keyword.get(opts, :uplink) && to_string(Keyword.get(opts, :uplink))
+      ipvlan_mode: Keyword.get(opts, :mode, :l3s),
+      gateway: Keyword.get(opts, :gateway)
     }
-    %{h | bridges: brs ++ [bridge]}
+    %{h | ipvlans: ipvs ++ [ipv]}
   end
 
   # --- Chains ---
@@ -69,19 +85,9 @@ defmodule Erlkoenig.Host.Builder do
   # --- Validation ---
 
   def validate!(%__MODULE__{} = h, pod_names, all_container_names) do
-    # Validate bridge uplinks reference declared interfaces
     iface_names = Enum.map(h.interfaces, & &1.name)
-    Enum.each(h.bridges, fn br ->
-      if br.uplink && br.uplink not in iface_names do
-        raise CompileError,
-          description: "bridge #{inspect(br.name)}: uplink #{inspect(br.uplink)} " <>
-            "is not a declared interface. Known: #{inspect(iface_names)}"
-      end
-    end)
-
-    # Validate rule interface references
-    bridge_names = Enum.map(h.bridges, & &1.name)
-    valid_names = MapSet.new(iface_names ++ bridge_names ++ ["lo"] ++ all_container_names)
+    ipvlan_names = Enum.map(h.ipvlans, & &1.name)
+    valid_names = MapSet.new(iface_names ++ ipvlan_names ++ ["lo"] ++ all_container_names)
 
     Enum.each(h.chains, fn chain ->
       Enum.each(chain.rules, fn
@@ -120,9 +126,21 @@ defmodule Erlkoenig.Host.Builder do
     term = if h.interfaces != [],
       do: Map.put(term, :interfaces, h.interfaces),
       else: term
-    term = if h.bridges != [],
-      do: Map.put(term, :bridges, h.bridges),
-      else: term
+    term = case h.ipvlans do
+      [ipv | _] ->
+        net = %{
+          mode: :ipvlan,
+          parent: ipv.parent,
+          parent_type: ipv.parent_type,
+          subnet: ipv.subnet,
+          netmask: ipv.netmask,
+          ipvlan_mode: ipv.ipvlan_mode
+        }
+        net = if ipv.gateway, do: Map.put(net, :gateway, ipv.gateway), else: Map.put(net, :gateway, nil)
+        Map.put(term, :network, net)
+      _ ->
+        term
+    end
     term = if h.chains != [],
       do: Map.put(term, :chains, h.chains),
       else: term

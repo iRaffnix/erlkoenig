@@ -33,8 +33,9 @@ erlkoenig_zone_sup.
 -export([start_link/0,
          zones/0,
          zone_config/1,
+         network_mode/1,
+         link_state/1,
          register_service/3,
-         bridge/1,
          ip_pool/1,
          dns/1,
          default_zone/0,
@@ -46,14 +47,22 @@ erlkoenig_zone_sup.
 -define(TAB, erlkoenig_zones).
 
 -type zone_name()   :: atom().
--type zone_config() :: #{bridge  := binary(),
-                         subnet  := inet:ip4_address(),
-                         gateway := inet:ip4_address(),
-                         netmask := 0..32,
+-type network_config() :: #{mode := bridge,
+                            bridge := binary(),
+                            subnet := inet:ip4_address(),
+                            gateway := inet:ip4_address(),
+                            netmask := 0..32}
+                        | #{mode := ipvlan,
+                            parent := binary(),
+                            ipvlan_mode := l2 | l3 | l3s,
+                            subnet := inet:ip4_address(),
+                            gateway := inet:ip4_address() | undefined,
+                            netmask := 0..32}.
+-type zone_config() :: #{network := network_config(),
                          policy  := allow_outbound | isolate | strict}.
 -type service_type() :: bridge | ip_pool | dns.
 
--export_type([zone_name/0, zone_config/0, service_type/0]).
+-export_type([zone_name/0, zone_config/0, network_config/0, service_type/0]).
 
 %%%===================================================================
 %%% API
@@ -81,11 +90,6 @@ zone_config(Zone) when is_atom(Zone) ->
 register_service(Zone, Type, Pid) when is_atom(Zone), is_atom(Type), is_pid(Pid) ->
     gen_server:call(?MODULE, {register_service, Zone, Type, Pid}).
 
--doc "Look up the bridge PID for a zone. Crashes if not registered.".
--spec bridge(zone_name()) -> pid().
-bridge(Zone) ->
-    lookup_service_or_crash(Zone, bridge).
-
 -doc "Look up the IP pool PID for a zone. Crashes if not registered.".
 -spec ip_pool(zone_name()) -> pid().
 ip_pool(Zone) ->
@@ -95,6 +99,30 @@ ip_pool(Zone) ->
 -spec dns(zone_name()) -> pid().
 dns(Zone) ->
     lookup_service_or_crash(Zone, dns).
+
+-doc "Get the network mode for a zone (bridge or ipvlan).".
+-spec network_mode(zone_name()) -> bridge | ipvlan.
+network_mode(Zone) ->
+    #{network := #{mode := Mode}} = zone_config(Zone),
+    Mode.
+
+-doc """
+Get the link_ref for a zone (lazily initialized on first call).
+
+Returns {Module, State} suitable for erlkoenig_zone_link:attach_container/2.
+Caches the result in ETS so subsequent calls are fast.
+""".
+-spec link_state(zone_name()) -> erlkoenig_zone_link:link_ref().
+link_state(Zone) ->
+    case ets:lookup(?TAB, {Zone, link_state}) of
+        [{{Zone, link_state}, LinkRef}] ->
+            LinkRef;
+        _ ->
+            Cfg = maps:put(zone, Zone, zone_config(Zone)),
+            {ok, LinkRef} = erlkoenig_zone_link:init(Cfg),
+            true = ets:insert(?TAB, {{Zone, link_state}, LinkRef}),
+            LinkRef
+    end.
 
 -doc "Return the name of the default zone.".
 -spec default_zone() -> zone_name().
@@ -144,11 +172,12 @@ handle_call({create_zone, Name, Cfg}, From, State) ->
             spawn_link(fun() ->
                 Result = case erlkoenig_zone_sup:start_zone(Name) of
                     {ok, _Pid} ->
-                        logger:info("zone ~s created: ~s/~b on ~s",
+                        #{network := Net} = Cfg,
+                        logger:info("zone ~s created: ~s/~b mode=~s",
                                     [Name,
-                                     inet:ntoa(maps:get(subnet, Cfg)),
-                                     maps:get(netmask, Cfg),
-                                     maps:get(bridge, Cfg)]),
+                                     inet:ntoa(maps:get(subnet, Net)),
+                                     maps:get(netmask, Net),
+                                     maps:get(mode, Net)]),
                         ok;
                     {error, _} = Err ->
                         true = ets:delete(?TAB, Name),
@@ -211,25 +240,47 @@ load_zones() ->
 -doc "Build a single default zone from legacy flat config keys.".
 -spec build_default_zone() -> {zone_name(), zone_config()}.
 build_default_zone() ->
-    Bridge  = application:get_env(erlkoenig, bridge_name, <<"erlkoenig_br0">>),
     Subnet  = application:get_env(erlkoenig, subnet,  {10, 0, 0, 0}),
-    Gateway = application:get_env(erlkoenig, gateway, {10, 0, 0, 1}),
     Netmask = application:get_env(erlkoenig, netmask, 24),
-    Cfg = #{bridge  => Bridge,
-            subnet  => Subnet,
-            gateway => Gateway,
-            netmask => Netmask,
+    Cfg = #{network => #{mode        => ipvlan,
+                         parent      => <<"ek_default">>,
+                         parent_type => dummy,
+                         ipvlan_mode => l3s,
+                         subnet      => Subnet,
+                         gateway     => undefined,
+                         netmask     => Netmask},
             policy  => allow_outbound},
     {default, Cfg}.
 
--doc "Ensure all required keys are present, fill in defaults.".
+-doc """
+Ensure all required keys are present, fill in defaults.
+
+Handles three input formats:
+  1. New format: #{network => #{mode => bridge|ipvlan, ...}, ...}
+  2. Legacy format: #{bridge => ..., subnet => ..., ...}
+  3. IPVLAN format: #{network => #{mode => ipvlan, parent => ..., ...}, ...}
+""".
 -spec normalize_config(map()) -> zone_config().
+normalize_config(#{network := #{mode := ipvlan} = Net} = Cfg) ->
+    %% subnet/netmask may be in Net or in the outer Cfg (DSL zone output)
+    #{network => #{mode        => ipvlan,
+                   parent      => maps:get(parent, Net),
+                   parent_type => maps:get(parent_type, Net, device),
+                   ipvlan_mode => maps:get(ipvlan_mode, Net, l3s),
+                   subnet      => first_of(subnet, [Net, Cfg], {10, 0, 0, 0}),
+                   gateway     => first_of(gateway, [Net, Cfg], undefined),
+                   netmask     => first_of(netmask, [Net, Cfg], 24)},
+      policy  => maps:get(policy, Cfg, allow_outbound)};
 normalize_config(Cfg) when is_map(Cfg) ->
-    #{bridge  => maps:get(bridge,  Cfg, <<"erlkoenig_br0">>),
-      subnet  => maps:get(subnet,  Cfg, {10, 0, 0, 0}),
-      gateway => maps:get(gateway, Cfg, {10, 0, 0, 1}),
-      netmask => maps:get(netmask, Cfg, 24),
-      policy  => maps:get(policy,  Cfg, allow_outbound)}.
+    %% Legacy flat format → wrap into IPVLAN with dummy parent
+    #{network => #{mode        => ipvlan,
+                   parent      => maps:get(bridge, Cfg, <<"ek_default">>),
+                   parent_type => dummy,
+                   ipvlan_mode => l3s,
+                   subnet      => maps:get(subnet, Cfg, {10, 0, 0, 0}),
+                   gateway     => maps:get(gateway, Cfg, undefined),
+                   netmask     => maps:get(netmask, Cfg, 24)},
+      policy  => maps:get(policy, Cfg, allow_outbound)}.
 
 -doc "Look up a service PID by zone + type. Returns {ok, Pid} or error.".
 -spec lookup_service(zone_name(), service_type()) -> {ok, pid()} | {error, not_registered}.
@@ -244,6 +295,15 @@ lookup_service_or_crash(Zone, Type) ->
     case lookup_service(Zone, Type) of
         {ok, Pid} -> Pid;
         {error, _} -> error({zone_service_not_registered, Zone, Type})
+    end.
+
+%% Look up Key in a list of maps, return the first found value or Default.
+-spec first_of(atom(), [map()], term()) -> term().
+first_of(_Key, [], Default) -> Default;
+first_of(Key, [Map | Rest], Default) ->
+    case maps:find(Key, Map) of
+        {ok, Val} -> Val;
+        error     -> first_of(Key, Rest, Default)
     end.
 
 -doc "Check if any running container belongs to this zone.".

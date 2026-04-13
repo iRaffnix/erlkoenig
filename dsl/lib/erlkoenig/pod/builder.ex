@@ -59,7 +59,10 @@ defmodule Erlkoenig.Pod.Builder do
             containers: [],
             current_ct: nil,
             current_publish: nil,
-            current_stream: nil
+            current_stream: nil,
+            current_nft: nil,
+            current_nft_chain: nil,
+            nft_rules_acc: []
 
   def new(name, opts \\ []) when is_binary(name) do
     strategy = Keyword.get(opts, :strategy, :one_for_one)
@@ -200,6 +203,52 @@ defmodule Erlkoenig.Pod.Builder do
     %{pod | current_ct: ct, current_stream: nil}
   end
 
+  # --- Per-container nft (SPEC-EK-023) ---
+
+  def begin_nft(%__MODULE__{current_ct: nil}) do
+    raise CompileError, description: "nft block must be inside a container"
+  end
+  def begin_nft(%__MODULE__{} = pod) do
+    %{pod | current_nft: %{chains: []}, nft_rules_acc: []}
+  end
+
+  def end_nft(%__MODULE__{current_nft: nil} = pod), do: pod
+  def end_nft(%__MODULE__{current_nft: nft, current_ct: ct} = pod) do
+    ct = Map.put(ct, :nft, nft)
+    %{pod | current_ct: ct, current_nft: nil}
+  end
+
+  def begin_nft_chain(%__MODULE__{current_nft: nil}, _hook, _opts) do
+    raise CompileError, description: "output/input block must be inside an nft block"
+  end
+  def begin_nft_chain(%__MODULE__{} = pod, hook, opts) when hook in [:output, :input] do
+    policy = Keyword.get(opts, :policy, :accept)
+    chain = %{
+      name: Atom.to_string(hook),
+      hook: hook,
+      type: :filter,
+      priority: 0,
+      policy: policy
+    }
+    %{pod | current_nft_chain: chain, nft_rules_acc: []}
+  end
+
+  def end_nft_chain(%__MODULE__{current_nft_chain: nil} = pod), do: pod
+  def end_nft_chain(%__MODULE__{current_nft_chain: chain, current_nft: nft,
+                                nft_rules_acc: rules} = pod) do
+    chain = Map.put(chain, :rules, Enum.reverse(rules))
+    nft = %{nft | chains: nft.chains ++ [chain]}
+    %{pod | current_nft: nft, current_nft_chain: nil, nft_rules_acc: []}
+  end
+
+  def add_nft_rule(%__MODULE__{current_nft_chain: nil}, _action, _opts) do
+    raise CompileError, description: "nft_rule must be inside an output or input block"
+  end
+  def add_nft_rule(%__MODULE__{} = pod, action, opts) do
+    rule = {action, Map.new(opts)}
+    %{pod | nft_rules_acc: [rule | pod.nft_rules_acc]}
+  end
+
   # --- Validation ---
 
   def validate!(%__MODULE__{} = pod) do
@@ -252,6 +301,12 @@ defmodule Erlkoenig.Pod.Builder do
         stream_term = %{channels: ct.stream.channels, retention_days: ct.stream.retention_days}
         stream_term = if ct.stream.max_bytes, do: Map.put(stream_term, :max_bytes, ct.stream.max_bytes), else: stream_term
         Map.put(ct_term, :stream, stream_term)
+      else
+        ct_term
+      end
+
+      ct_term = if ct[:nft] != nil do
+        Map.put(ct_term, :nft, ct.nft)
       else
         ct_term
       end

@@ -44,6 +44,8 @@ wrap each rule separately:
     iifname_accept/1,
     iifname_jump/2,
     iifname_oifname_jump/3,
+    ip_saddr_jump/2,
+    ip_daddr_jump/2,
     iifname_oifname_masq/2,
     oifname_accept/1,
     tcp_accept/1,
@@ -211,6 +213,24 @@ iifname_jump(Name, Target) ->
     [
         nft_expr_ir:meta(iifname, ?REG1),
         nft_expr_ir:cmp(eq, ?REG1, Padded),
+        nft_expr_ir:jump(Target)
+    ].
+
+-doc "Jump to a named chain if the source IP matches (for IPVLAN mode).".
+-spec ip_saddr_jump(binary(), binary()) -> rule().
+ip_saddr_jump(IP, Target) when byte_size(IP) =:= 4 ->
+    [
+        nft_expr_ir:ip_saddr(?REG1),
+        nft_expr_ir:cmp(eq, ?REG1, IP),
+        nft_expr_ir:jump(Target)
+    ].
+
+-doc "Jump to a named chain if the destination IP matches (for IPVLAN inbound).".
+-spec ip_daddr_jump(binary(), binary()) -> rule().
+ip_daddr_jump(IP, Target) when byte_size(IP) =:= 4 ->
+    [
+        nft_expr_ir:ip_daddr(?REG1),
+        nft_expr_ir:cmp(eq, ?REG1, IP),
         nft_expr_ir:jump(Target)
     ].
 

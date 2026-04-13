@@ -18,23 +18,31 @@
 -moduledoc """
 Container network orchestration.
 
-High-level module that sets up networking for containers:
-  1. Per container: veth pair, move into netns, attach to bridge
-  2. In-netns config: IP, up, route -- via CMD_NET_SETUP to erlkoenig_rt
-  3. Teardown: delete host veth (peer disappears automatically)
+Thin dispatcher that delegates link creation to the zone_link
+behaviour (bridge or ipvlan), then sends CMD_NET_SETUP to the
+C runtime for in-netns IP/route configuration.
 
-Host-side operations use erlkoenig_netlink (pure Erlang netlink).
-In-netns operations are delegated to erlkoenig_rt via the port
-protocol, which uses setns() + C netlink internally.
+Two networking modes (selected per zone via `network.mode`):
 
-Network topology:
+  Bridge mode (default):
+    Host namespace                Container namespace
+    +-----------+                 +-----------+
+    | ek_br_X   |---vh.name------| vp.name   |
+    | 10.0.0.1  |  (veth pair)   | 10.0.0.X  |
+    +-----------+                 +-----------+
+    Link created by: erlkoenig_zone_link_bridge
 
-  Host namespace                Container namespace
-  +-----------+                 +-----------+
-  | erlkoenig   |                 | eth0      |
-  | _br0      |---veth_XXXX----| 10.0.0.X  |
-  | 10.0.0.1  |                 +-----------+
-  +-----------+
+  IPVLAN L3S mode:
+    Host namespace                Container namespace
+    +-----------+                 +-----------+
+    | eth0/     |     (no host    | ipv.name  |
+    | ek_ct0    |      side)      | 10.X.X.X  |
+    +-----------+                 +-----------+
+    Slave created directly in container netns by:
+    erlkoenig_zone_link_ipvlan (via IFLA_NET_NS_PID)
+
+In both modes, CMD_NET_SETUP configures IP/route/UP inside the
+container's netns. The C runtime is link-agnostic.
 """.
 
 -export([setup_container_net/3,
@@ -101,92 +109,57 @@ setup_container_net(Port, ContainerId, OsPid, Ip, ZoneName) ->
                           inet:ip4_address(), atom(), binary() | undefined) ->
     {ok, map()} | {error, term()}.
 setup_container_net(Port, ContainerId, OsPid, Ip, ZoneName, Name) ->
-    HostVeth = host_veth_name(ContainerId, Name),
-    ContainerVeth = peer_veth_name(ContainerId, Name),
+    LinkRef = erlkoenig_zone:link_state(ZoneName),
+    IfName = container_iface_name(ContainerId, Name, LinkRef),
     maybe
-        ok ?= do_host_setup(HostVeth, ContainerVeth, OsPid, ZoneName),
-        Gateway = zone_gateway(ZoneName),
+        {ok, AttachInfo} ?= erlkoenig_zone_link:attach_container(
+                              LinkRef, {IfName, OsPid}),
+        Gateway0 = zone_gateway(ZoneName),
+        Gateway = case Gateway0 of
+            undefined -> {0, 0, 0, 0};
+            _         -> Gateway0
+        end,
         Mask = zone_netmask(ZoneName),
-        ok ?= do_netns_setup(Port, ContainerVeth, Ip, Gateway, Mask),
-        {ok, #{host_veth => HostVeth,
-               container_veth => ContainerVeth,
-               ip => Ip,
+        ok ?= do_netns_setup(Port, IfName, Ip, Gateway, Mask),
+        {ok, #{ip => Ip,
                gateway => Gateway,
                netmask => Mask,
-               zone => ZoneName}}
+               zone => ZoneName,
+               iface => IfName,
+               attach => AttachInfo,
+               %% Backward compat: existing code reads host_veth/container_veth
+               host_veth => maps:get(host_veth, AttachInfo, undefined),
+               container_veth => maps:get(peer_veth, AttachInfo, IfName)}}
     else
         {error, _} = Err ->
-            _ = rollback_veth(HostVeth),
+            _ = erlkoenig_zone_link:detach_container(LinkRef, #{slave => IfName}),
             Err
     end.
 
--doc "Tear down a container's network (veth + IP release). Deleting the host veth automatically deletes the peer.".
+-doc "Tear down a container's network (link + IP release).".
 -spec teardown_container_net(map()) -> ok.
-teardown_container_net(#{host_veth := HostVeth, ip := Ip}) ->
-    _ = rollback_veth(HostVeth),
+teardown_container_net(#{ip := Ip, zone := ZoneName, attach := AttachInfo}) ->
+    LinkRef = erlkoenig_zone:link_state(ZoneName),
+    _ = erlkoenig_zone_link:detach_container(LinkRef, AttachInfo),
     erlkoenig_ip_pool:release(Ip),
     ok;
 teardown_container_net(_) ->
     ok.
 
 -doc """
-Tear down only the veth pair, keep the IP reserved.
+Tear down only the link, keep the IP reserved.
 
-Used during container restart: the veth is deleted (network goes
+Used during container restart: the link is removed (network goes
 down), but the IP stays allocated so the container keeps the same
 address after restart.
 """.
 -spec teardown_container_veth(map()) -> ok.
-teardown_container_veth(#{host_veth := HostVeth}) ->
-    _ = rollback_veth(HostVeth),
+teardown_container_veth(#{zone := ZoneName, attach := AttachInfo}) ->
+    LinkRef = erlkoenig_zone:link_state(ZoneName),
+    _ = erlkoenig_zone_link:detach_container(LinkRef, AttachInfo),
     ok;
 teardown_container_veth(_) ->
     ok.
-
-%%%===================================================================
-%%% Internal: Host-side setup (pure netlink)
-%%%===================================================================
-
--spec do_host_setup(binary(), binary(), non_neg_integer(), atom()) -> ok | {error, term()}.
-do_host_setup(HostVeth, ContainerVeth, OsPid, ZoneName) ->
-    {ok, Sock} = erlkoenig_netlink:open(),
-    try
-        do_host_setup_veth(Sock, HostVeth, ContainerVeth, OsPid, ZoneName)
-    after
-        erlkoenig_netlink:close(Sock)
-    end.
-
-%% Step 1: Create veth pair.
--spec do_host_setup_veth(socket:socket(), binary(), binary(),
-                         non_neg_integer(), atom()) -> ok | {error, term()}.
-do_host_setup_veth(Sock, HostVeth, ContainerVeth, OsPid, ZoneName) ->
-    maybe
-        %% Clean up stale veth if it exists (e.g. from a crashed predecessor
-        %% with the same name). This prevents EEXIST on create.
-        _ = delete_link(Sock, HostVeth),
-        Seq = erlkoenig_netlink:next_seq(),
-        ok ?= erlkoenig_netlink:request(
-                Sock, erlkoenig_netlink:msg_create_veth(Seq, HostVeth, ContainerVeth)),
-        %% Step 2: Move container end into container's netns.
-        {ok, PeerIdx} ?= get_ifindex(Sock, ContainerVeth),
-        Seq2 = erlkoenig_netlink:next_seq(),
-        ok ?= erlkoenig_netlink:request(
-                Sock, erlkoenig_netlink:msg_set_netns_by_pid(Seq2, PeerIdx, OsPid)),
-        %% Step 3: Attach host end to bridge, bring up.
-        BridgeIdx = erlkoenig_bridge:ifindex(ZoneName),
-        {ok, HostIdx} ?= get_ifindex(Sock, HostVeth),
-        Seq3 = erlkoenig_netlink:next_seq(),
-        ok ?= erlkoenig_netlink:request(
-                Sock, erlkoenig_netlink:msg_set_master(Seq3, HostIdx, BridgeIdx)),
-        %% Step 4: Bring host end up
-        Seq4 = erlkoenig_netlink:next_seq(),
-        ok ?= erlkoenig_netlink:request(
-                Sock, erlkoenig_netlink:msg_set_up(Seq4, HostIdx))
-    else
-        {error, _} = Err ->
-            _ = delete_link(Sock, HostVeth),
-            Err
-    end.
 
 %%%===================================================================
 %%% Internal: In-netns setup (via erlkoenig_rt CMD_NET_SETUP)
@@ -235,61 +208,34 @@ do_netns_setup(Port, IfName, Ip, Gateway, Prefixlen) when is_port(Port) ->
 %%% Internal: Helpers
 %%%===================================================================
 
--spec get_ifindex(socket:socket(), binary()) -> {ok, integer()} | {error, term()}.
-get_ifindex(Sock, Name) ->
-    Seq = erlkoenig_netlink:next_seq(),
-    Msg = erlkoenig_netlink:msg_get_link(Seq, Name),
-    case socket:send(Sock, Msg) of
-        ok    -> erlkoenig_netlink:recv_ifindex(Sock);
-        Error -> Error
-    end.
 
--spec delete_link(socket:socket(), binary()) -> ok | {error, term()}.
-delete_link(Sock, Name) ->
-    case get_ifindex(Sock, Name) of
-        {ok, Idx} ->
-            Seq = erlkoenig_netlink:next_seq(),
-            erlkoenig_netlink:request(
-              Sock, erlkoenig_netlink:msg_delete_link(Seq, Idx));
-        _ ->
-            ok
-    end.
+%% Generate interface name based on network mode.
+%% Bridge: peer gets "vp_"/"vp." prefix (host side: "vh_"/"vh.")
+%% IPVLAN: slave gets "ipv." prefix (no host-side interface)
+-spec container_iface_name(binary(), binary() | undefined,
+                           erlkoenig_zone_link:link_ref()) -> binary().
+container_iface_name(ContainerId, Name, _LinkRef) ->
+    ipvlan_name(ContainerId, Name).
 
--spec rollback_veth(binary()) -> ok | {error, term()}.
-rollback_veth(HostVeth) ->
-    {ok, Sock} = erlkoenig_netlink:open(),
-    try
-        delete_link(Sock, HostVeth)
-    after
-        erlkoenig_netlink:close(Sock)
+%% IPVLAN slave names: "i." prefix (2 bytes) + name = max 15 (IFNAMSIZ-1)
+-spec ipvlan_name(binary(), binary() | undefined) -> binary().
+ipvlan_name(ContainerId, undefined) ->
+    make_ifname(short_id(ContainerId));
+ipvlan_name(_ContainerId, Name) ->
+    make_ifname(short_name(Name)).
+
+-spec make_ifname(binary()) -> binary().
+make_ifname(Short) ->
+    IfName = <<"i.", Short/binary>>,
+    case byte_size(IfName) of
+        N when N =< 15 -> IfName;
+        N -> error({interface_name_too_long, IfName, N, max_15})
     end.
 
 %% Generate veth names from container ID or name.
 %% IFNAMSIZ is 16 (including NUL), so max 15 chars.
 %% Host:  "vh_" (3) + 12 chars = 15
 %% Peer:  "vp_" (3) + 12 chars = 15
--spec host_veth_name(binary()) -> binary().
-host_veth_name(ContainerId) ->
-    <<"vh_", (short_id(ContainerId))/binary>>.
-
--spec peer_veth_name(binary()) -> binary().
-peer_veth_name(ContainerId) ->
-    <<"vp_", (short_id(ContainerId))/binary>>.
-
-%% Named veth variants: use container name for readable ip/nft output.
-%% "web-0-nginx" → "vh.web0nginx" (dot instead of underscore to distinguish)
--spec host_veth_name(binary(), binary() | undefined) -> binary().
-host_veth_name(ContainerId, undefined) ->
-    host_veth_name(ContainerId);
-host_veth_name(_ContainerId, Name) ->
-    <<"vh.", (short_name(Name))/binary>>.
-
--spec peer_veth_name(binary(), binary() | undefined) -> binary().
-peer_veth_name(ContainerId, undefined) ->
-    peer_veth_name(ContainerId);
-peer_veth_name(_ContainerId, Name) ->
-    <<"vp.", (short_name(Name))/binary>>.
-
 short_id(Id) ->
     binary:part(Id, 0, min(12, byte_size(Id))).
 
@@ -300,16 +246,16 @@ short_name(Name) ->
     Compact = binary:replace(Name, <<"-">>, <<>>, [global]),
     binary:part(Compact, 0, min(12, byte_size(Compact))).
 
--spec zone_gateway(atom()) -> inet:ip4_address().
+-spec zone_gateway(atom()) -> inet:ip4_address() | undefined.
 zone_gateway(default) ->
     application:get_env(erlkoenig, gateway, {10, 0, 0, 1});
 zone_gateway(ZoneName) ->
-    #{gateway := Gw} = erlkoenig_zone:zone_config(ZoneName),
-    Gw.
+    #{network := Net} = erlkoenig_zone:zone_config(ZoneName),
+    maps:get(gateway, Net, {10, 0, 0, 1}).
 
 -spec zone_netmask(atom()) -> non_neg_integer().
 zone_netmask(default) ->
     application:get_env(erlkoenig, netmask, 24);
 zone_netmask(ZoneName) ->
-    #{netmask := Nm} = erlkoenig_zone:zone_config(ZoneName),
-    Nm.
+    #{network := Net} = erlkoenig_zone:zone_config(ZoneName),
+    maps:get(netmask, Net, 24).

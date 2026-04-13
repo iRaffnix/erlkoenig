@@ -11,30 +11,30 @@ defmodule StackTest do
     assert mod.config() == %{}
   end
 
-  test "host with interface and bridge" do
+  test "host with interface and ipvlan" do
     [{mod, _}] = Code.compile_string(~S"""
     defmodule TestStack.HostOnly do
       use Erlkoenig.Stack
 
       host do
         interface "eth0", zone: :wan
-        bridge "br0", subnet: {10, 0, 0, 0, 24}, uplink: "eth0"
+        ipvlan "net0", parent: {:dummy, "ek0"}, subnet: {10, 0, 0, 0, 24}
       end
     end
     """)
 
     config = mod.config()
-    assert config.host.bridges == [%{name: "br0", subnet: {10, 0, 0, 0},
-      netmask: 24, gateway: {10, 0, 0, 1}, uplink: "eth0"}]
+    assert %{network: %{mode: :ipvlan,
+      netmask: 24}} = config.host
   end
 
-  test "bridge generates gateway .1 and IP pool .2-.254" do
+  test "ipvlan generates IP pool .1 and IP pool .2-.254" do
     [{mod, _}] = Code.compile_string(~S"""
     defmodule TestStack.BridgePool do
       use Erlkoenig.Stack
 
       host do
-        bridge "net", subnet: {192, 168, 5, 0, 24}
+        ipvlan "net", parent: {:dummy, "ek_net"}, subnet: {192, 168, 5, 0, 24}
       end
 
       pod "x" do
@@ -46,26 +46,27 @@ defmodule StackTest do
     """)
 
     config = mod.config()
-    bridge = hd(config.host.bridges)
-    assert bridge.gateway == {192, 168, 5, 1}
-    assert bridge.netmask == 24
+    net = config.host.network
+    assert net.mode == :ipvlan
+    assert net.netmask == 24
 
     zone = hd(config.zones)
     assert zone.pool == %{start: {192, 168, 5, 2}, stop: {192, 168, 5, 254}}
   end
 
-  test "bridge without uplink has no uplink key" do
+  test "ipvlan network config" do
     [{mod, _}] = Code.compile_string(~S"""
     defmodule TestStack.NoUplink do
       use Erlkoenig.Stack
       host do
-        bridge "internal", subnet: {10, 0, 0, 0, 24}
+        ipvlan "internal", parent: {:dummy, "ek_int"}, subnet: {10, 0, 0, 0, 24}
       end
     end
     """)
 
-    bridge = hd(mod.config().host.bridges)
-    assert bridge.uplink == nil
+    net = mod.config().host.network
+    assert net.mode == :ipvlan
+    assert net.parent_type == :dummy
   end
 
   test "interface zone preserved in config" do
@@ -75,7 +76,7 @@ defmodule StackTest do
       host do
         interface "eth0", zone: :wan
         interface "eth1", zone: :lan
-        bridge "br0", subnet: {10, 0, 0, 0, 24}
+        ipvlan "net0", parent: {:dummy, "ek0"}, subnet: {10, 0, 0, 0, 24}
       end
     end
     """)
@@ -94,7 +95,7 @@ defmodule StackTest do
       use Erlkoenig.Stack
 
       host do
-        bridge "br0", subnet: {10, 0, 0, 0, 24}
+        ipvlan "net0", parent: {:dummy, "ek0"}, subnet: {10, 0, 0, 0, 24}
       end
 
       pod "web" do
@@ -102,7 +103,7 @@ defmodule StackTest do
         container "sidecar", binary: "/opt/sidecar"
       end
 
-      attach "web", to: "br0", replicas: 2
+      attach "web", to: "net0", replicas: 2
     end
     """)
 
@@ -123,7 +124,7 @@ defmodule StackTest do
 
       host do
         interface "eth0", zone: :wan
-        bridge "br0", subnet: {10, 0, 0, 0, 24}, uplink: "eth0"
+        ipvlan "net0", parent: {:dummy, "ek0"}, subnet: {10, 0, 0, 0, 24}
       end
 
       pod "web" do
@@ -131,27 +132,27 @@ defmodule StackTest do
         container "api", binary: "/opt/api"
       end
 
-      attach "web", to: "br0", replicas: 3
+      attach "web", to: "net0", replicas: 3
     end
     """)
 
     config = mod.config()
     assert length(config.zones) == 1
     zone = hd(config.zones)
-    assert zone.name == "br0"
+    assert zone.name == "net0"
     assert zone.deployments == [%{pod: "web", replicas: 3}]
   end
 
-  test "multi-bridge three-tier" do
+  test "multi-ipvlan three-tier" do
     [{mod, _}] = Code.compile_string(~S"""
     defmodule TestStack.ThreeTier do
       use Erlkoenig.Stack
 
       host do
         interface "eth0", zone: :wan
-        bridge "dmz",  subnet: {10, 0, 0, 0, 24}, uplink: "eth0"
-        bridge "app",  subnet: {10, 0, 1, 0, 24}
-        bridge "data", subnet: {10, 0, 2, 0, 24}
+        ipvlan "dmz", parent: {:dummy, "ek_dmz"}, subnet: {10, 0, 0, 0, 24}
+        ipvlan "app", parent: {:dummy, "ek_app"}, subnet: {10, 0, 1, 0, 24}
+        ipvlan "data", parent: {:dummy, "ek_data"}, subnet: {10, 0, 2, 0, 24}
       end
 
       pod "web" do
@@ -213,14 +214,14 @@ defmodule StackTest do
     assert {127, 0, 0, 1} in guard.whitelist
   end
 
-  test "same pod attached to multiple bridges" do
+  test "same pod attached to multiple ipvlans" do
     [{mod, _}] = Code.compile_string(~S"""
     defmodule TestStack.MultiAttach do
       use Erlkoenig.Stack
 
       host do
-        bridge "region_eu", subnet: {10, 1, 0, 0, 24}
-        bridge "region_us", subnet: {10, 2, 0, 0, 24}
+        ipvlan "region_eu", parent: {:dummy, "ek_eu"}, subnet: {10, 1, 0, 0, 24}
+        ipvlan "region_us", parent: {:dummy, "ek_us"}, subnet: {10, 2, 0, 0, 24}
       end
 
       pod "worker" do
@@ -246,16 +247,16 @@ defmodule StackTest do
       defmodule TestStack.BadAttach do
         use Erlkoenig.Stack
         host do
-          bridge "br0", subnet: {10, 0, 0, 0, 24}
+          ipvlan "net0", parent: {:dummy, "ek0"}, subnet: {10, 0, 0, 0, 24}
         end
-        attach "nonexistent", to: "br0", replicas: 1
+        attach "nonexistent", to: "net0", replicas: 1
       end
       """)
     end
   end
 
-  test "attach references unknown bridge raises" do
-    assert_raise CompileError, ~r/unknown bridge/, fn ->
+  test "attach references unknown network raises" do
+    assert_raise CompileError, ~r/unknown network/, fn ->
       Code.compile_string(~S"""
       defmodule TestStack.BadBridge do
         use Erlkoenig.Stack
@@ -263,7 +264,7 @@ defmodule StackTest do
           container "app", binary: "/opt/app"
         end
         host do
-          bridge "br0", subnet: {10, 0, 0, 0, 24}
+          ipvlan "net0", parent: {:dummy, "ek0"}, subnet: {10, 0, 0, 0, 24}
         end
         attach "web", to: "missing", replicas: 1
       end
@@ -365,7 +366,7 @@ defmodule StackTest do
       use Erlkoenig.Stack
 
       host do
-        bridge "br0", subnet: {10, 0, 0, 0, 24}
+        ipvlan "net0", parent: {:dummy, "ek0"}, subnet: {10, 0, 0, 0, 24}
       end
 
       pod "db", strategy: :one_for_all do
@@ -383,9 +384,9 @@ defmodule StackTest do
         container "export", binary: "/opt/export"
       end
 
-      attach "db", to: "br0", replicas: 1
-      attach "workers", to: "br0", replicas: 5
-      attach "pipeline", to: "br0", replicas: 1
+      attach "db", to: "net0", replicas: 1
+      attach "workers", to: "net0", replicas: 5
+      attach "pipeline", to: "net0", replicas: 1
     end
     """)
 

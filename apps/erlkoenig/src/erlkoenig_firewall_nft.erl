@@ -73,9 +73,8 @@ setup_table() ->
     %% Selective cleanup: flush own chains instead of deleting the entire table.
     %% Other subsystems (erlkoenig_config/DSL) may have chains/maps in this table.
     flush_own_chains(),
-    %% Enable IP forwarding + route_localnet on bridge
+    %% Enable IP forwarding
     _ = file:write_file(?IP_FORWARD_PATH, <<"1">>),
-    enable_route_localnet(?BRIDGE_NAME),
     nfnl_server:apply_msgs(?SERVER, [
         fun(S) -> nft_table:add(?FAMILY, ?TABLE, S) end,
 
@@ -102,15 +101,6 @@ setup_table() ->
             priority => 100,
             policy   => accept
         }, S) end,
-
-        %% Masquerade: only NAT traffic FROM the container subnet.
-        nft_encode:rule_fun(inet, ?TABLE, ?POSTROUTING_CHAIN,
-            subnet_masq_rule()),
-
-        %% Masquerade localhost-originated DNAT traffic so containers
-        %% can reply (src 127.x → bridge IP).
-        nft_encode:rule_fun(inet, ?TABLE, ?POSTROUTING_CHAIN,
-            loopback_masq_rule(?BRIDGE_NAME)),
 
         %% Prerouting chain: DNAT for port-forwarding (external traffic)
         fun(S) -> nft_chain:add(?FAMILY, #{
@@ -149,11 +139,9 @@ setup_table(Zones) when is_list(Zones) ->
     %% Selective cleanup: flush own chains instead of deleting the entire table.
     flush_own_chains(),
     _ = file:write_file(?IP_FORWARD_PATH, <<"1">>),
-    lists:foreach(fun(#{bridge := Br}) -> enable_route_localnet(Br) end, Zones),
-    MasqRules = lists:append([zone_masq_rules(Z) || Z <- Zones]),
-    LoopbackRules = [nft_encode:rule_fun(inet, ?TABLE, ?POSTROUTING_CHAIN,
-                         loopback_masq_rule(Br))
-                     || #{bridge := Br} <- Zones],
+    %% ADR-0020: IPVLAN-only, no bridge masquerade/route_localnet needed.
+    MasqRules = [],
+    LoopbackRules = [],
     nfnl_server:apply_msgs(?SERVER, [
         fun(S) -> nft_table:add(?FAMILY, ?TABLE, S) end,
 
@@ -197,24 +185,6 @@ setup_table(Zones) when is_list(Zones) ->
         }, S) end
     ]).
 
--doc "Generate masquerade rules for a zone.".
--spec zone_masq_rules(map()) -> [fun()].
-zone_masq_rules(#{policy := allow_outbound, subnet := {A,B,C,_},
-                  netmask := Mask, bridge := Bridge}) ->
-    SubnetBin = <<A, B, C, 0>>,
-    MaskBin = netmask_bin(Mask),
-    BridgePadded = pad_ifname(Bridge),
-    Rule = [nft_expr_ir:meta(nfproto, 1),
-            nft_expr_ir:cmp(eq, 1, <<2>>),
-            nft_expr_ir:ip_saddr(1),
-            nft_expr_ir:bitwise(1, 1, MaskBin, <<0,0,0,0>>),
-            nft_expr_ir:cmp(eq, 1, SubnetBin),
-            nft_expr_ir:meta(oifname, 1),
-            nft_expr_ir:cmp(neq, 1, BridgePadded),
-            nft_expr_ir:masq()],
-    [nft_encode:rule_fun(inet, ?TABLE, ?POSTROUTING_CHAIN, Rule)];
-zone_masq_rules(_) ->
-    [].
 
 -doc "Delete the entire erlkoenig_ct table.".
 -spec teardown_table() -> ok | {error, term()}.
@@ -301,21 +271,36 @@ add_container(ContainerId, Ip, HostVeth, Ports, FirewallTerm, Name) ->
 
     %% For containers with port-forwarding, allow inbound traffic
     %% via oifname so DNAT'd packets pass the forward chain.
-    FwdInboundMsgs = case Ports of
-        [] -> [];
-        _  -> [nft_encode:rule_fun(inet, ?TABLE, ?FORWARD_CHAIN,
-                   nft_rules:oifname_accept(HostVeth))]
+    %% Not applicable in IPVLAN mode (no host-side veth).
+    FwdInboundMsgs = case {Ports, HostVeth} of
+        {[], _} -> [];
+        {_, undefined} -> [];  %% IPVLAN: no host-side veth
+        {_, _} -> [nft_encode:rule_fun(inet, ?TABLE, ?FORWARD_CHAIN,
+                       nft_rules:oifname_accept(HostVeth))]
+    end,
+
+    %% Jump rule: dispatch container traffic to its chain.
+    %% Bridge mode: match on host-side veth interface name (iifname).
+    %% IPVLAN mode: match on source IP (slave isn't visible in host netns).
+    JumpMsgs = case HostVeth of
+        undefined ->
+            %% IPVLAN: IP-based dispatch (outbound=saddr, inbound=daddr)
+            [nft_encode:rule_fun(inet, ?TABLE, ?FORWARD_CHAIN,
+                nft_rules:ip_saddr_jump(IpBin, Chain)),
+             nft_encode:rule_fun(inet, ?TABLE, ?FORWARD_CHAIN,
+                nft_rules:ip_daddr_jump(IpBin, Chain))];
+        _ ->
+            %% Bridge: interface-based dispatch
+            [nft_encode:rule_fun(inet, ?TABLE, ?FORWARD_CHAIN,
+                nft_rules:iifname_jump(HostVeth, Chain))]
     end,
 
     Msgs = [
         %% 1. Create regular chain (no hook)
         fun(S) -> nft_chain:add_regular(?FAMILY,
             #{table => ?TABLE, name => Chain}, S) end
-    ] ++ SetMsgs ++ CounterMsgs ++ DropCounterMsg ++ RuleMsgs ++ [
-        %% Jump rule in forward chain (container -> host)
-        nft_encode:rule_fun(inet, ?TABLE, ?FORWARD_CHAIN,
-            nft_rules:iifname_jump(HostVeth, Chain))
-    ] ++ FwdInboundMsgs,
+    ] ++ SetMsgs ++ CounterMsgs ++ DropCounterMsg ++ RuleMsgs
+      ++ JumpMsgs ++ FwdInboundMsgs,
 
     %% DNAT rules in prerouting (external) + output (local) chains
     DnatMsgs = lists:append([
@@ -408,67 +393,21 @@ Reads subnet/netmask from app config. The subnet match ensures
 only container traffic gets NAT'd -- loopback, host traffic, and
 inter-zone traffic are never affected (see docs/ZONES.md).
 """.
--spec subnet_masq_rule() -> list().
-subnet_masq_rule() ->
-    {A, B, C, _} = application:get_env(erlkoenig, subnet, {10, 0, 0, 0}),
-    Netmask = application:get_env(erlkoenig, netmask, 24),
-    SubnetBin = <<A, B, C, 0>>,
-    MaskBin = netmask_bin(Netmask),
-    BridgePadded = pad_ifname(?BRIDGE_NAME),
-    %% nfproto == ipv4 AND ip saddr & mask == subnet AND oifname != bridge → masquerade
-    [nft_expr_ir:meta(nfproto, 1),
-     nft_expr_ir:cmp(eq, 1, <<2>>),   %% NFPROTO_IPV4 = 2
-     nft_expr_ir:ip_saddr(1),
-     nft_expr_ir:bitwise(1, 1, MaskBin, <<0,0,0,0>>),
-     nft_expr_ir:cmp(eq, 1, SubnetBin),
-     nft_expr_ir:meta(oifname, 1),
-     nft_expr_ir:cmp(neq, 1, BridgePadded),
-     nft_expr_ir:masq()].
 
 -spec pad_ifname(binary()) -> binary().
 pad_ifname(Name) when byte_size(Name) =< 16 ->
     Pad = 16 - byte_size(Name),
     <<Name/binary, 0:(Pad * 8)>>.
 
--spec netmask_bin(0..32) -> binary().
-netmask_bin(Bits) ->
-    Mask = (16#FFFFFFFF bsl (32 - Bits)) band 16#FFFFFFFF,
-    <<Mask:32/big>>.
-
--doc """
-Masquerade traffic from 127.0.0.0/8 going to a bridge interface.
-This allows localhost DNAT (host -> container via 127.0.0.1:port) to work.
-""".
--spec loopback_masq_rule(binary()) -> list().
-loopback_masq_rule(BridgeName) ->
-    BridgePadded = pad_ifname(BridgeName),
-    [nft_expr_ir:meta(nfproto, 1),
-     nft_expr_ir:cmp(eq, 1, <<2>>),
-     nft_expr_ir:ip_saddr(1),
-     nft_expr_ir:bitwise(1, 1, <<255, 0, 0, 0>>, <<0, 0, 0, 0>>),
-     nft_expr_ir:cmp(eq, 1, <<127, 0, 0, 0>>),
-     nft_expr_ir:meta(oifname, 1),
-     nft_expr_ir:cmp(eq, 1, BridgePadded),
-     nft_expr_ir:masq()].
-
--doc "Enable route_localnet for an interface so localhost DNAT works.".
--spec enable_route_localnet(binary()) -> ok.
-enable_route_localnet(IfName) ->
-    Path = lists:flatten(io_lib:format(?ROUTE_LOCALNET_FMT,
-                                       [binary_to_list(IfName)])),
-    _ = file:write_file(Path, <<"1">>),
-    ok.
-
+%% Named chain: use container name for readable nft output.
+%% "web-0-nginx" → "web-0-nginx" (nft chain name)
 -spec chain_name(binary()) -> binary().
 chain_name(ContainerId) ->
     Short = binary:part(ContainerId, 0, min(12, byte_size(ContainerId))),
     <<"ct_", Short/binary>>.
 
-%% Named chain: use container name for readable nft output.
-%% "web-0-nginx" → "web-0-nginx" (nft chain name)
 -spec chain_name(binary(), binary() | undefined) -> binary().
 chain_name(_ContainerId, Name) when is_binary(Name), Name =/= <<>> ->
-    %% nft chain names: max 256 chars, no spaces
     Name;
 chain_name(ContainerId, _) ->
     chain_name(ContainerId).
@@ -881,13 +820,20 @@ compile_generic_rule(Verdict, Opts) ->
         {true, _} -> Exprs1;
         {_, true} -> Exprs2;
         _ ->
-            %% Delegate to specific handlers for complex rules
-            case compile_generic_special(Verdict, Opts) of
-                {ok, Result} -> Result;
-                false ->
-                    %% Build match expressions
-                    Matches = compile_generic_matches(Opts),
+            %% Build match expressions (always, regardless of special handlers)
+            Matches = compile_generic_matches(Opts),
 
+            %% Delegate to specific handlers for complex verdict types
+            case compile_generic_special(Verdict, Opts) of
+                {ok, SpecialResult} ->
+                    %% Special handler builds the verdict part.
+                    %% Prepend generic matches so IP/interface filters
+                    %% are not silently dropped.
+                    case Matches of
+                        [] -> SpecialResult;
+                        _  -> Matches ++ SpecialResult
+                    end;
+                false ->
                     %% Modifiers (counter, limit, log)
                     Mods = compile_generic_modifiers(Opts),
 

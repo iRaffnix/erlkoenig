@@ -49,6 +49,7 @@ Reference: man 7 netlink, man 7 rtnetlink
 %% Message builders
 -export([msg_create_bridge/2,
          msg_create_veth/3,
+         msg_create_ipvlan/5,
          msg_set_netns_by_pid/3,
          msg_set_master/3,
          msg_set_up/2,
@@ -99,6 +100,7 @@ Reference: man 7 netlink, man 7 rtnetlink
 
 %% IFLA attribute types (from linux/if_link.h)
 -define(IFLA_IFNAME,       3).
+-define(IFLA_LINK,         5).
 -define(IFLA_MASTER,      10).
 -define(IFLA_LINKINFO,    18).
 -define(IFLA_NET_NS_PID,  19).
@@ -109,6 +111,12 @@ Reference: man 7 netlink, man 7 rtnetlink
 
 %% veth-specific (from linux/veth.h)
 -define(VETH_INFO_PEER,    1).
+
+%% ipvlan-specific (from linux/if_link.h, IFLA_IPVLAN_* offsets inside INFO_DATA)
+-define(IFLA_IPVLAN_MODE,  1).
+-define(IPVLAN_MODE_L2,    0).
+-define(IPVLAN_MODE_L3,    1).
+-define(IPVLAN_MODE_L3S,   2).
 
 %% IFA attribute types (from linux/if_addr.h)
 -define(IFA_ADDRESS,       1).
@@ -224,6 +232,47 @@ msg_create_veth(Seq, HostName, PeerName) ->
     ],
     build_link_msg(?RTM_NEWLINK, create_flags(), Seq, _Ifindex = 0,
                    _IfFlags = 0, _IfChange = 0, Attrs).
+
+-doc """
+Create an IPVLAN slave attached to a parent device.
+
+  RTM_NEWLINK + IFLA_IFNAME + IFLA_LINK(parent)
+              + IFLA_LINKINFO{KIND="ipvlan", DATA{IPVLAN_MODE}}
+              + optional IFLA_NET_NS_PID
+
+SlaveName:      name for the new interface (e.g. <<"ipv.echo">>)
+ParentIfindex:  ifindex of the parent device (e.g. eth0)
+Mode:           l2 | l3 | l3s (L3S = per-slave conntrack/netfilter)
+NetnsPid:       OS PID whose netns to create the slave in,
+                or `undefined` to create in the current netns.
+
+When NetnsPid is set, the kernel creates the slave directly in
+the target network namespace — no separate move needed.
+""".
+-spec msg_create_ipvlan(integer(), binary(), integer(),
+                        l2 | l3 | l3s, non_neg_integer() | undefined) -> binary().
+msg_create_ipvlan(Seq, SlaveName, ParentIfindex, Mode, NetnsPid) ->
+    ModeInt = case Mode of
+        l2  -> ?IPVLAN_MODE_L2;
+        l3  -> ?IPVLAN_MODE_L3;
+        l3s -> ?IPVLAN_MODE_L3S
+    end,
+    Attrs = [
+        nla(?IFLA_IFNAME, nul_terminate(SlaveName)),
+        nla(?IFLA_LINK,   <<ParentIfindex:32/native>>),
+        nla(?IFLA_LINKINFO, [
+            nla(?IFLA_INFO_KIND, <<"ipvlan">>),
+            nla(?IFLA_INFO_DATA, [
+                nla(?IFLA_IPVLAN_MODE, <<ModeInt:16/native>>)
+            ])
+        ])
+    ] ++ netns_attr(NetnsPid),
+    build_link_msg(?RTM_NEWLINK, create_flags(), Seq, _Ifindex = 0,
+                   _IfFlags = 0, _IfChange = 0, Attrs).
+
+netns_attr(undefined) -> [];
+netns_attr(Pid) when is_integer(Pid) ->
+    [nla(?IFLA_NET_NS_PID, <<Pid:32/native>>)].
 
 -doc """
 Move an interface into another network namespace.

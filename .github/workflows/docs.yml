@@ -5,7 +5,7 @@ on:
     branches: [main]
     paths:
       - 'dsl/lib/**'
-      - 'dsl/guides/**'
+      - 'doc/book/**'
       - 'dsl/mix.exs'
       - '.github/workflows/docs.yml'
   workflow_dispatch:
@@ -41,7 +41,7 @@ jobs:
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: dsl/doc
+          path: doc/html
 
   deploy:
     needs: build

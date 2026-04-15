@@ -52,7 +52,13 @@ start_pod(PodName, Strategy, Children) ->
     supervisor:start_child(erlkoenig_pod_sup_sup,
                            [PodName, Strategy, Children]).
 
-init({_PodName, Strategy, Children}) ->
+init({PodName, Strategy, Children}) ->
+    %% Tag ourselves so that external tools (ek pod list) can recover the
+    %% pod name from process_info. Supervisor children in the
+    %% simple_one_for_one pod_sup_sup all share a single ChildSpec whose
+    %% :id field is `undefined`, so the label is the only place the name
+    %% survives.
+    proc_lib:set_label({erlkoenig_pod, PodName}),
     ChildRestart = case Strategy of
         one_for_one -> temporary;
         _           -> transient
@@ -60,7 +66,11 @@ init({_PodName, Strategy, Children}) ->
     SupFlags = #{
         strategy => Strategy,
         intensity => 5,
-        period => 60
+        period => 60,
+        %% Self-terminate when every container below us has exited.
+        %% Without this the pod supervisor would linger with no
+        %% children after a stop, showing up as a zombie in ek pod list.
+        auto_shutdown => all_significant
     },
     ChildSpecs = lists:map(fun({Idx, {BinaryPath, Opts}}) ->
         %% Mark containers in supervised pods so erlkoenig_ct knows
@@ -72,7 +82,8 @@ init({_PodName, Strategy, Children}) ->
             start => {erlkoenig_ct, start_link, [BinaryPath, Opts2]},
             restart => ChildRestart,
             shutdown => 10_000,
-            type => worker
+            type => worker,
+            significant => true
         }
     end, lists:enumerate(Children)),
     {ok, {SupFlags, ChildSpecs}}.

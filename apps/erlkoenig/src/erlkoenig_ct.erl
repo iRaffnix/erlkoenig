@@ -46,6 +46,7 @@ States:
          stop_container/1,
          kill/2,
          get_info/1,
+         list/0,
          attach/2,
          send_input/2,
          resize/3]).
@@ -117,7 +118,8 @@ States:
     stats_timers  = []         :: [reference()],
     last_cpu_usec = undefined  :: non_neg_integer() | undefined,
     stream        = undefined  :: map() | undefined,
-    log_publisher = undefined  :: {pid(), atomics:atomics_ref()} | undefined
+    log_publisher = undefined  :: {pid(), atomics:atomics_ref()} | undefined,
+    admission_token = undefined :: reference() | undefined
 }).
 
 -define(SPAWN_TIMEOUT, application:get_env(erlkoenig, spawn_timeout, 30_000)).
@@ -154,6 +156,20 @@ kill(Pid, Signal) ->
 -spec get_info(pid()) -> map().
 get_info(Pid) ->
     gen_statem:call(Pid, get_info).
+
+%% Return info maps for every container currently in the erlkoenig_cts
+%% process group. Mirrors erlkoenig:list/0 but is exported directly so
+%% operator tooling doesn't have to know about the pg layer.
+-spec list() -> [map()].
+list() ->
+    Pids = try pg:get_members(erlkoenig_pg, erlkoenig_cts)
+           catch _:_ -> []
+           end,
+    lists:filtermap(fun(Pid) ->
+        try {true, get_info(Pid)}
+        catch _:_ -> false
+        end
+    end, Pids).
 
 -spec attach(pid(), pid()) -> ok | {error, term()}.
 attach(Pid, OutputPid) ->
@@ -271,7 +287,36 @@ creating(state_timeout, spawn_timeout, Data) ->
 creating({call, _From}, _, _Data) ->
     {keep_state_and_data, [postpone]}.
 
-creating_do_spawn(#ct_data{id = ContainerId} = Data) ->
+creating_do_spawn(#ct_data{id = ContainerId,
+                            binary_path = BinaryPath,
+                            zone = Zone} = Data) ->
+    %% Pre-spawn gates — both must pass before any expensive work
+    %% (socket creation, namespace setup, nft installation).
+    case admission_then_quarantine(Zone, BinaryPath) of
+        {ok, AdmissionToken} ->
+            creating_do_spawn_gated(Data#ct_data{admission_token = AdmissionToken});
+        {error, admission_timeout} ->
+            logger:warning("container ~s: admission gate timed out", [ContainerId]),
+            {next_state, failed,
+             Data#ct_data{error_reason = admission_timeout}};
+        {error, admission_queue_full} ->
+            logger:warning("container ~s: admission queue full", [ContainerId]),
+            {next_state, failed,
+             Data#ct_data{error_reason = admission_queue_full}};
+        {error, {quarantined, Hash, Since}} ->
+            logger:warning("container ~s: binary quarantined (~s since ~p)",
+                           [ContainerId, format_hash_prefix(Hash), Since]),
+            erlkoenig_error:emit(
+              ?EK_ERROR(runtime, binary_quarantined,
+                        "spawn refused by quarantine",
+                        #{hash_prefix => format_hash_prefix(Hash),
+                          since_ms => Since}),
+              ContainerId),
+            {next_state, failed,
+             Data#ct_data{error_reason = {quarantined, Hash}}}
+    end.
+
+creating_do_spawn_gated(#ct_data{id = ContainerId} = Data) ->
     SocketPath = make_socket_path(ContainerId),
     ok = filelib:ensure_dir(binary_to_list(SocketPath)),
     %% Pre-create the container cgroup so the C runtime starts in it
@@ -467,11 +512,17 @@ running(enter, _OldState, Data) ->
     dns_register(Data),
     dets_register(Data),
     audit_volumes_mounted(Data),
+    %% The spawn is complete — release the admission token so another
+    %% waiter can proceed. The container is now using its long-lived
+    %% resources (cgroup, netns, firewall) which don't count against
+    %% the bounded-concurrency spawn gate.
+    release_admission_token(Data),
     Timers = start_stats_timers(Data#ct_data.publish),
     LogPub = maybe_start_log_publisher(Data),
     {keep_state, Data#ct_data{started_at = erlang:monotonic_time(millisecond),
                               stats_timers = Timers,
-                              log_publisher = LogPub}};
+                              log_publisher = LogPub,
+                              admission_token = undefined}};
 
 running(info, {tcp, Sock, Reply}, #ct_data{sock = Sock} = Data) ->
     running_handle_data(Reply, Data);
@@ -630,6 +681,10 @@ stopped(enter, _OldState, Data) ->
     dets_unregister(Data),
     audit_volumes_released(Data),
     cleanup_ephemeral_volumes(Data),
+    %% Release the admission token if we're stopping before `running`
+    %% fired (early failure path). No-op if the token was already
+    %% returned.
+    release_admission_token(Data),
     notify_stopped(Data),
     Data2 = Data#ct_data{sock = undefined, fuse_mount = undefined,
                          stats_timers = [], log_publisher = undefined},
@@ -649,7 +704,27 @@ stopped(enter, _OldState, Data) ->
     end;
 
 stopped(info, check_restart, Data) ->
-    handle_check_restart(Data);
+    case handle_check_restart(Data) of
+        {keep_state, Data2} ->
+            %% Terminal state for a standalone container that will not
+            %% restart (user stop or exhausted retries). Shut down the
+            %% gen_statem so the process doesn't linger as a zombie in
+            %% supervisor:which_children/1.
+            {stop, normal, Data2};
+        Other ->
+            Other
+    end;
+%% Stats poll / TCP events may already be in the mailbox when we enter
+%% this state — cancel_timer/1 removes the scheduled send but cannot
+%% pull back messages that already made it through. Ignore them.
+stopped(info, {poll_stats, _, _}, _Data) ->
+    keep_state_and_data;
+stopped(info, {tcp_closed, _}, _Data) ->
+    keep_state_and_data;
+stopped(info, {tcp_error, _, _}, _Data) ->
+    keep_state_and_data;
+stopped(info, {tcp, _, _}, _Data) ->
+    keep_state_and_data;
 
 stopped({call, From}, get_info, Data) ->
     {keep_state_and_data, [{reply, From, build_info(stopped, Data)}]};
@@ -701,7 +776,20 @@ restarting({call, From}, get_info, Data) ->
     {keep_state_and_data, [{reply, From, build_info(restarting, Data)}]};
 
 restarting({call, From}, _, _Data) ->
-    {keep_state_and_data, [{reply, From, {error, restarting}}]}.
+    {keep_state_and_data, [{reply, From, {error, restarting}}]};
+
+%% Stale messages from previous instance may still be in mailbox during
+%% the restart backoff — discard.
+restarting(info, {poll_stats, _, _}, _Data) ->
+    keep_state_and_data;
+restarting(info, {tcp_closed, _}, _Data) ->
+    keep_state_and_data;
+restarting(info, {tcp_error, _, _}, _Data) ->
+    keep_state_and_data;
+restarting(info, {tcp, _, _}, _Data) ->
+    keep_state_and_data;
+restarting(info, check_restart, _Data) ->
+    keep_state_and_data.
 
 %% =================================================================
 %% failed - Error state, process stays alive for inspection
@@ -718,6 +806,16 @@ failed(enter, _OldState, Data) ->
     dns_unregister(Data),
     dets_unregister(Data),
     cleanup_ephemeral_volumes(Data),
+    release_admission_token(Data),
+    %% Record the crash against the binary's hash so the quarantine
+    %% circuit breaker can spot crashloops. Quarantine failures caused
+    %% by quarantine itself (error_reason = {quarantined, _}) don't
+    %% feed back into the counter — otherwise a quarantined binary
+    %% would keep driving its own quarantine deeper.
+    case Data#ct_data.error_reason of
+        {quarantined, _} -> ok;
+        _ -> _ = safe_record_crash(Data#ct_data.binary_path)
+    end,
     erlkoenig_events:notify({container_failed, Data#ct_data.id,
                              Data#ct_data.name,
                              Data#ct_data.error_reason}),
@@ -1848,7 +1946,12 @@ cleanup_ephemeral_volumes(#ct_data{name = Name, id = Id}) ->
         undefined -> Id;
         N -> N
     end,
-    case erlkoenig_volume_store:cleanup_ephemeral(ContainerName) of
+    %% This runs during the `stopped`/`failed` state-entry callback,
+    %% which also fires in unit-test contexts where the volume store
+    %% hasn't been started. Treat a missing store as "nothing to do"
+    %% instead of propagating a noproc exit that would take the
+    %% gen_statem (and any linked test fixtures) down with it.
+    try erlkoenig_volume_store:cleanup_ephemeral(ContainerName) of
         {ok, []} -> ok;
         {ok, Destroyed} ->
             logger:info("container ~s: cleaned up ~p ephemeral volume(s): ~p",
@@ -1858,7 +1961,87 @@ cleanup_ephemeral_volumes(#ct_data{name = Name, id = Id}) ->
             logger:warning("container ~s: ephemeral cleanup failed: ~p",
                            [Id, Reason]),
             ok
+    catch
+        exit:{noproc, _} ->
+            %% volume_store not up (bare test VM) — no volumes to clean.
+            ok;
+        exit:{timeout, _} ->
+            logger:warning("container ~s: volume_store timeout on cleanup",
+                           [Id]),
+            ok
     end.
+
+%% -- Pre-spawn gates ---------------------------------------------
+
+-spec admission_then_quarantine(atom() | binary(), binary()) ->
+    {ok, reference()}
+  | {error, admission_timeout | admission_queue_full}
+  | {error, {quarantined, binary(), integer()}}.
+admission_then_quarantine(Zone, BinaryPath) ->
+    %% Quarantine check first — it's cheap, a hashmap lookup plus a
+    %% hash-file call, and rejecting a quarantined binary early means
+    %% we don't hold an admission token we'll just release anyway.
+    case safe_quarantine_check(BinaryPath) of
+        ok ->
+            Scope = admission_scope(Zone),
+            case safe_admission_acquire(Scope) of
+                {ok, Token}  -> {ok, Token};
+                {error, _} = E -> E
+            end;
+        {error, _} = E -> E
+    end.
+
+safe_quarantine_check(BinaryPath) ->
+    try erlkoenig_quarantine:check(BinaryPath)
+    catch
+        %% Quarantine gen_server not running (isolated eunit contexts
+        %% that don't need it). Fail-open: if the gate itself is
+        %% missing, don't block spawns. The operational deployment
+        %% always has it; this branch is just for tests.
+        exit:{noproc, _} -> ok;
+        exit:{timeout, _} -> ok
+    end.
+
+safe_admission_acquire(Scope) ->
+    try erlkoenig_admission:acquire(Scope, admission_acquire_timeout_ms()) of
+        {ok, Token} -> {ok, Token};
+        {error, timeout}    -> {error, admission_timeout};
+        {error, queue_full} -> {error, admission_queue_full}
+    catch
+        %% Same rationale as quarantine: the admission gate is
+        %% supposed to be there, but tests don't always start it.
+        exit:{noproc, _}  -> {ok, undefined};
+        exit:{timeout, _} -> {error, admission_timeout}
+    end.
+
+admission_acquire_timeout_ms() ->
+    application:get_env(erlkoenig, admission_acquire_timeout_ms, 30_000).
+
+admission_scope(undefined) -> host;
+admission_scope(default)   -> host;
+admission_scope(Zone) when is_atom(Zone) -> atom_to_binary(Zone, utf8);
+admission_scope(Zone) when is_binary(Zone) -> Zone;
+admission_scope(_) -> host.
+
+-spec release_admission_token(#ct_data{}) -> ok.
+release_admission_token(#ct_data{admission_token = undefined}) -> ok;
+release_admission_token(#ct_data{admission_token = Token}) ->
+    try erlkoenig_admission:release(Token)
+    catch _:_ -> ok
+    end.
+
+-spec safe_record_crash(binary() | undefined) -> ok.
+safe_record_crash(undefined) -> ok;
+safe_record_crash(BinaryPath) ->
+    try erlkoenig_quarantine:record_crash(BinaryPath)
+    catch _:_ -> ok
+    end.
+
+-spec format_hash_prefix(binary()) -> binary().
+format_hash_prefix(Hash) when is_binary(Hash), byte_size(Hash) >= 8 ->
+    <<Prefix:8/binary, _/binary>> = Hash,
+    Prefix;
+format_hash_prefix(Hash) -> Hash.
 
 -spec build_info(atom(), #ct_data{}) -> erlkoenig:container_info().
 build_info(State, Data) ->

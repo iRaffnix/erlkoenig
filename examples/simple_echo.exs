@@ -5,17 +5,19 @@ defmodule SimpleEcho do
   # Minimal Example — ein einzelner Container
   # ══════════════════════════════════════════════════════════
   #
-  # Zeigt: Bridge, Pod, Container, Metrics, Log Streaming.
-  # Keine Firewall, keine PKI, keine Multi-Tier-Topologie.
+  # Zeigt: IPVLAN-Zone, Pod, Container, Host-Firewall,
+  # Cgroup-Metriken (publish), Log-Streaming (stream).
+  # Keine PKI, keine Multi-Tier-Topologie, keine Volumes.
   #
-  # Starten:
-  #   mix run -e '
-  #     [{mod, _}] = Code.compile_file("examples/simple_echo.exs")
-  #     mod.write!("/tmp/simple_echo.term")
-  #   '
-  #   erlkoenig eval 'erlkoenig_config:load(<<"/tmp/simple_echo.term">>).'
+  # Starten (alles auf der Box):
+  #   ek dsl compile examples/simple_echo.exs
+  #   ek config load examples/simple_echo.term
   #
   # Beobachten:
+  #   ek ct list
+  #   ek ct inspect echo-0-echo
+  #
+  # AMQP-Streams (von einem Konsumer-Host):
   #   python3 tools/event_consumer.py <rabbitmq-host> "#"
   #   python3 tools/stream_consumer.py erlkoenig.log.echo-0-echo
 
@@ -27,18 +29,18 @@ defmodule SimpleEcho do
   host do
     ipvlan "echo", parent: {:dummy, "ek_echo"}, subnet: {10, 0, 0, 0, 24}
 
-    # ── Host-Firewall (Referenz) ─────────────────────────────
+    # ── Host-Firewall ────────────────────────────────────────
     #
-    # Schützt den Host selbst — nicht die Container (die haben
-    # eigene Forward-Regeln im "erlkoenig" Table).
+    # Schützt den Host selbst (Pakete zum Host-Netz-Stack).
+    # Container haben ihre eigenen output/input Chains in ihrer
+    # eigenen netns — die werden im container-Block deklariert.
+    # Hier sehen wir nur den Host.
     #
     # hook: :input — Pakete die AN den Host adressiert sind
-    #                (nicht forwarded, nicht an Container)
     # policy: :drop — alles was keine Regel matcht → verworfen
     # priority: :filter — Standard-Priorität (0)
     #
-    # Reihenfolge ist entscheidend: nft evaluiert top-to-bottom,
-    # erste matchende Regel gewinnt.
+    # nft evaluiert top-to-bottom; die erste matchende Regel gewinnt.
 
     nft_table :inet, "host" do
 

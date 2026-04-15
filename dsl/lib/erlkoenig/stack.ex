@@ -447,6 +447,12 @@ defmodule Erlkoenig.Stack do
       `false` (persistent): data survives container destroy and must
       be removed explicitly. Use `true` for scratch space, per-run
       caches, and test containers.
+    * `:quota` — hard byte limit, enforced via XFS project quota.
+      Accepts a binary with a size suffix (`"1G"`, `"500M"`, `"2T"`),
+      a plain integer (bytes), or `0`/omitted for no quota. Requires
+      the volumes FS to be mounted with `prjquota`; if `xfs_quota`
+      is missing or the mount doesn't support it the limit is stored
+      in metadata but not enforced (logged as a warning).
 
   ## Examples
 
@@ -459,9 +465,10 @@ defmodule Erlkoenig.Stack do
         # Read-only config
         volume "/etc/app", persist: "app-config", read_only: true
 
-        # Hardened persistent volume
+        # Hardened persistent volume with a hard disk budget
         volume "/uploads", persist: "app-uploads",
-                           opts: "rw,nosuid,nodev,noexec,relatime"
+                           opts: "rw,nosuid,nodev,noexec,relatime",
+                           quota: "5G"
 
         # Ephemeral scratch — gone when the container dies
         volume "/scratch", persist: "scratch",
@@ -474,6 +481,7 @@ defmodule Erlkoenig.Stack do
       read_only    = Keyword.get(unquote(opts), :read_only, false)
       mount_opts   = Keyword.get(unquote(opts), :opts)
       ephemeral    = Keyword.get(unquote(opts), :ephemeral, false)
+      quota        = Keyword.get(unquote(opts), :quota)
 
       unless is_boolean(ephemeral) do
         raise ArgumentError,
@@ -492,6 +500,16 @@ defmodule Erlkoenig.Stack do
           other ->
             raise ArgumentError,
               "volume opts: expected a binary string, got #{inspect(other)}"
+        end
+
+      entry =
+        case quota do
+          nil -> entry
+          q when is_binary(q) -> Map.put(entry, :quota, q)
+          q when is_integer(q) and q >= 0 -> Map.put(entry, :quota, q)
+          other ->
+            raise ArgumentError,
+              "volume quota: expected a size string (\"1G\") or non-negative integer, got #{inspect(other)}"
         end
 
       var!(ek_pod_builder) = Erlkoenig.Pod.Builder.add_volume(

@@ -27,7 +27,8 @@ Usage:
   {ok, Pids} = erlkoenig_config:reload("/etc/erlkoenig/cluster.term").
 """.
 
--export([load/1, validate/1, reload/1, parse/1, flatten_containers/1]).
+-export([load/1, validate/1, reload/1, parse/1, flatten_containers/1,
+         declared_names/1]).
 
 -include("erlkoenig_error.hrl").
 
@@ -78,7 +79,6 @@ load(TermFile) ->
     maybe
         {ok, Config} ?= parse(TermFile),
         ok ?= validate_config(Config),
-        _ = ensure_config_tab(),
         OldConfig = get_stored_config(TermFile),
         Result = apply_config_with_reconciliation(OldConfig, Config),
         store_config(TermFile, Config),
@@ -99,6 +99,21 @@ load(TermFile) ->
 -spec reload(file:filename()) -> {ok, [{binary(), pid()}]} | {error, term()}.
 reload(TermFile) ->
     load(TermFile).
+
+-doc """
+Return the list of container names declared in a term file, without
+applying it. Used by `ek down <file>` to know what to stop.
+""".
+-spec declared_names(file:filename()) -> {ok, [binary()]} | {error, term()}.
+declared_names(TermFile) ->
+    case parse(TermFile) of
+        {ok, Config} ->
+            Names = [iolist_to_binary(maps:get(name, C))
+                     || C <- flatten_containers(Config)],
+            {ok, Names};
+        {error, _} = E ->
+            E
+    end.
 
 %%====================================================================
 %% Internal -- Validation
@@ -168,17 +183,42 @@ apply_config_with_reconciliation(OldConfig, Config) ->
     Images = maps:get(images, Config, #{}),
     Report1 = validate_images(Images, Report),
 
-    %% 2. Stop removed containers FIRST (before zone cleanup)
+    %% 2. Stop removed containers FIRST (before zone cleanup).
+    %% Three buckets drive reconciliation:
+    %%   ToStop   — running, no longer declared
+    %%   ToDrift  — still declared but config changed since last apply;
+    %%              stop now, the `ToStart' pass will re-spawn with the
+    %%              new spec
+    %%   ToStart  — declared, not currently running (computed later,
+    %%              after the drift stops have settled)
+    %%
+    %% RunningNames comes from the live process group: the authoritative
+    %% source of truth. OldConfig (persistent_term) is only consulted
+    %% for per-container field comparison in detect_drifted/2.
     AllContainers = flatten_containers(Config),
     DeclaredNames = [iolist_to_binary(maps:get(name, C)) || C <- AllContainers],
-    RunningNames = container_names_from_old(OldConfig),
+    RunningNames = running_container_names(),
     ToStop = RunningNames -- DeclaredNames,
     lists:foreach(fun(Name) ->
         logger:info("erlkoenig_config: stopping removed container ~s", [Name]),
         stop_by_name(Name)
     end, ToStop),
+
+    Drifted = detect_drifted(OldConfig, Config),
+    StillRunningDrift = [N || N <- Drifted, lists:member(N, RunningNames)],
+    lists:foreach(fun(Name) ->
+        logger:info("erlkoenig_config: restarting drifted container ~s", [Name]),
+        stop_by_name(Name)
+    end, StillRunningDrift),
+
     %% Give containers time to exit and release veths/IPs
-    case ToStop of [] -> ok; _ -> timer:sleep(1000) end,
+    case ToStop ++ StillRunningDrift of
+        []  -> ok;
+        _   -> timer:sleep(1000)
+    end,
+    %% Drifted containers now need to re-appear as "missing" from live
+    %% state so the spawn loop below picks them up.
+    RunningAfterStops = RunningNames -- (ToStop ++ StillRunningDrift),
 
     %% 3. Reconcile zones: destroy stale zones (bridges), then create new
     Zones = maps:get(zones, Config, []),
@@ -234,7 +274,7 @@ apply_config_with_reconciliation(OldConfig, Config) ->
     end,
 
     %% 5. Apply guard + watches
-    maybe_configure_guard(Config),
+    maybe_configure_guard(resolve_guard_key(Config)),
     Watches = maps:get(watches, Config, maps:get(watch, Config, [])),
     WatchList = if is_list(Watches) -> Watches;
                    is_map(Watches) -> [Watches];
@@ -244,7 +284,7 @@ apply_config_with_reconciliation(OldConfig, Config) ->
 
     %% Start new containers (not already running)
     %% Group by pod instance for pod-supervised startup
-    ToStart = DeclaredNames -- RunningNames,
+    ToStart = DeclaredNames -- RunningAfterStops,
     Pods = maps:get(pods, Config, []),
     HasNftTables = maps:is_key(nft_tables, Config),
     %% When nft_tables present, containers don't get auto-generated firewall chains
@@ -292,9 +332,66 @@ apply_config_with_reconciliation(OldConfig, Config) ->
 
     {ok, Results}.
 
--spec container_names_from_old(map() | undefined) -> [binary()].
-container_names_from_old(undefined) -> [];
-container_names_from_old(Config) -> container_names(Config).
+%% Return the names of containers whose spec in `New' differs from
+%% their spec in `Old' on fields that require a restart to take effect.
+%% Containers that are new (not in Old) or removed (not in New) are
+%% excluded — those are handled by the ToStart/ToStop split.
+%%
+%% Fields considered meaningful for drift detection:
+%%   binary, args, zone, limits, seccomp, uid, gid, caps,
+%%   volumes, image, publish, stream, nft
+%% Other fields (e.g. replicas) change the flattened container set
+%% itself, so they show up as add/remove rather than drift.
+-spec detect_drifted(map() | undefined, map()) -> [binary()].
+detect_drifted(undefined, _New) ->
+    [];
+detect_drifted(OldConfig, NewConfig) ->
+    OldByName = containers_by_name(OldConfig),
+    NewByName = containers_by_name(NewConfig),
+    maps:fold(fun(Name, NewCt, Acc) ->
+        case maps:find(Name, OldByName) of
+            {ok, OldCt} ->
+                case container_differs(OldCt, NewCt) of
+                    true  -> [Name | Acc];
+                    false -> Acc
+                end;
+            error ->
+                Acc
+        end
+    end, [], NewByName).
+
+-spec containers_by_name(map()) -> #{binary() => map()}.
+containers_by_name(Config) ->
+    lists:foldl(fun(C, Acc) ->
+        Name = iolist_to_binary(maps:get(name, C)),
+        Acc#{Name => C}
+    end, #{}, flatten_containers(Config)).
+
+-spec container_differs(map(), map()) -> boolean().
+container_differs(Old, New) ->
+    Keys = [binary, args, zone, limits, seccomp, uid, gid, caps,
+            volumes, image, publish, stream, nft, restart],
+    lists:any(fun(K) ->
+        maps:get(K, Old, undefined) =/= maps:get(K, New, undefined)
+    end, Keys).
+
+%% Names of currently-running containers, derived from the `erlkoenig_cts'
+%% process group. This is the authoritative runtime state, independent
+%% of any persisted config. Used by reconciliation to decide which
+%% containers are new (ToStart) and which are removed (ToStop).
+-spec running_container_names() -> [binary()].
+running_container_names() ->
+    Pids = try pg:get_members(erlkoenig_pg, erlkoenig_cts)
+           catch _:_ -> []
+           end,
+    lists:filtermap(fun(Pid) ->
+        try erlkoenig_ct:get_info(Pid) of
+            #{name := Name} when is_binary(Name) -> {true, Name};
+            #{name := Name} -> {true, iolist_to_binary(Name)};
+            _ -> false
+        catch _:_ -> false
+        end
+    end, Pids).
 
 %% Flatten containers from pods.
 %%
@@ -706,12 +803,16 @@ apply_nft_table(#{name := TableName, chains := Chains} = Table, VethMap, Replica
                         || M <- maps:get(maps, Table, [])],
     ExplicitVmapNames = [iolist_to_binary(maps:get(name, V))
                          || V <- maps:get(vmaps, Table, [])],
+    ExplicitSetNames = [iolist_to_binary(set_name(S))
+                        || S <- maps:get(sets, Table, [])],
     NewMapNames = ExplicitMapNames ++ ExplicitVmapNames,
+    NewSetNames = ExplicitSetNames,
     OldMapNames = persistent_term:get({erlkoenig_dsl_maps, TableBin}, []),
+    OldSetNames = persistent_term:get({erlkoenig_dsl_sets, TableBin}, []),
 
     %% 4. Selectively delete old DSL objects.
-    %% Order: flush chain rules → delete chains → delete maps.
-    %% Maps cannot be deleted while rules reference them.
+    %% Order: flush chain rules → delete chains → delete maps/sets.
+    %% Sets/maps cannot be deleted while rules reference them.
     %% Each operation is a separate batch because non-existent objects
     %% cause the whole batch to fail with enoent (first load: nothing exists).
     lists:foreach(fun(CN) ->
@@ -728,14 +829,30 @@ apply_nft_table(#{name := TableName, chains := Chains} = Table, VethMap, Replica
             fun(S) -> nft_delete:set(FamilyNum, TableBin, MN, S) end
         ])
     end, AllMapNames),
+    %% Only delete sets that are going away; active DSL sets are preserved
+    %% so their elements (added by threat_actor, etc.) survive a reload.
+    StaleSetNames = OldSetNames -- NewSetNames,
+    lists:foreach(fun(SN) ->
+        _ = nfnl_server:apply_msgs(erlkoenig_nft_srv, [
+            fun(S) -> nft_delete:set(FamilyNum, TableBin, SN, S) end
+        ])
+    end, StaleSetNames),
 
-    %% 5. Remember current map names for next reload
+    %% 5. Remember current map/set names for next reload
     persistent_term:put({erlkoenig_dsl_maps, TableBin}, NewMapNames),
+    persistent_term:put({erlkoenig_dsl_sets, TableBin}, NewSetNames),
 
     %% 4. Create counters (idempotent — CREATE flag means no error if exists)
     CounterMsgs = [fun(S) ->
         nft_object:add_counter(FamilyNum, TableBin, iolist_to_binary(C), S)
     end || C <- Counters],
+
+    %% 4a. Create sets (declared via nft_set). Must exist before any rule
+    %% references them via `set:` lookup, otherwise the batch fails with
+    %% ENOENT. Supports 2-tuple {Name, Type} and 3-tuple {Name, Type, Opts}
+    %% forms (Opts may carry flags like [timeout] and an initial timeout).
+    SetMsgs = [compile_set_msg(FamilyNum, TableBin, SetDef)
+               || SetDef <- maps:get(sets, Table, [])],
 
     %% 4b. Compile explicit maps (nft_map) from DSL
     ExplicitMaps = maps:get(maps, Table, []),
@@ -759,13 +876,16 @@ apply_nft_table(#{name := TableName, chains := Chains} = Table, VethMap, Replica
     {VmapCreates, VmapElems} = split_create_elems(ExplicitVmapMsgs),
     {MapCreates, MapElems} = split_create_elems(ExplicitMapMsgs),
     AllMsgs = CounterMsgs
+        ++ SetMsgs
         ++ MapCreates ++ VmapCreates ++ AllMapCreates
         ++ AllChainCreates
         ++ MapElems ++ VmapElems
         ++ AllRuleCreates,
-    logger:notice("erlkoenig_config: nft_table ~s: ~p counters, ~p maps, ~p chains, ~p rules",
-                [TableName, length(CounterMsgs), length(AllMapCreates),
-                 length(AllChainCreates), length(AllRuleCreates)]),
+    logger:notice("erlkoenig_config: nft_table ~s: ~p counters, ~p sets, "
+                  "~p maps, ~p chains, ~p rules",
+                [TableName, length(CounterMsgs), length(SetMsgs),
+                 length(AllMapCreates), length(AllChainCreates),
+                 length(AllRuleCreates)]),
     case AllMsgs of
         [] ->
             logger:info("erlkoenig_config: nft_table ~s: empty (no chains)", [TableName]);
@@ -781,6 +901,28 @@ apply_nft_table(#{name := TableName, chains := Chains} = Table, VethMap, Replica
             end
     end;
 apply_nft_table(_, _, _) -> ok.
+
+%% Extract the name from a DSL set definition.
+set_name({Name, _Type})       -> Name;
+set_name({Name, _Type, _Opts}) -> Name.
+
+%% Build an nft_set:add message for one DSL set definition.
+compile_set_msg(Family, Table, {Name, Type}) ->
+    fun(S) -> nft_set:add(Family, #{
+        table => Table,
+        name  => iolist_to_binary(Name),
+        type  => Type
+    }, S) end;
+compile_set_msg(Family, Table, {Name, Type, Opts}) when is_map(Opts) ->
+    Base = #{table => Table,
+             name  => iolist_to_binary(Name),
+             type  => Type,
+             flags => maps:get(flags, Opts, [])},
+    Full = case maps:find(timeout, Opts) of
+        {ok, T} -> Base#{timeout => T};
+        error   -> Base
+    end,
+    fun(S) -> nft_set:add(Family, Full, S) end.
 
 compile_nft_chain_split(Family, Table, #{name := Name, rules := Rules} = Chain,
                         VethMap, ReplicaIpMap) ->
@@ -1468,6 +1610,16 @@ has_unresolved(Opts) ->
 %% Internal -- Guard
 %%====================================================================
 
+%% The Elixir DSL emits its guard block under `ct_guard`, older term
+%% files used `guard`. Normalize to a single shape before dispatching.
+-spec resolve_guard_key(map()) -> map().
+resolve_guard_key(Config) ->
+    case {maps:find(guard, Config), maps:find(ct_guard, Config)} of
+        {{ok, _}, _}       -> Config;
+        {error, {ok, G}}   -> Config#{guard => G};
+        {error, error}     -> Config
+    end.
+
 -spec maybe_configure_guard(map()) -> ok.
 maybe_configure_guard(#{guard := GuardConfig}) when is_map(GuardConfig) ->
     case erlang:whereis(erlkoenig_nft_ct_guard) of
@@ -1586,10 +1738,6 @@ copy_if(Key, From, To) ->
 %% Internal -- Delta / Reload
 %%====================================================================
 
--spec container_names(map()) -> [binary()].
-container_names(Config) ->
-    [iolist_to_binary(maps:get(name, C)) || C <- flatten_containers(Config)].
-
 -spec stop_by_name(binary()) -> ok.
 stop_by_name(Name) ->
     Pids = try pg:get_members(erlkoenig_pg, erlkoenig_cts)
@@ -1673,23 +1821,15 @@ find_pid_by_name(Name, [Pid | Rest]) ->
 %% Internal -- Config State (ETS)
 %%====================================================================
 
-ensure_config_tab() ->
-    case ets:whereis(?CONFIG_TAB) of
-        undefined ->
-            ets:new(?CONFIG_TAB, [set, named_table, public]);
-        _ ->
-            ok
-    end.
-
+%% Config cache survives across `load/1` calls via persistent_term.
+%% Previously this was a named ETS table created on demand; because
+%% `load/1` runs inside a transient rpc:call process, the table died
+%% with every call, so reconciliation always saw `undefined` as
+%% OldConfig — leading to zombie pod supervisors and spurious
+%% re-spawns on every reload. persistent_term is owned by the VM, so
+%% it survives both rpc processes and beam restarts' callers.
 store_config(File, Config) ->
-    ets:insert(?CONFIG_TAB, {File, Config}).
+    persistent_term:put({?CONFIG_TAB, File}, Config).
 
 get_stored_config(File) ->
-    case ets:whereis(?CONFIG_TAB) of
-        undefined -> undefined;
-        _ ->
-            case ets:lookup(?CONFIG_TAB, File) of
-                [{_, Config}] -> Config;
-                [] -> undefined
-            end
-    end.
+    persistent_term:get({?CONFIG_TAB, File}, undefined).

@@ -77,10 +77,16 @@ init([]) ->
     %%   ├── erlkoenig_nft_sup (firewall subtree)
     %%   ├── erlkoenig_amqp_sup (optional, AMQP integration, ADR-0014)
     %%   └── erlkoenig_pod_sup_sup (simple_one_for_one for pod supervisors)
+    %% `auto_shutdown => any_significant`: the root shuts down cleanly
+    %% when any child marked `significant => true` terminates. Only
+    %% `erlkoenig_nft_sup` carries that flag today — a definitive
+    %% firewall failure takes the runtime offline rather than leaving
+    %% containers running without the expected network policy.
     SupFlags = #{
         strategy => rest_for_one,
         intensity => 5,
-        period => 10
+        period => 10,
+        auto_shutdown => any_significant
     },
     PgSpec = #{
         id => erlkoenig_pg,
@@ -130,16 +136,39 @@ init([]) ->
         restart => permanent,
         type => worker
     },
+    %% `significant => true` + `restart => transient`: firewall subtree
+    %% terminating terminally (own auto_shutdown from the inside) takes
+    %% the whole runtime down fail-closed. A transient crash still
+    %% restarts normally.
     NftSupSpec = #{
         id => erlkoenig_nft_sup,
         start => {erlkoenig_nft_sup, start_link, []},
-        restart => permanent,
+        restart => transient,
+        significant => true,
         type => supervisor,
         shutdown => infinity
+    },
+    QuarantineSpec = #{
+        id => erlkoenig_quarantine,
+        start => {erlkoenig_quarantine, start_link, []},
+        restart => permanent,
+        type => worker
+    },
+    AdmissionSpec = #{
+        id => erlkoenig_admission,
+        start => {erlkoenig_admission, start_link, []},
+        restart => permanent,
+        type => worker
     },
     VolumeStoreSpec = #{
         id => erlkoenig_volume_store,
         start => {erlkoenig_volume_store, start_link, []},
+        restart => permanent,
+        type => worker
+    },
+    VolumeStatsSpec = #{
+        id => erlkoenig_volume_stats,
+        start => {erlkoenig_volume_stats, start_link, []},
         restart => permanent,
         type => worker
     },
@@ -151,7 +180,8 @@ init([]) ->
     },
     {ok, {SupFlags, [PgSpec, ZoneSpec, ZoneSupSpec, CgroupSpec, EventsSpec,
                      HealthSpec, AuditSpec, PkiSpec, NftSupSpec,
-                     VolumeStoreSpec, PodSupSupSpec]}};
+                     QuarantineSpec, AdmissionSpec,
+                     VolumeStoreSpec, VolumeStatsSpec, PodSupSupSpec]}};
 
 init(pod_sup_sup) ->
     SupFlags = #{

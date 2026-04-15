@@ -67,13 +67,22 @@ resolve_loop(ContainerName,
                 true  -> ephemeral;
                 false -> persistent
             end,
-            Req = #{container => ContainerName,
-                    persist   => Persist,
-                    uid       => Uid,
-                    gid       => Gid,
-                    lifecycle => Lifecycle},
+            Req0 = #{container => ContainerName,
+                     persist   => Persist,
+                     uid       => Uid,
+                     gid       => Gid,
+                     lifecycle => Lifecycle},
+            %% Pass `quota` through to the store verbatim — parsing
+            %% (e.g. "1G" → bytes) happens inside
+            %% `erlkoenig_volume_store:parse_quota/1`, which also
+            %% raises a clear `{invalid_quota, _}` on malformed input.
+            Req = case maps:find(quota, Vol) of
+                {ok, Quota} -> Req0#{quota => Quota};
+                error       -> Req0
+            end,
             case erlkoenig_volume_store:ensure(Req) of
-                {ok, #{uuid := Uuid, host_path := HostPath}} ->
+                {ok, Record} ->
+                    #{uuid := Uuid, host_path := HostPath} = Record,
                     ReadOnly = maps:get(read_only, Vol, false),
                     Resolved0 = #{uuid      => Uuid,
                                   host      => HostPath,
@@ -81,9 +90,13 @@ resolve_loop(ContainerName,
                                   read_only => ReadOnly,
                                   persist   => Persist,
                                   lifecycle => Lifecycle},
-                    Resolved = case maps:find(opts, Vol) of
+                    Resolved1 = case maps:find(opts, Vol) of
                         {ok, OptsStr} -> Resolved0#{opts => OptsStr};
                         error         -> Resolved0
+                    end,
+                    Resolved = case maps:find(quota_bytes, Record) of
+                        {ok, QB} -> Resolved1#{quota_bytes => QB};
+                        error    -> Resolved1
                     end,
                     resolve_loop(ContainerName, Rest, Uid, Gid,
                                  [Resolved | Acc]);

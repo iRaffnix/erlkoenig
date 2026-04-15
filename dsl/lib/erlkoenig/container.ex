@@ -173,6 +173,7 @@ defmodule Erlkoenig.Container do
       read_only   = Keyword.get(unquote(opts), :read_only, false)
       mount_opts  = Keyword.get(unquote(opts), :opts)
       ephemeral   = Keyword.get(unquote(opts), :ephemeral, false)
+      quota       = Keyword.get(unquote(opts), :quota)
 
       unless is_boolean(ephemeral) do
         raise ArgumentError,
@@ -191,6 +192,16 @@ defmodule Erlkoenig.Container do
           other ->
             raise ArgumentError,
               "volume opts: expected a binary string, got #{inspect(other)}"
+        end
+
+      entry =
+        case quota do
+          nil -> entry
+          q when is_binary(q) -> Map.put(entry, :quota, q)
+          q when is_integer(q) and q >= 0 -> Map.put(entry, :quota, q)
+          other ->
+            raise ArgumentError,
+              "volume quota: expected a size string (\"1G\") or non-negative integer, got #{inspect(other)}"
         end
 
       @ct_current Builder.add_volume(@ct_current, entry)

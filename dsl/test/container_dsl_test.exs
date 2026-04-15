@@ -145,7 +145,7 @@ defmodule Erlkoenig.ContainerDslTest do
     container :archive do
       binary "/opt/archive"
       ip {10, 0, 0, 30}
-      volume "/data/db", persist: "archive-db"
+      volume "/data/db", persist: "archive-db", quota: "2G"
       volume "/var/log", persist: "archive-logs"
       volume "/etc/config", persist: "shared-config", read_only: true
       volume "/srv/ingest", persist: "ingest-data",
@@ -404,6 +404,7 @@ defmodule Erlkoenig.ContainerDslTest do
       assert db.container == "/data/db"
       assert db.persist == "archive-db"
       assert db.read_only == false
+      assert db.quota == "2G"
 
       assert logs.container == "/var/log"
       assert logs.persist == "archive-logs"

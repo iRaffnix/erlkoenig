@@ -49,7 +49,9 @@ store is authoritative.
          list_by_container/1,
          destroy/1,
          cleanup_ephemeral/1,
-         volumes_root/0]).
+         set_quota/2,
+         volumes_root/0,
+         parse_quota/1]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -59,6 +61,12 @@ store is authoritative.
 -define(TABLE, erlkoenig_volumes).
 -define(DEFAULT_VOLUMES_ROOT, <<"/var/lib/erlkoenig/volumes">>).
 
+%% Project IDs we allocate live in this range. Starts at 10_000 to
+%% leave low IDs for operator-defined projects (matches util-linux
+%% `/etc/projects` conventions). Wraps at 2**31-1 (XFS u32 signed).
+-define(PROJECT_ID_MIN, 10_000).
+-define(PROJECT_ID_MAX, 16#7fffffff).
+
 %% Volumes root is read from the `erlkoenig` app env at start_link/0
 %% (key: `volumes_root`). Default matches what operators set up via
 %% patterns/volume-backing-setup.md. Tests override it to a tmpdir.
@@ -66,14 +74,19 @@ store is authoritative.
 -type lifecycle() :: persistent | ephemeral.
 
 -type volume() :: #{
-    uuid       := binary(),
-    container  := binary(),
-    persist    := binary(),
-    host_path  := binary(),
-    uid        := non_neg_integer(),
-    gid        := non_neg_integer(),
-    lifecycle  := lifecycle(),
-    created_at := integer()
+    uuid        := binary(),
+    container   := binary(),
+    persist     := binary(),
+    host_path   := binary(),
+    uid         := non_neg_integer(),
+    gid         := non_neg_integer(),
+    lifecycle   := lifecycle(),
+    created_at  := integer(),
+    %% Quota fields are only present when a quota was requested.
+    %% `quota_bytes` is the hard limit in bytes; `project_id` is the
+    %% XFS project id bound to the directory tree. 0 quota = unset.
+    quota_bytes => non_neg_integer(),
+    project_id  => non_neg_integer()
 }.
 
 -export_type([volume/0, lifecycle/0]).
@@ -156,6 +169,68 @@ Returns the UUIDs that were destroyed.
 cleanup_ephemeral(Container) when is_binary(Container) ->
     gen_server:call(?SERVER, {cleanup_ephemeral, Container}).
 
+-doc """
+Apply an XFS project quota to an existing volume. Allocates a project
+ID if the volume doesn't have one yet, binds the project ID to the
+volume directory tree, and sets a hard byte limit.
+
+`Bytes = 0` removes the quota (clears the limit but keeps the
+project-ID association so subsequent raises don't need to re-bind).
+
+Best-effort: if `xfs_quota` is missing, fails silently at the
+subprocess layer (warning logged, metadata still updated so the
+value shows up in events and future retries). Callers treat
+`{ok, _}` as "metadata recorded" and don't assume kernel-level
+enforcement.
+""".
+-spec set_quota(binary(), non_neg_integer() | binary()) ->
+    {ok, volume()} | {error, term()}.
+set_quota(Uuid, Spec) when is_binary(Uuid) ->
+    gen_server:call(?SERVER, {set_quota, Uuid, Spec}).
+
+-doc """
+Parse a human-readable quota specification into bytes.
+
+Accepts:
+- integer bytes (`1024` → 1024)
+- decimal+suffix binaries (`<<"1G">>`, `<<"500M">>`, `<<"2T">>`)
+  where the suffix is one of K/M/G/T/P, binary multipliers (1024)
+- empty string or `0` → `0` (no quota)
+
+Raises `{invalid_quota, Input}` on anything else so callers get a
+clear error at config-load instead of a silent zero.
+""".
+-spec parse_quota(non_neg_integer() | binary() | string()) ->
+    non_neg_integer().
+parse_quota(0) -> 0;
+parse_quota(N) when is_integer(N), N > 0 -> N;
+parse_quota(<<>>) -> 0;
+parse_quota(Bin) when is_binary(Bin) ->
+    case re:run(Bin, <<"^(\\d+)\\s*([KMGTP]?)B?$">>,
+                [caseless, {capture, all_but_first, binary}]) of
+        {match, [N, Suffix]} ->
+            Num = binary_to_integer(N),
+            Num * multiplier(Suffix);
+        nomatch ->
+            erlang:error({invalid_quota, Bin})
+    end;
+parse_quota(Input) when is_list(Input) ->
+    parse_quota(iolist_to_binary(Input));
+parse_quota(Input) ->
+    erlang:error({invalid_quota, Input}).
+
+multiplier(<<>>)    -> 1;
+multiplier(<<"K">>) -> 1024;
+multiplier(<<"k">>) -> 1024;
+multiplier(<<"M">>) -> 1024 * 1024;
+multiplier(<<"m">>) -> 1024 * 1024;
+multiplier(<<"G">>) -> 1024 * 1024 * 1024;
+multiplier(<<"g">>) -> 1024 * 1024 * 1024;
+multiplier(<<"T">>) -> 1024 * 1024 * 1024 * 1024;
+multiplier(<<"t">>) -> 1024 * 1024 * 1024 * 1024;
+multiplier(<<"P">>) -> 1024 * 1024 * 1024 * 1024 * 1024;
+multiplier(<<"p">>) -> 1024 * 1024 * 1024 * 1024 * 1024.
+
 %%====================================================================
 %% gen_server
 %%====================================================================
@@ -193,7 +268,10 @@ handle_call({destroy, Uuid}, _From, State) ->
     {reply, do_destroy(Uuid), State};
 
 handle_call({cleanup_ephemeral, Container}, _From, State) ->
-    {reply, do_cleanup_ephemeral(Container), State}.
+    {reply, do_cleanup_ephemeral(Container), State};
+
+handle_call({set_quota, Uuid, Spec}, _From, State) ->
+    {reply, do_set_quota(Uuid, Spec), State}.
 
 handle_cast(_, State) -> {noreply, State}.
 handle_info(_, State) -> {noreply, State}.
@@ -213,21 +291,29 @@ do_ensure(#{container := Container, persist := Persist,
             uid := Uid, gid := Gid} = Req) ->
     case do_find(Container, Persist) of
         {ok, Existing} ->
-            {ok, Existing};
+            %% Volume exists. If the caller asks for a quota that
+            %% differs from the stored one, apply the change — this
+            %% lets operators raise/lower limits via a config reload.
+            case maybe_reconcile_quota(Existing, Req) of
+                {ok, Updated} -> {ok, Updated};
+                {error, _} = E -> E
+            end;
         not_found ->
             Uuid = new_uuid(),
             HostPath = uuid_path(Uuid),
             Lifecycle = maps:get(lifecycle, Req, persistent),
-            Record = #{uuid       => Uuid,
-                       container  => Container,
-                       persist    => Persist,
-                       host_path  => HostPath,
-                       uid        => Uid,
-                       gid        => Gid,
-                       lifecycle  => Lifecycle,
-                       created_at => erlang:system_time(second)},
+            QuotaBytes = parse_quota(maps:get(quota, Req, 0)),
+            BaseRecord = #{uuid       => Uuid,
+                           container  => Container,
+                           persist    => Persist,
+                           host_path  => HostPath,
+                           uid        => Uid,
+                           gid        => Gid,
+                           lifecycle  => Lifecycle,
+                           created_at => erlang:system_time(second)},
             case ensure_dir(HostPath, Uid, Gid) of
                 ok ->
+                    Record = apply_quota_on_create(BaseRecord, QuotaBytes),
                     ok = dets:insert(?TABLE, {Uuid, Record}),
                     _ = maybe_ensure_by_name_symlink(Container, Persist, Uuid),
                     {ok, Record};
@@ -235,6 +321,33 @@ do_ensure(#{container := Container, persist := Persist,
                     Err
             end
     end.
+
+-spec maybe_reconcile_quota(volume(), map()) ->
+    {ok, volume()} | {error, term()}.
+maybe_reconcile_quota(Existing, Req) ->
+    case maps:find(quota, Req) of
+        error ->
+            %% Caller didn't specify a quota — leave whatever's there.
+            {ok, Existing};
+        {ok, Spec} ->
+            Requested = parse_quota(Spec),
+            Current = maps:get(quota_bytes, Existing, 0),
+            case Requested =:= Current of
+                true  -> {ok, Existing};
+                false -> do_set_quota(maps:get(uuid, Existing), Requested)
+            end
+    end.
+
+-spec apply_quota_on_create(volume(), non_neg_integer()) -> volume().
+apply_quota_on_create(Record, 0) ->
+    Record;
+apply_quota_on_create(Record, Bytes) ->
+    %% Allocate a project ID now, best-effort-bind it to the dir.
+    ProjectId = next_project_id(),
+    HostPath = maps:get(host_path, Record),
+    _ = xfs_project_bind(HostPath, ProjectId),
+    _ = xfs_project_limit(ProjectId, Bytes),
+    Record#{project_id => ProjectId, quota_bytes => Bytes}.
 
 -spec do_find(binary(), binary()) -> {ok, volume()} | not_found.
 do_find(Container, Persist) ->
@@ -253,7 +366,16 @@ do_destroy(Uuid) ->
     case dets:lookup(?TABLE, Uuid) of
         [{Uuid, #{host_path := HostPath,
                   container := Container,
-                  persist := Persist}}] ->
+                  persist := Persist} = V}] ->
+            %% Clear any quota binding first so the project ID doesn't
+            %% keep accounting the dir after the data goes away.
+            _ = case maps:get(project_id, V, 0) of
+                    0 -> ok;
+                    Pid ->
+                        _ = xfs_project_limit(Pid, 0),
+                        _ = xfs_project_unbind(HostPath, Pid),
+                        ok
+                end,
             %% rm -rf is destructive but scoped to the volume root;
             %% the directory name is a UUID we generated, so no
             %% user-controlled path traversal is possible.
@@ -261,6 +383,40 @@ do_destroy(Uuid) ->
             _ = maybe_remove_by_name_symlink(Container, Persist),
             ok = dets:delete(?TABLE, Uuid),
             ok;
+        [] ->
+            {error, not_found}
+    end.
+
+-spec do_set_quota(binary(), non_neg_integer() | binary()) ->
+    {ok, volume()} | {error, term()}.
+do_set_quota(Uuid, Spec) ->
+    case dets:lookup(?TABLE, Uuid) of
+        [{Uuid, V}] ->
+            Bytes = parse_quota(Spec),
+            HostPath = maps:get(host_path, V),
+            {Pid, V1} =
+                case maps:get(project_id, V, 0) of
+                    0 when Bytes > 0 ->
+                        %% First quota for this volume — allocate + bind.
+                        Allocated = next_project_id(),
+                        _ = xfs_project_bind(HostPath, Allocated),
+                        {Allocated, V#{project_id => Allocated}};
+                    Existing ->
+                        {Existing, V}
+                end,
+            _ = case {Pid, Bytes} of
+                    {0, _} ->
+                        %% No project id and Bytes == 0 → nothing to do.
+                        ok;
+                    {_, _} ->
+                        xfs_project_limit(Pid, Bytes)
+                end,
+            Updated = case Bytes of
+                0 -> maps:remove(quota_bytes, V1);
+                _ -> V1#{quota_bytes => Bytes}
+            end,
+            ok = dets:insert(?TABLE, {Uuid, Updated}),
+            {ok, Updated};
         [] ->
             {error, not_found}
     end.
@@ -353,3 +509,105 @@ maybe_remove_by_name_symlink(Container, Persist) ->
 rm_rf(Path) when is_binary(Path) ->
     %% file:del_dir_r/1 was added in OTP 23; we target OTP 28.
     file:del_dir_r(binary_to_list(Path)).
+
+%%====================================================================
+%% XFS project quota — best-effort subprocess wrappers.
+%%
+%% These shell out to `xfs_quota` because no portable
+%% `quotactl(Q_XSETQLIM)` wrapper exists in Erlang/OTP. The command is
+%% idempotent at the kernel layer and the subprocess cost only happens
+%% on volume create/destroy, not on any hot path.
+%%
+%% In dev setups (non-XFS /tmp, missing `xfs_quota` binary, running
+%% without CAP_SYS_ADMIN) the calls fail gracefully — the metadata
+%% still records the requested limit so a later move to a real XFS
+%% mount picks it up on reconciliation. That matches the ownership
+%% best-effort pattern used elsewhere in this module.
+%%====================================================================
+
+-spec next_project_id() -> non_neg_integer().
+next_project_id() ->
+    %% Pick max(stored) + 1, floored at PROJECT_ID_MIN. Single-process
+    %% access (this gen_server) makes the scan-then-assign race-free.
+    Max = dets:foldl(
+        fun({_Uuid, V}, Acc) ->
+              max(Acc, maps:get(project_id, V, 0))
+        end, 0, ?TABLE),
+    Candidate = max(?PROJECT_ID_MIN, Max + 1),
+    case Candidate > ?PROJECT_ID_MAX of
+        true  -> erlang:error(project_id_exhausted);
+        false -> Candidate
+    end.
+
+-spec xfs_project_bind(binary(), non_neg_integer()) -> ok.
+xfs_project_bind(Dir, ProjectId) ->
+    %% `project -s -p <dir> <id>` tags the directory tree with the
+    %% project ID. Must run after the dir is created but before files
+    %% are written if we want full accounting accuracy.
+    Cmd = io_lib:format("xfs_quota -x -c 'project -s -p ~s ~p' ~s 2>&1",
+                        [binary_to_list(Dir), ProjectId,
+                         binary_to_list(volumes_root())]),
+    run_xfs_quota(Cmd, {project_bind, Dir, ProjectId}).
+
+-spec xfs_project_unbind(binary(), non_neg_integer()) -> ok.
+xfs_project_unbind(Dir, ProjectId) ->
+    Cmd = io_lib:format("xfs_quota -x -c 'project -C -p ~s ~p' ~s 2>&1",
+                        [binary_to_list(Dir), ProjectId,
+                         binary_to_list(volumes_root())]),
+    run_xfs_quota(Cmd, {project_unbind, Dir, ProjectId}).
+
+-spec xfs_project_limit(non_neg_integer(), non_neg_integer()) -> ok.
+xfs_project_limit(ProjectId, Bytes) ->
+    %% `limit -p bhard=<bytes> <id>` sets the hard byte limit. Setting
+    %% bhard=0 clears the limit.
+    Cmd = io_lib:format(
+        "xfs_quota -x -c 'limit -p bhard=~p ~p' ~s 2>&1",
+        [Bytes, ProjectId, binary_to_list(volumes_root())]),
+    run_xfs_quota(Cmd, {project_limit, ProjectId, Bytes}).
+
+-spec run_xfs_quota(iolist(), term()) -> ok.
+run_xfs_quota(Cmd, Tag) ->
+    %% Skip the subprocess entirely when the volumes root is
+    %% obviously not a real XFS mount (e.g. a `/tmp` eunit fixture).
+    %% Saves ~50 ms of fork-exec per call and sidesteps the
+    %% accumulated subprocess-spawn overhead that destabilises
+    %% unrelated test modules when many volumes are created back-to-back.
+    case xfs_quota_available() of
+        false -> ok;
+        true ->
+            Flat = lists:flatten(Cmd),
+            Output = os:cmd(Flat),
+            case string:trim(Output) of
+                "" -> ok;
+                Msg ->
+                    logger:warning("volume_store: xfs_quota ~p failed: ~s",
+                                   [Tag, Msg]),
+                    ok
+            end
+    end.
+
+%% True only when the volumes root looks like a real host FS *and*
+%% `xfs_quota` is on PATH. Test fixtures (paths under `/tmp/`) always
+%% return false, which makes quota calls no-ops in eunit.
+-spec xfs_quota_available() -> boolean().
+xfs_quota_available() ->
+    case get({?MODULE, xfs_quota_available}) of
+        undefined ->
+            Answer = do_check_xfs_quota(),
+            _ = put({?MODULE, xfs_quota_available}, Answer),
+            Answer;
+        Cached -> Cached
+    end.
+
+-spec do_check_xfs_quota() -> boolean().
+do_check_xfs_quota() ->
+    Root = binary_to_list(volumes_root()),
+    case string:prefix(Root, "/tmp/") of
+        nomatch ->
+            case os:find_executable("xfs_quota") of
+                false -> false;
+                _Path -> true
+            end;
+        _ ->
+            false
+    end.

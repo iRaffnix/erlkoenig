@@ -159,6 +159,55 @@ encode_payload({container_stats, _Id, Name, MetricType, Values}) when is_map(Val
     {ok, <<"stats.", NameBin/binary, ".", MetricBin/binary>>,
      encode_map(Payload)};
 
+%% ── Quarantine events ──────────────────────────────────────────
+%% Routing: security.<hash-prefix>.quarantined | unquarantined
+
+encode_payload({binary_quarantined, Hash, Reason}) ->
+    Prefix = hash_prefix(Hash),
+    {ok, <<"security.", Prefix/binary, ".quarantined">>, #{
+        <<"hash">>   => hash_to_hex(Hash),
+        <<"reason">> => iolist_to_binary(io_lib:format("~p", [Reason])),
+        <<"ts_ms">>  => erlang:system_time(millisecond)
+    }};
+encode_payload({binary_unquarantined, Hash}) ->
+    Prefix = hash_prefix(Hash),
+    {ok, <<"security.", Prefix/binary, ".unquarantined">>, #{
+        <<"hash">>  => hash_to_hex(Hash),
+        <<"ts_ms">> => erlang:system_time(millisecond)
+    }};
+
+%% ── Admission gate events ──────────────────────────────────────
+%% Routing: admission.<scope>.{waiting,accepted,timeout}
+
+encode_payload({admission_accepted, Scope}) ->
+    S = ensure_binary(Scope),
+    {ok, <<"admission.", S/binary, ".accepted">>,
+     #{<<"scope">> => S, <<"ts_ms">> => erlang:system_time(millisecond)}};
+encode_payload({admission_waiting, Scope}) ->
+    S = ensure_binary(Scope),
+    {ok, <<"admission.", S/binary, ".waiting">>,
+     #{<<"scope">> => S, <<"ts_ms">> => erlang:system_time(millisecond)}};
+encode_payload({admission_timeout, Scope}) ->
+    S = ensure_binary(Scope),
+    {ok, <<"admission.", S/binary, ".timeout">>,
+     #{<<"scope">> => S, <<"ts_ms">> => erlang:system_time(millisecond)}};
+
+%% ── Volume stats (SPEC-EK-024) ─────────────────────────────────
+%% Routing: stats.volume.<container>.<persist>
+
+encode_payload({volume_stats, #{container := Container,
+                                persist := Persist} = V}) ->
+    CtBin = ensure_binary(Container),
+    PersistBin = ensure_binary(Persist),
+    %% Lifecycle is an atom on the wire → binary.
+    V1 = case maps:find(lifecycle, V) of
+             {ok, L} when is_atom(L) -> V#{lifecycle := atom_to_binary(L)};
+             _ -> V
+         end,
+    Payload = V1#{<<"container">> => CtBin, <<"persist">> => PersistBin},
+    {ok, <<"stats.volume.", CtBin/binary, ".", PersistBin/binary>>,
+     encode_map(Payload)};
+
 %% ── Policy events ───────────────────────────────────────────────
 %% Routing: policy.<name>.violation
 
@@ -460,6 +509,27 @@ ensure_binary(B) when is_binary(B) ->
 ensure_binary(A) when is_atom(A) -> atom_to_binary(A);
 ensure_binary(L) when is_list(L) -> unicode:characters_to_binary(L);
 ensure_binary(T) -> term_to_binary_string(T).
+
+%% Hash helpers for quarantine routing keys.
+-spec hash_prefix(binary()) -> binary().
+hash_prefix(Hash) when is_binary(Hash) ->
+    Hex = hash_to_hex(Hash),
+    case byte_size(Hex) of
+        N when N >= 12 ->
+            <<Prefix:12/binary, _/binary>> = Hex,
+            Prefix;
+        _ -> Hex
+    end.
+
+-spec hash_to_hex(binary()) -> binary().
+hash_to_hex(Hash) when is_binary(Hash) ->
+    %% Accept both raw SHA-256 (32 bytes) and already-hex inputs.
+    %% 32 raw bytes encode to 64 hex chars. Anything else we pass
+    %% through as-is, assuming the caller already hexed it.
+    case byte_size(Hash) of
+        32 -> string:lowercase(binary:encode_hex(Hash));
+        _  -> Hash
+    end.
 
 -spec term_to_binary_string(term()) -> binary().
 term_to_binary_string(B) when is_binary(B) ->

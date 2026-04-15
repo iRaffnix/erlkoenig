@@ -152,3 +152,17 @@ t_multiple() ->
     [First, Second | _] = Resolved,
     ?assertEqual(<<"/data/db">>, maps:get(container, First)),
     ?assertEqual(<<"/var/log">>, maps:get(container, Second)).
+
+resolve_quota_test_() ->
+    {setup, fun setup/0, fun cleanup/1,
+     fun(_Root) ->
+        [{"quota flows from DSL map through resolve into store metadata",
+          ?_test(t_resolve_quota())}]
+     end}.
+
+t_resolve_quota() ->
+    DslVols = [#{container => <<"/data">>, persist => <<"q1">>,
+                 quota => <<"512M">>}],
+    {ok, [R]} = erlkoenig_volume:resolve(<<"app-q">>, DslVols, 1000, 1000),
+    ?assertEqual(<<"q1">>, maps:get(persist, R)),
+    ?assertEqual(512 * 1024 * 1024, maps:get(quota_bytes, R)).

@@ -990,6 +990,88 @@ defmodule StackTest do
     end
   end
 
+  test "volume with quota: string flows into term" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestStack.VolQuota do
+      use Erlkoenig.Stack
+      host do
+        ipvlan "net", parent: {:dummy, "ek"}, subnet: {10, 0, 0, 0, 24}
+      end
+      pod "app", strategy: :one_for_one do
+        container "svc",
+          binary: "/opt/svc",
+          zone: "net", replicas: 1, restart: :permanent do
+          volume "/data", persist: "data", quota: "1G"
+        end
+      end
+    end
+    """)
+
+    [vol] = hd(hd(mod.config().pods).containers).volumes
+    assert vol.quota == "1G"
+  end
+
+  test "volume with quota: integer flows into term" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestStack.VolQuotaInt do
+      use Erlkoenig.Stack
+      host do
+        ipvlan "net", parent: {:dummy, "ek"}, subnet: {10, 0, 0, 0, 24}
+      end
+      pod "app", strategy: :one_for_one do
+        container "svc",
+          binary: "/opt/svc",
+          zone: "net", replicas: 1, restart: :permanent do
+          volume "/data", persist: "data", quota: 1_048_576
+        end
+      end
+    end
+    """)
+
+    [vol] = hd(hd(mod.config().pods).containers).volumes
+    assert vol.quota == 1_048_576
+  end
+
+  test "volume quota: non-binary, non-integer raises ArgumentError" do
+    assert_raise ArgumentError, ~r/expected a size string/, fn ->
+      Code.compile_string(~S"""
+      defmodule TestStack.VolBadQuota do
+        use Erlkoenig.Stack
+        host do
+          ipvlan "net", parent: {:dummy, "ek"}, subnet: {10, 0, 0, 0, 24}
+        end
+        pod "app", strategy: :one_for_one do
+          container "svc",
+            binary: "/opt/svc",
+            zone: "net", replicas: 1, restart: :permanent do
+            volume "/x", persist: "p", quota: :not_a_size
+          end
+        end
+      end
+      """)
+    end
+  end
+
+  test "volume quota: negative integer raises ArgumentError" do
+    assert_raise ArgumentError, ~r/non-negative integer/, fn ->
+      Code.compile_string(~S"""
+      defmodule TestStack.VolNegQuota do
+        use Erlkoenig.Stack
+        host do
+          ipvlan "net", parent: {:dummy, "ek"}, subnet: {10, 0, 0, 0, 24}
+        end
+        pod "app", strategy: :one_for_one do
+          container "svc",
+            binary: "/opt/svc",
+            zone: "net", replicas: 1, restart: :permanent do
+            volume "/x", persist: "p", quota: -1
+          end
+        end
+      end
+      """)
+    end
+  end
+
   test "multiple volumes preserve declaration order" do
     [{mod, _}] = Code.compile_string(~S"""
     defmodule TestStack.VolMany do

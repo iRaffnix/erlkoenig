@@ -35,7 +35,21 @@ store_test_() ->
           {"cleanup_ephemeral only touches ephemeral volumes",
            ?_test(t_cleanup_ephemeral())},
           {"by-name symlink points to UUID dir",
-           ?_test(t_by_name_symlink(Root))}]
+           ?_test(t_by_name_symlink(Root))},
+          {"quota field flows from ensure into record",
+           ?_test(t_quota_on_create())},
+          {"set_quota on existing volume updates metadata",
+           ?_test(t_set_quota())},
+          {"set_quota bytes=0 clears the limit",
+           ?_test(t_clear_quota())},
+          {"re-ensure with a new quota reconciles the record",
+           ?_test(t_reconcile_quota())},
+          {"distinct volumes get distinct project IDs",
+           ?_test(t_distinct_project_ids())},
+          {"parse_quota accepts strings, ints, binaries",
+           ?_test(t_parse_quota())},
+          {"parse_quota raises on garbage",
+           ?_test(t_parse_quota_invalid())}]
      end}.
 
 %%====================================================================
@@ -183,3 +197,98 @@ t_by_name_symlink(Root) ->
                  file:read_link_info(LinkPath)),
     {ok, Target} = file:read_link(LinkPath),
     ?assertEqual("../../" ++ binary_to_list(maps:get(uuid, V)), Target).
+
+%%====================================================================
+%% Quota tests
+%%
+%% The test tmpdir isn't XFS, so `xfs_quota` will fail at the
+%% subprocess layer. That's by design — the store logs a warning
+%% and records the requested quota in metadata regardless. These
+%% tests verify the metadata pathway; kernel-level enforcement is
+%% covered by integration test 28 (root-gated, real XFS mount).
+%%====================================================================
+
+t_quota_on_create() ->
+    {ok, V} = erlkoenig_volume_store:ensure(
+        #{container => <<"ct-q">>, persist => <<"sized">>,
+          uid => 0, gid => 0,
+          quota => <<"1G">>}),
+    ?assertEqual(1073741824, maps:get(quota_bytes, V)),
+    ?assert(maps:get(project_id, V) >= 10_000).
+
+t_set_quota() ->
+    {ok, V0} = erlkoenig_volume_store:ensure(
+        #{container => <<"ct-sq">>, persist => <<"x">>,
+          uid => 0, gid => 0}),
+    %% No quota yet.
+    ?assertEqual(error, maps:find(quota_bytes, V0)),
+    {ok, V1} = erlkoenig_volume_store:set_quota(
+        maps:get(uuid, V0), <<"500M">>),
+    ?assertEqual(500 * 1024 * 1024, maps:get(quota_bytes, V1)),
+    ?assert(maps:get(project_id, V1) >= 10_000),
+    %% find/2 sees the new quota too.
+    {ok, Found} = erlkoenig_volume_store:find(<<"ct-sq">>, <<"x">>),
+    ?assertEqual(500 * 1024 * 1024, maps:get(quota_bytes, Found)).
+
+t_clear_quota() ->
+    {ok, V0} = erlkoenig_volume_store:ensure(
+        #{container => <<"ct-cq">>, persist => <<"x">>,
+          uid => 0, gid => 0, quota => <<"100M">>}),
+    {ok, V1} = erlkoenig_volume_store:set_quota(
+        maps:get(uuid, V0), 0),
+    ?assertEqual(error, maps:find(quota_bytes, V1)),
+    %% Project ID stays bound — cheaper to reuse on the next raise.
+    ?assertEqual(maps:get(project_id, V0), maps:get(project_id, V1)).
+
+t_reconcile_quota() ->
+    %% First ensure: 1G.
+    {ok, V1} = erlkoenig_volume_store:ensure(
+        #{container => <<"ct-rec">>, persist => <<"y">>,
+          uid => 0, gid => 0, quota => <<"1G">>}),
+    ?assertEqual(1073741824, maps:get(quota_bytes, V1)),
+    %% Second ensure with a different quota → store reconciles to 2G.
+    {ok, V2} = erlkoenig_volume_store:ensure(
+        #{container => <<"ct-rec">>, persist => <<"y">>,
+          uid => 0, gid => 0, quota => <<"2G">>}),
+    ?assertEqual(2 * 1073741824, maps:get(quota_bytes, V2)),
+    %% Same UUID and project ID — the record is updated in place.
+    ?assertEqual(maps:get(uuid, V1), maps:get(uuid, V2)),
+    ?assertEqual(maps:get(project_id, V1), maps:get(project_id, V2)).
+
+t_distinct_project_ids() ->
+    {ok, A} = erlkoenig_volume_store:ensure(
+        #{container => <<"ct-d">>, persist => <<"pa">>,
+          uid => 0, gid => 0, quota => <<"1G">>}),
+    {ok, B} = erlkoenig_volume_store:ensure(
+        #{container => <<"ct-d">>, persist => <<"pb">>,
+          uid => 0, gid => 0, quota => <<"1G">>}),
+    {ok, C} = erlkoenig_volume_store:ensure(
+        #{container => <<"ct-other">>, persist => <<"pc">>,
+          uid => 0, gid => 0, quota => <<"1G">>}),
+    PidA = maps:get(project_id, A),
+    PidB = maps:get(project_id, B),
+    PidC = maps:get(project_id, C),
+    ?assertNotEqual(PidA, PidB),
+    ?assertNotEqual(PidA, PidC),
+    ?assertNotEqual(PidB, PidC),
+    ?assert(PidA >= 10_000).
+
+t_parse_quota() ->
+    ?assertEqual(0, erlkoenig_volume_store:parse_quota(0)),
+    ?assertEqual(0, erlkoenig_volume_store:parse_quota(<<"">>)),
+    ?assertEqual(1024, erlkoenig_volume_store:parse_quota(1024)),
+    ?assertEqual(1024, erlkoenig_volume_store:parse_quota(<<"1K">>)),
+    ?assertEqual(1048576, erlkoenig_volume_store:parse_quota(<<"1M">>)),
+    ?assertEqual(1073741824, erlkoenig_volume_store:parse_quota(<<"1G">>)),
+    %% Lowercase + KB/MB/GB suffixes also accepted.
+    ?assertEqual(1024, erlkoenig_volume_store:parse_quota(<<"1k">>)),
+    ?assertEqual(1024, erlkoenig_volume_store:parse_quota(<<"1KB">>)),
+    ?assertEqual(1048576, erlkoenig_volume_store:parse_quota(<<"1MB">>)).
+
+t_parse_quota_invalid() ->
+    ?assertError({invalid_quota, _},
+                 erlkoenig_volume_store:parse_quota(<<"1Z">>)),
+    ?assertError({invalid_quota, _},
+                 erlkoenig_volume_store:parse_quota(<<"garbage">>)),
+    ?assertError({invalid_quota, _},
+                 erlkoenig_volume_store:parse_quota(-1)).

@@ -2,11 +2,11 @@ defmodule ThreeTierIpvlan do
   @moduledoc """
   Three-Tier Web Architecture — IPVLAN L3S auf Dummy-Parent.
 
-  Gleiche Anwendung wie three_tier_nft.exs, aber:
-  - Ein IPVLAN-Netz statt drei Bridges
-  - IP-basierte Firewall statt VMap-Dispatch
-  - Kein Masquerade (internes Netz)
-  - Kein DNAT (kein externer Zugang — dafür WireGuard oder Reverse-Proxy)
+  Web → App → Database, alle drei in einem gemeinsamen IPVLAN-L3S-Netz
+  auf einem Dummy-Parent. IP-basierte Firewall isoliert die Tiers
+  voneinander; kein Masquerade (rein internes Netz), kein DNAT
+  (für externen Zugang nutzt man WireGuard oder einen Reverse-Proxy
+  davor).
 
   Topologie:
 
@@ -32,6 +32,11 @@ defmodule ThreeTierIpvlan do
   use Erlkoenig.Stack
 
   # ── 1. Container ─────────────────────────────────────
+  #
+  # Jeder Container bekommt eine eigene nft-Tabelle in seiner netns.
+  # input-Chain regelt wer reindarf, output wer raus. IPVLAN-L3S
+  # umgeht den Host-Forward-Hook — Tier-Isolation MUSS deshalb in
+  # den Container-netns passieren, nicht auf dem Host.
 
   pod "three_tier", strategy: :one_for_one do
     container "nginx",
@@ -52,6 +57,23 @@ defmodule ThreeTierIpvlan do
         channel :stdout
         channel :stderr
       end
+
+      # Web-Tier: offen auf 8443 für jeden; nach außen nur zur API
+      # und zum Gateway (DNS/Health). ICMP erlaubt für Diagnose.
+      nft do
+        input policy: :drop do
+          nft_rule :accept, ct_state: [:established, :related]
+          nft_rule :accept, ip_protocol: :icmp
+          nft_rule :accept, tcp_dport: 8443
+        end
+
+        output policy: :drop do
+          nft_rule :accept, ct_state: [:established, :related]
+          nft_rule :accept, ip_protocol: :icmp
+          nft_rule :accept, ip_daddr: {10, 50, 100, 5}, tcp_dport: 4000
+          nft_rule :accept, ip_daddr: {10, 50, 100, 1}
+        end
+      end
     end
 
     container "api",
@@ -66,6 +88,26 @@ defmodule ThreeTierIpvlan do
         metric :memory
         metric :cpu
       end
+
+      # App-Tier: akzeptiert 4000 nur aus dem Web-Tier
+      # (*.2, *.3, *.4). Spricht selbst nur mit Postgres
+      # und dem Gateway.
+      nft do
+        input policy: :drop do
+          nft_rule :accept, ct_state: [:established, :related]
+          nft_rule :accept, ip_protocol: :icmp
+          nft_rule :accept, ip_saddr: {10, 50, 100, 2}, tcp_dport: 4000
+          nft_rule :accept, ip_saddr: {10, 50, 100, 3}, tcp_dport: 4000
+          nft_rule :accept, ip_saddr: {10, 50, 100, 4}, tcp_dport: 4000
+        end
+
+        output policy: :drop do
+          nft_rule :accept, ct_state: [:established, :related]
+          nft_rule :accept, ip_protocol: :icmp
+          nft_rule :accept, ip_daddr: {10, 50, 100, 6}, tcp_dport: 5432
+          nft_rule :accept, ip_daddr: {10, 50, 100, 1}
+        end
+      end
     end
 
     container "postgres",
@@ -79,6 +121,23 @@ defmodule ThreeTierIpvlan do
       publish interval: 5000 do
         metric :memory
         metric :pids
+      end
+
+      # Data-Tier: akzeptiert 5432 nur von der API (*.5),
+      # spricht selbst mit niemandem außer dem Gateway
+      # (NTP/DNS/Health).
+      nft do
+        input policy: :drop do
+          nft_rule :accept, ct_state: [:established, :related]
+          nft_rule :accept, ip_protocol: :icmp
+          nft_rule :accept, ip_saddr: {10, 50, 100, 5}, tcp_dport: 5432
+        end
+
+        output policy: :drop do
+          nft_rule :accept, ct_state: [:established, :related]
+          nft_rule :accept, ip_protocol: :icmp
+          nft_rule :accept, ip_daddr: {10, 50, 100, 1}
+        end
       end
     end
   end

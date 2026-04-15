@@ -70,7 +70,13 @@ Usage from the Erlang shell:
                         | always
                         | on_failure
                         | {always, pos_integer()}
-                        | {on_failure, pos_integer()}.
+                        | {on_failure, pos_integer()}
+                        %% OTP-style aliases (preferred from the DSL):
+                        %% permanent = always, transient = on_failure,
+                        %% temporary = no_restart.
+                        | permanent
+                        | transient
+                        | temporary.
 
 -type limit_opts() :: #{memory => pos_integer(),
                         cpu => 1..100,
@@ -95,8 +101,10 @@ Usage from the Erlang shell:
 -type net_info() :: #{ip := ip4(),
                       gateway := ip4(),
                       netmask := non_neg_integer(),
-                      host_veth := binary(),
-                      container_veth := binary()}.
+                      iface := binary(),
+                      %% Backward compat: set to `undefined` in IPVLAN mode
+                      host_veth => binary() | undefined,
+                      container_veth => binary() | undefined}.
 
 -type exit_info() :: #{exit_code := integer(),
                        term_signal := non_neg_integer()}.

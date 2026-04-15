@@ -76,6 +76,11 @@ encode(Event) ->
 
 -spec encode_payload(term()) -> {ok, binary(), map()} | skip.
 
+%% ── Structured errors ──────────────────────────────────────────
+%% Routing: error.<type>.<reason>
+encode_payload({error, #{type := _, reason := _} = Err}) ->
+    {ok, erlkoenig_error:routing_key(Err), erlkoenig_error:payload(Err)};
+
 %% ── Container lifecycle ─────────────────────────────────────────
 %% Routing: container.<name>.<event>
 

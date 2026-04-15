@@ -11,7 +11,7 @@ Container Runtime auf Erlang/OTP 28. Ein 168KB C-Binary spawnt Linux-Namespaces,
 │  Elixir DSL (.exs)                                   │
 │  defmodule MyStack do                                │
 │    use Erlkoenig.Stack                               │
-│    host / bridge / pod / container / nft_table / ... │
+│    host / ipvlan / pod / container / nft_table / ... │
 │  end                                                 │
 └──────────────┬───────────────────────────────────────┘
                │ compile
@@ -27,7 +27,7 @@ Container Runtime auf Erlang/OTP 28. Ein 168KB C-Binary spawnt Linux-Namespaces,
 │                                                      │
 │  erlkoenig_ct (gen_statem)     one per container     │
 │  erlkoenig_pod_sup (supervisor) one per pod instance │
-│  erlkoenig_zone (gen_server)   bridge + IP pool      │
+│  erlkoenig_zone (gen_server)   IPVLAN parent + IP pool│
 │  erlkoenig_cgroup (gen_server) cgroup v2 hierarchy   │
 │  erlkoenig_nft (netlink)       nftables firewall     │
 │  erlkoenig_threat_actor        per-IP threat detection│
@@ -55,8 +55,8 @@ Container Runtime auf Erlang/OTP 28. Ein 168KB C-Binary spawnt Linux-Namespaces,
 │  cgroups v2    — memory, cpu, pids limits + PSI      │
 │  namespaces    — isolation (mount, pid, net, user)   │
 │  nftables      — firewall (via netlink, not nft CLI) │
-│  veth pairs    — container networking                │
-│  bridges       — L2 segments                         │
+│  IPVLAN L3S    — per-netns slave, shared parent, no  │
+│                  host-visible veth                    │
 └──────────────────────────────────────────────────────┘
 ```
 
@@ -76,7 +76,7 @@ defmodule MyStack do
   use Erlkoenig.Stack
 
   host do
-    bridge "net", subnet: {10, 0, 0, 0, 24}
+    ipvlan "net", parent: {:dummy, "ek_net"}, subnet: {10, 0, 0, 0, 24}
   end
 
   # Two tightly coupled containers — if one crashes, both restart
@@ -85,7 +85,9 @@ defmodule MyStack do
       binary: "/opt/api",
       args: ["--port", "4000"],
       limits: %{memory: 536_870_912, pids: 100},
-      restart: :always do
+      zone: "net",
+      replicas: 2,
+      restart: :permanent do
 
       publish interval: 2000 do
         metric :memory
@@ -96,10 +98,10 @@ defmodule MyStack do
     container "cache",
       binary: "/opt/cache",
       args: ["6379"],
-      restart: :always
+      zone: "net",
+      replicas: 2,
+      restart: :permanent
   end
-
-  attach "backend", to: "net", replicas: 2
 end
 ```
 

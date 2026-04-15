@@ -28,8 +28,13 @@ doc/
 docs-intern/
 idoc/
 
-# Claude Code
+# Claude Code (local agent instructions — not public)
 .claude/
+CLAUDE.md
+
+# Python caches (dashboard + event consumer)
+__pycache__/
+*.pyc
 
 # Editor
 *.swp

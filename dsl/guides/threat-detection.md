@@ -173,7 +173,7 @@ IPs that are never banned, regardless of behavior.
 ```elixir
 allowlist [
   {127, 0, 0, 1},        # localhost
-  {10, 0, 0, 1},         # bridge gateway
+  {10, 0, 0, 1},         # zone gateway (IPVLAN dummy parent)
   {10, 20, 30, 2}        # management host
 ]
 ```

@@ -67,15 +67,17 @@ decode_reply_status_test() ->
                   #{state => 1, child_pid => 1234, uptime_ms => 5000}},
                  erlkoenig_proto:decode(Bin)).
 
+%% stdout/stderr are streaming frames: <<Tag:8, Data/binary>> — NO version
+%% byte, because the C runtime sends them raw (see erlkoenig_rt.c::forward_output).
 decode_reply_stdout_test() ->
     Data = <<"Hello, world!\n">>,
-    Bin = <<16#07, 1, Data/binary>>,
+    Bin = <<16#07, Data/binary>>,
     ?assertEqual({ok, reply_stdout, #{data => Data}},
                  erlkoenig_proto:decode(Bin)).
 
 decode_reply_stderr_test() ->
     Data = <<"error: something\n">>,
-    Bin = <<16#08, 1, Data/binary>>,
+    Bin = <<16#08, Data/binary>>,
     ?assertEqual({ok, reply_stderr, #{data => Data}},
                  erlkoenig_proto:decode(Bin)).
 
@@ -207,6 +209,158 @@ encode_cmd_spawn_with_volumes_test() ->
     <<16#10, 1, _/binary>> = Cmd,
     ?assert(binary:match(Cmd, <<"/h">>) =/= nomatch),
     ?assert(binary:match(Cmd, <<"/c">>) =/= nomatch).
+
+%% -----------------------------------------------------------------
+%% Extended volume wire format
+%%
+%% The value of one EK_ATTR_VOLUME TLV is:
+%%   host\0 container\0 flags:u32 clear:u32 prop:u8 rec:u8 dlen:u16 data
+%% -----------------------------------------------------------------
+
+-define(MS_RDONLY,  16#00000001).
+-define(MS_NOSUID,  16#00000002).
+-define(MS_NODEV,   16#00000004).
+-define(MS_NOEXEC,  16#00000008).
+-define(MS_RELATIME, 16#00200000).
+-define(EK_PROP_NONE,    0).
+-define(EK_PROP_PRIVATE, 1).
+-define(EK_PROP_SLAVE,   2).
+
+%% Decode the TLV *value* of an EK_ATTR_VOLUME back into a map.
+%% Mirrors the wire format above; used only by tests to assert on
+%% encoder output without depending on the full TLV decoder.
+decode_volume_value(Bin) ->
+    [Host, Rest0]       = binary:split(Bin, <<0>>),
+    [Cont, Rest1]       = binary:split(Rest0, <<0>>),
+    <<Flags:32/big, Clear:32/big, Prop:8, Rec:8,
+      DLen:16/big, Data:DLen/binary>> = Rest1,
+    #{host => Host, container => Cont,
+      flags => Flags, clear => Clear,
+      propagation => Prop, recursive => Rec, data => Data}.
+
+%% Extract the bytes of the first EK_ATTR_VOLUME TLV from a spawn cmd.
+first_volume_value(Cmd) ->
+    <<_Tag, _Ver, Payload/binary>> = Cmd,
+    find_volume(Payload).
+
+find_volume(<<Type:16/big, Len:16/big, Val:Len/binary, Rest/binary>>) ->
+    case Type of
+        11 -> Val;  %% EK_ATTR_VOLUME
+        _  -> find_volume(Rest)
+    end;
+find_volume(_) ->
+    error(no_volume_tlv).
+
+resolve_volume_opts_string_test() ->
+    %% String-based opts: flags populated, data empty.
+    Opts = erlkoenig_proto:resolve_volume(
+             #{host => <<"/h">>, container => <<"/c">>,
+               opts => <<"ro,nosuid,nodev,noexec">>}),
+    Want = ?MS_RDONLY bor ?MS_NOSUID bor ?MS_NODEV bor ?MS_NOEXEC,
+    ?assertEqual(Want, maps:get(flags, Opts)),
+    ?assertEqual(<<>>, maps:get(data, Opts)).
+
+resolve_volume_opts_with_data_test() ->
+    Opts = erlkoenig_proto:resolve_volume(
+             #{host => <<"/h">>, container => <<"/c">>,
+               opts => <<"nosuid,size=64m,mode=0755">>}),
+    ?assertEqual(?MS_NOSUID, maps:get(flags, Opts)),
+    ?assertEqual(<<"size=64m,mode=0755">>, maps:get(data, Opts)).
+
+resolve_volume_opts_propagation_test() ->
+    Opts = erlkoenig_proto:resolve_volume(
+             #{host => <<"/h">>, container => <<"/c">>,
+               opts => <<"rslave">>}),
+    ?assertEqual(slave, maps:get(propagation, Opts)),
+    ?assertEqual(true,  maps:get(recursive, Opts)).
+
+resolve_volume_legacy_read_only_test() ->
+    %% No opts string — legacy boolean still works.
+    Opts = erlkoenig_proto:resolve_volume(
+             #{host => <<"/h">>, container => <<"/c">>, read_only => true}),
+    ?assertEqual(?MS_RDONLY, maps:get(flags, Opts)).
+
+resolve_volume_legacy_u32_test() ->
+    %% Legacy callers pass `opts: integer()` with the ro bit set.
+    Opts = erlkoenig_proto:resolve_volume(
+             #{host => <<"/h">>, container => <<"/c">>, opts => 16#01}),
+    ?assertEqual(?MS_RDONLY, maps:get(flags, Opts)).
+
+resolve_volume_opts_wins_over_read_only_test() ->
+    %% Both set: opts string is canonical, read_only is ignored.
+    Opts = erlkoenig_proto:resolve_volume(
+             #{host => <<"/h">>, container => <<"/c">>,
+               opts => <<"rw">>, read_only => true}),
+    ?assertEqual(0, maps:get(flags, Opts) band ?MS_RDONLY).
+
+resolve_volume_invalid_opts_raises_test() ->
+    ?assertError({invalid_mount_opts, {unknown_flag, <<"nosudi">>}, _},
+                 erlkoenig_proto:resolve_volume(
+                   #{host => <<"/h">>, container => <<"/c">>,
+                     opts => <<"nosudi">>})).
+
+resolve_volume_default_test() ->
+    Opts = erlkoenig_proto:resolve_volume(
+             #{host => <<"/h">>, container => <<"/c">>}),
+    ?assertEqual(0, maps:get(flags, Opts)),
+    ?assertEqual(none, maps:get(propagation, Opts)),
+    ?assertEqual(<<>>, maps:get(data, Opts)).
+
+encode_volume_tlv_shape_test() ->
+    %% End-to-end: string opts survive through the wire shape.
+    Bin = erlkoenig_proto:encode_volume_tlv(
+            #{host => <<"/srv/data">>, container => <<"/data">>,
+              opts => <<"ro,nosuid">>}),
+    V = decode_volume_value(Bin),
+    ?assertEqual(<<"/srv/data">>, maps:get(host, V)),
+    ?assertEqual(<<"/data">>, maps:get(container, V)),
+    ?assertEqual(?MS_RDONLY bor ?MS_NOSUID, maps:get(flags, V)),
+    ?assertEqual(?EK_PROP_NONE, maps:get(propagation, V)),
+    ?assertEqual(0, maps:get(recursive, V)),
+    ?assertEqual(<<>>, maps:get(data, V)).
+
+encode_volume_tlv_with_data_test() ->
+    Bin = erlkoenig_proto:encode_volume_tlv(
+            #{host => <<"tmpfs">>, container => <<"/tmp">>,
+              opts => <<"nosuid,size=64m">>}),
+    V = decode_volume_value(Bin),
+    ?assertEqual(?MS_NOSUID, maps:get(flags, V)),
+    ?assertEqual(<<"size=64m">>, maps:get(data, V)).
+
+encode_volume_tlv_propagation_test() ->
+    Bin = erlkoenig_proto:encode_volume_tlv(
+            #{host => <<"/a">>, container => <<"/b">>,
+              opts => <<"rslave">>}),
+    V = decode_volume_value(Bin),
+    ?assertEqual(?EK_PROP_SLAVE, maps:get(propagation, V)),
+    ?assertEqual(1, maps:get(recursive, V)).
+
+encode_volume_tlv_legacy_boolean_test() ->
+    Bin = erlkoenig_proto:encode_volume_tlv(
+            #{host => <<"/a">>, container => <<"/b">>, read_only => true}),
+    V = decode_volume_value(Bin),
+    ?assertEqual(?MS_RDONLY, maps:get(flags, V)),
+    ?assertEqual(<<>>, maps:get(data, V)).
+
+encode_volume_tlv_legacy_u32_zero_test() ->
+    %% opts => 0 from the 11-arg legacy API — should produce a clean
+    %% default (no flags, no data).
+    Bin = erlkoenig_proto:encode_volume_tlv(
+            #{host => <<"/a">>, container => <<"/b">>, opts => 0}),
+    V = decode_volume_value(Bin),
+    ?assertEqual(0, maps:get(flags, V)),
+    ?assertEqual(<<>>, maps:get(data, V)).
+
+encode_cmd_spawn_volume_struct_test() ->
+    %% The wire format inside a full CMD_SPAWN matches the struct.
+    Cmd = erlkoenig_proto:encode_cmd_spawn(#{
+        path => <<"/app">>,
+        volumes => [#{host => <<"/srv">>, container => <<"/srv">>,
+                      opts => <<"ro,nosuid,relatime">>}]
+    }),
+    V = decode_volume_value(first_volume_value(Cmd)),
+    Want = ?MS_RDONLY bor ?MS_NOSUID bor ?MS_RELATIME,
+    ?assertEqual(Want, maps:get(flags, V)).
 
 %% =================================================================
 %% Handshake tests

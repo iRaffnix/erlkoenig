@@ -133,24 +133,64 @@ get_ifindex(Sock, Name) ->
         Error -> Error
     end.
 
-%% Create a dummy interface if it doesn't already exist.
-%% Assigns the gateway IP (.1) and brings it UP.
+%% Create a dummy parent + host-side IPVLAN slave.
+%%
+%% The dummy itself stays bare (no IP). The gateway IP (.1) lives on a
+%% host-side IPVLAN L3S slave of that dummy, in the host netns. This
+%% makes host→container packets work: the host routes via the host slave,
+%% the kernel IPVLAN code forwards to whichever container netns owns the
+%% destination IP. Packets on a dummy alone get silently discarded.
+%%
+%% Host slave naming: `h.<dummy>' — must fit IFNAMSIZ (15 bytes incl. NUL).
 -spec ensure_dummy(binary(), inet:ip4_address(), non_neg_integer()) -> ok.
 ensure_dummy(Name, {A, B, C, _}, Netmask) ->
     NameStr = binary_to_list(Name),
-    case filelib:is_dir("/sys/class/net/" ++ NameStr) of
-        true ->
-            logger:info("[zone_link_ipvlan] dummy ~s already exists", [Name]),
+    HostSlave = host_slave_name(Name),
+    HostSlaveStr = binary_to_list(HostSlave),
+    DummyExists = filelib:is_dir("/sys/class/net/" ++ NameStr),
+    HostSlaveExists = filelib:is_dir("/sys/class/net/" ++ HostSlaveStr),
+    case {DummyExists, HostSlaveExists} of
+        {true, true} ->
+            logger:info("[zone_link_ipvlan] dummy ~s + host slave ~s already exist",
+                        [Name, HostSlave]),
             ok;
-        false ->
-            logger:info("[zone_link_ipvlan] creating dummy ~s (~b.~b.~b.1/~b)",
-                        [Name, A, B, C, Netmask]),
-            GwIp = io_lib:format("~b.~b.~b.1/~b", [A, B, C, Netmask]),
+        {true, false} ->
+            %% Legacy layout: dummy with IP directly on it. Remove the IP
+            %% from the dummy (if present) and reinstall on a fresh host
+            %% slave. The dummy itself stays.
+            logger:info("[zone_link_ipvlan] migrating ~s to host-slave layout", [Name]),
+            GwCidr = io_lib:format("~b.~b.~b.1/~b", [A, B, C, Netmask]),
+            _ = os:cmd("ip addr flush dev " ++ NameStr ++ " 2>&1"),
+            create_host_slave(NameStr, HostSlaveStr, lists:flatten(GwCidr)),
+            ok;
+        {false, _} ->
+            logger:info("[zone_link_ipvlan] creating dummy ~s + host slave ~s (~b.~b.~b.1/~b)",
+                        [Name, HostSlave, A, B, C, Netmask]),
+            GwCidr = io_lib:format("~b.~b.~b.1/~b", [A, B, C, Netmask]),
             os_cmd_ok("ip link add " ++ NameStr ++ " type dummy"),
-            os_cmd_ok("ip addr add " ++ lists:flatten(GwIp) ++ " dev " ++ NameStr),
             os_cmd_ok("ip link set " ++ NameStr ++ " up"),
+            create_host_slave(NameStr, HostSlaveStr, lists:flatten(GwCidr)),
             ok
     end.
+
+%% Host slave name: `h.<dummy>'. Fail loud if it won't fit IFNAMSIZ.
+-spec host_slave_name(binary()) -> binary().
+host_slave_name(DummyName) ->
+    Candidate = <<"h.", DummyName/binary>>,
+    case byte_size(Candidate) of
+        N when N =< 15 -> Candidate;
+        N ->
+            error({dummy_name_too_long_for_host_slave, DummyName, N, max_13})
+    end.
+
+-spec create_host_slave(string(), string(), string()) -> ok.
+create_host_slave(DummyStr, HostSlaveStr, GwCidr) ->
+    %% Use `ip' for slave creation — terse, well-supported for IPVLAN L3S.
+    os_cmd_ok("ip link add link " ++ DummyStr ++ " name " ++ HostSlaveStr ++
+              " type ipvlan mode l3s"),
+    os_cmd_ok("ip addr add " ++ GwCidr ++ " dev " ++ HostSlaveStr),
+    os_cmd_ok("ip link set " ++ HostSlaveStr ++ " up"),
+    ok.
 
 -spec os_cmd_ok(string()) -> ok.
 os_cmd_ok(Cmd) ->

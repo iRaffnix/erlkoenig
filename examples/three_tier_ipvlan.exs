@@ -33,12 +33,14 @@ defmodule ThreeTierIpvlan do
 
   # ── 1. Container ─────────────────────────────────────
 
-  pod "web", strategy: :one_for_one do
+  pod "three_tier", strategy: :one_for_one do
     container "nginx",
       binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
       args: ["8443"],
       limits: %{memory: 268_435_456, pids: 100},
-      restart: :always do
+      zone: "containers",
+      replicas: 3,
+      restart: :permanent do
 
       publish interval: 2000 do
         metric :memory
@@ -51,28 +53,28 @@ defmodule ThreeTierIpvlan do
         channel :stderr
       end
     end
-  end
 
-  pod "app", strategy: :one_for_one do
     container "api",
       binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
       args: ["4000"],
       limits: %{memory: 536_870_912, pids: 200},
-      restart: {:on_failure, 5} do
+      zone: "containers",
+      replicas: 1,
+      restart: :transient do
 
       publish interval: 2000 do
         metric :memory
         metric :cpu
       end
     end
-  end
 
-  pod "data", strategy: :one_for_one do
     container "postgres",
       binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
       args: ["5432"],
       limits: %{memory: 1_073_741_824, pids: 50},
-      restart: :always do
+      zone: "containers",
+      replicas: 1,
+      restart: :permanent do
 
       publish interval: 5000 do
         metric :memory
@@ -145,9 +147,4 @@ defmodule ThreeTierIpvlan do
     end
   end
 
-  # ── 4. Deployment ────────────────────────────────────
-
-  attach "web",  to: "containers", replicas: 3
-  attach "app",  to: "containers", replicas: 1
-  attach "data", to: "containers", replicas: 1
 end

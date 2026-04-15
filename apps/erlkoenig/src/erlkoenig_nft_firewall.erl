@@ -859,7 +859,7 @@ build_rule(Table, Chain, {log_drop_nflog, Prefix, Group, Counter}, _Config) ->
 %% Log drop without counter
 build_rule(Table, Chain, {log_drop, Prefix}, _Config) ->
     encode_rule(Table, Chain, nft_rules:log_drop(Prefix));
-%% Accept on named interface (e.g. <<"wg0">>, <<"br0">>)
+%% Accept on named interface (e.g. <<"wg0">>, <<"eth0">>)
 build_rule(Table, Chain, {iifname_accept, Name}, _Config) ->
     encode_rule(Table, Chain, nft_rules:iifname_accept(Name));
 %% TCP reject with RST

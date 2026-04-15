@@ -35,9 +35,6 @@ test_container_info() ->
         ip => {10, 0, 1, 2},
         netns => <<"/proc/12345/ns/net">>,
         cgroup => <<"/sys/fs/cgroup/erlkoenig/test">>,
-        veth_host => <<"veth_test_h">>,
-        veth_container => <<"veth_test_c">>,
-        bridge => <<"ek_br_default">>,
         zone => default,
         binary_path => <<"/opt/test/binary">>,
         config => #{name => <<"test">>},
@@ -202,9 +199,6 @@ register_with_full_info({_Pid, _TmpDir, _DetsPath}) ->
         ?assertEqual({10, 0, 1, 2}, maps:get(ip, Got)),
         ?assertEqual(default, maps:get(zone, Got)),
         ?assertEqual(socket, maps:get(comm_mode, Got)),
-        ?assertEqual(<<"veth_test_h">>, maps:get(veth_host, Got)),
-        ?assertEqual(<<"veth_test_c">>, maps:get(veth_container, Got)),
-        ?assertEqual(<<"ek_br_default">>, maps:get(bridge, Got)),
         ?assertEqual(<<"/opt/test/binary">>, maps:get(binary_path, Got))
     end.
 

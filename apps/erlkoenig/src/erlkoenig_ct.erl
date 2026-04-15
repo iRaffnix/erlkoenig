@@ -37,6 +37,8 @@ States:
 
 -behaviour(gen_statem).
 
+-include("erlkoenig_error.hrl").
+
 %% API
 -export([start_link/2,
          start_recovering/2,
@@ -304,6 +306,12 @@ creating_do_spawn(#ct_data{id = ContainerId} = Data) ->
                 socket_path = SocketPath
             }, [{state_timeout, ?SPAWN_TIMEOUT, spawn_timeout}]};
         {error, Reason} ->
+            erlkoenig_error:emit(
+              ?EK_ERROR(runtime, socket_connect_failed,
+                        "wait_and_connect to erlkoenig_rt socket",
+                        #{socket_path => SocketPath, reason => Reason,
+                          timeout_ms  => 10000}),
+              Data#ct_data.id),
             {next_state, failed,
              Data#ct_data{error_reason = {socket_connect_failed, Reason}}}
     end.
@@ -315,9 +323,10 @@ creating_send_spawn(Data) ->
                  true  -> erlkoenig_proto:spawn_flag_pty();
                  false -> 0
              end,
-    WireVolumes = [#{host => H, container => C,
-                     opts => erlkoenig_proto:volume_opts(V)}
-                   || #{host := H, container := C} = V <- Data#ct_data.volumes],
+    %% Pass volumes through with their full DSL fields intact —
+    %% erlkoenig_proto:encode_volume_tlv/1 runs resolve_volume/1 on
+    %% each to pick up `opts:` strings and `read_only:` booleans.
+    WireVolumes = Data#ct_data.volumes,
     ExtraOpts = Data#ct_data.extra_opts,
     SpawnOpts = #{
         path       => Data#ct_data.binary_path,
@@ -359,9 +368,20 @@ creating_handle_rt_data(Reply, true = _Handshake, Data) ->
             {next_state, namespace_ready,
              Data#ct_data{os_pid = Pid, netns_path = Ns}};
         {ok, reply_error, #{code := Code, message := ErrMsg}} ->
+            erlkoenig_error:emit(
+              ?EK_ERROR(runtime, spawn_failed,
+                        "erlkoenig_rt rejected CMD_SPAWN",
+                        #{code => Code, message => ErrMsg,
+                          binary => Data#ct_data.binary_path}),
+              Data#ct_data.id),
             {next_state, failed,
              Data#ct_data{error_reason = {spawn_failed, Code, ErrMsg}}};
         Other ->
+            erlkoenig_error:emit(
+              ?EK_ERROR(runtime, unexpected_spawn_reply,
+                        "unknown reply to CMD_SPAWN",
+                        #{reply => Other}),
+              Data#ct_data.id),
             {next_state, failed,
              Data#ct_data{error_reason = {unexpected_reply, Other}}}
     end.
@@ -609,6 +629,7 @@ stopped(enter, _OldState, Data) ->
     dns_unregister(Data),
     dets_unregister(Data),
     audit_volumes_released(Data),
+    cleanup_ephemeral_volumes(Data),
     notify_stopped(Data),
     Data2 = Data#ct_data{sock = undefined, fuse_mount = undefined,
                          stats_timers = [], log_publisher = undefined},
@@ -696,6 +717,7 @@ failed(enter, _OldState, Data) ->
     cleanup_socket_file(Data#ct_data.socket_path),
     dns_unregister(Data),
     dets_unregister(Data),
+    cleanup_ephemeral_volumes(Data),
     erlkoenig_events:notify({container_failed, Data#ct_data.id,
                              Data#ct_data.name,
                              Data#ct_data.error_reason}),
@@ -1066,6 +1088,12 @@ do_container_net_setup(#ct_data{id = Id, ip = Ip,
             {next_state, starting, Data2};
         {error, Reason} ->
             _ = erlkoenig_cgroup:destroy(Id),
+            erlkoenig_error:emit(
+              ?EK_ERROR(network, net_setup_failed,
+                        "erlkoenig_net:setup_container_net failed",
+                        #{zone  => Data#ct_data.zone,
+                          reason => Reason}),
+              Id),
             {next_state, failed,
              Data#ct_data{error_reason = {net_setup_failed, Reason}}}
     end.
@@ -1136,6 +1164,11 @@ pod_exit_reason(Data) ->
     end.
 
 -spec validate_restart(term()) -> erlkoenig:restart_policy().
+%% OTP-style aliases (preferred by the DSL, normalized to legacy internal).
+validate_restart(permanent)                             -> always;
+validate_restart(transient)                             -> on_failure;
+validate_restart(temporary)                             -> no_restart;
+%% Legacy names (still used internally throughout the runtime).
 validate_restart(no_restart)                            -> no_restart;
 validate_restart(always)                                -> always;
 validate_restart(on_failure)                            -> on_failure;
@@ -1788,25 +1821,43 @@ audit_volumes_released(#ct_data{id = Id, name = Name, volumes = Volumes}) ->
 -spec resolve_volumes(#ct_data{}) -> #ct_data{}.
 resolve_volumes(#ct_data{volumes = []} = Data) ->
     Data;
-resolve_volumes(#ct_data{volumes = DslVolumes, name = Name, id = Id} = Data) ->
+resolve_volumes(#ct_data{volumes = DslVolumes, name = Name, id = Id,
+                         uid = Uid, gid = Gid} = Data) ->
     ContainerName = case Name of
         undefined -> Id;
         N -> N
     end,
-    case erlkoenig_volume:resolve(ContainerName, DslVolumes) of
+    %% erlkoenig_volume_store:ensure/1 (called from resolve/4) handles
+    %% directory creation + chown under the volumes root. We don't
+    %% need the separate ensure_volume_dir step any more.
+    case erlkoenig_volume:resolve(ContainerName, DslVolumes, Uid, Gid) of
         {ok, Resolved} ->
-            lists:foreach(fun(#{host := HostPath}) ->
-                case erlkoenig_volume:ensure_volume_dir(HostPath) of
-                    ok -> ok;
-                    {error, Reason} ->
-                        logger:warning("container ~s: failed to create volume dir ~s: ~p",
-                                       [Id, HostPath, Reason])
-                end
-            end, Resolved),
             Data#ct_data{volumes = Resolved};
         {error, Reason} ->
-            logger:error("container ~s: volume resolution failed: ~p", [Id, Reason]),
+            logger:error("container ~s: volume resolution failed: ~p",
+                         [Id, Reason]),
             Data
+    end.
+
+%% Destroy ephemeral volumes belonging to this container. Called from
+%% the stopped/failed state entry actions. Persistent volumes are left
+%% alone — they outlive their container by design.
+-spec cleanup_ephemeral_volumes(#ct_data{}) -> ok.
+cleanup_ephemeral_volumes(#ct_data{name = Name, id = Id}) ->
+    ContainerName = case Name of
+        undefined -> Id;
+        N -> N
+    end,
+    case erlkoenig_volume_store:cleanup_ephemeral(ContainerName) of
+        {ok, []} -> ok;
+        {ok, Destroyed} ->
+            logger:info("container ~s: cleaned up ~p ephemeral volume(s): ~p",
+                        [Id, length(Destroyed), Destroyed]),
+            ok;
+        {error, Reason} ->
+            logger:warning("container ~s: ephemeral cleanup failed: ~p",
+                           [Id, Reason]),
+            ok
     end.
 
 -spec build_info(atom(), #ct_data{}) -> erlkoenig:container_info().

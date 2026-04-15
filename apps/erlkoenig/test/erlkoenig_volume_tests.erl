@@ -1,5 +1,9 @@
 %%%-------------------------------------------------------------------
 %%% @doc Unit tests for erlkoenig_volume.
+%%%
+%%% Tests that touch `erlkoenig_volume:resolve/4` need the store
+%%% gen_server running, so we set up a per-test-module tmpdir, point
+%%% the store at it via app env, and shut down cleanly at the end.
 %%% @end
 %%%-------------------------------------------------------------------
 
@@ -8,7 +12,7 @@
 -include_lib("eunit/include/eunit.hrl").
 
 %% =================================================================
-%% validate_persist_name tests
+%% validate_persist_name — pure, no fixtures
 %% =================================================================
 
 validate_persist_name_valid_test_() ->
@@ -39,50 +43,112 @@ validate_persist_name_invalid_test_() ->
                    erlkoenig_volume:validate_persist_name(<<"has space">>))].
 
 %% =================================================================
-%% resolve_host_path tests
+%% resolve/4 — needs the store running with a tmpdir root
 %% =================================================================
 
-resolve_host_path_test() ->
-    ?assertEqual(<<"/var/lib/erlkoenig/volumes/myapp/db">>,
-                 erlkoenig_volume:resolve_host_path(<<"myapp">>, <<"db">>)).
+resolve_test_() ->
+    {setup, fun setup/0, fun cleanup/1,
+     fun(Root) ->
+         [{"empty list returns {ok, []}", ?_test(t_empty())},
+          {"single volume → UUID path, correct fields",
+           ?_test(t_single(Root))},
+          {"read_only flows through", ?_test(t_read_only())},
+          {"read_only defaults to false", ?_test(t_default_read_only())},
+          {"opts string flows through", ?_test(t_opts_string())},
+          {"ephemeral defaults to persistent, overridable",
+           ?_test(t_ephemeral(Root))},
+          {"invalid persist name rejected", ?_test(t_invalid_name())},
+          {"same (container,persist) resolves to same uuid (idempotent)",
+           ?_test(t_idempotent())},
+          {"multiple volumes resolve in order", ?_test(t_multiple())}]
+     end}.
 
-resolve_host_path_with_dashes_test() ->
-    ?assertEqual(<<"/var/lib/erlkoenig/volumes/archive/archive-logs">>,
-                 erlkoenig_volume:resolve_host_path(<<"archive">>, <<"archive-logs">>)).
+setup() ->
+    Root = iolist_to_binary(["/tmp/eunit_ek_vol_",
+                             integer_to_list(erlang:system_time(nanosecond))]),
+    %% The DETS index file lives inside Root; its dir is created for us
+    %% by erlkoenig_volume_store:init/1 via filelib:ensure_dir/1.
+    ok = application:set_env(erlkoenig, volumes_root, Root),
+    case erlkoenig_volume_store:start_link() of
+        {ok, _Pid} -> ok;
+        {error, {already_started, _}} -> ok
+    end,
+    Root.
 
-%% =================================================================
-%% resolve tests
-%% =================================================================
+cleanup(Root) ->
+    case whereis(erlkoenig_volume_store) of
+        undefined -> ok;
+        Pid ->
+            gen_server:stop(Pid, normal, 5000)
+    end,
+    _ = application:unset_env(erlkoenig, volumes_root),
+    _ = file:del_dir_r(binary_to_list(Root)),
+    ok.
 
-resolve_empty_test() ->
-    ?assertEqual({ok, []}, erlkoenig_volume:resolve(<<"app">>, [])).
+t_empty() ->
+    ?assertEqual({ok, []},
+                 erlkoenig_volume:resolve(<<"app">>, [], 1000, 1000)).
 
-resolve_single_test() ->
-    DslVols = [#{container => <<"/data/db">>, persist => <<"db">>, read_only => false}],
-    {ok, [Resolved]} = erlkoenig_volume:resolve(<<"app">>, DslVols),
-    ?assertEqual(<<"/var/lib/erlkoenig/volumes/app/db">>, maps:get(host, Resolved)),
-    ?assertEqual(<<"/data/db">>, maps:get(container, Resolved)),
-    ?assertEqual(<<"db">>, maps:get(persist, Resolved)),
-    ?assertEqual(false, maps:get(read_only, Resolved)).
+t_single(Root) ->
+    DslVols = [#{container => <<"/data/db">>,
+                 persist   => <<"db">>,
+                 read_only => false}],
+    {ok, [R]} = erlkoenig_volume:resolve(<<"app-single">>, DslVols, 1000, 1000),
+    ?assertMatch(<<"ek_vol_", _/binary>>, maps:get(uuid, R)),
+    Host = maps:get(host, R),
+    ?assert(binary:match(Host, Root) =/= nomatch),
+    ?assertEqual(<<"/data/db">>, maps:get(container, R)),
+    ?assertEqual(<<"db">>, maps:get(persist, R)),
+    ?assertEqual(false, maps:get(read_only, R)),
+    ?assertEqual(persistent, maps:get(lifecycle, R)),
+    %% On-disk dir exists
+    ?assert(filelib:is_dir(binary_to_list(Host))).
 
-resolve_readonly_test() ->
-    DslVols = [#{container => <<"/etc/config">>, persist => <<"cfg">>, read_only => true}],
-    {ok, [Resolved]} = erlkoenig_volume:resolve(<<"app">>, DslVols),
-    ?assertEqual(true, maps:get(read_only, Resolved)).
+t_read_only() ->
+    DslVols = [#{container => <<"/etc/config">>,
+                 persist   => <<"cfg">>,
+                 read_only => true}],
+    {ok, [R]} = erlkoenig_volume:resolve(<<"app-ro">>, DslVols, 1000, 1000),
+    ?assertEqual(true, maps:get(read_only, R)).
 
-resolve_default_readonly_test() ->
-    %% read_only defaults to false when not specified
-    DslVols = [#{container => <<"/data">>, persist => <<"data">>}],
-    {ok, [Resolved]} = erlkoenig_volume:resolve(<<"app">>, DslVols),
-    ?assertEqual(false, maps:get(read_only, Resolved)).
+t_default_read_only() ->
+    DslVols = [#{container => <<"/data">>, persist => <<"ddefault">>}],
+    {ok, [R]} = erlkoenig_volume:resolve(<<"app-def">>, DslVols, 1000, 1000),
+    ?assertEqual(false, maps:get(read_only, R)).
 
-resolve_invalid_name_test() ->
-    DslVols = [#{container => <<"/data">>, persist => <<"../bad">>, read_only => false}],
+t_opts_string() ->
+    DslVols = [#{container => <<"/u">>, persist => <<"uploads">>,
+                 opts => <<"rw,nosuid,nodev,noexec">>}],
+    {ok, [R]} = erlkoenig_volume:resolve(<<"app-opts">>, DslVols, 1000, 1000),
+    ?assertEqual(<<"rw,nosuid,nodev,noexec">>, maps:get(opts, R)).
+
+t_ephemeral(_Root) ->
+    Persistent = [#{container => <<"/p">>, persist => <<"persistvol">>}],
+    Ephemeral  = [#{container => <<"/e">>, persist => <<"ephvol">>,
+                    ephemeral => true}],
+    {ok, [P]} = erlkoenig_volume:resolve(<<"app-lc">>, Persistent, 1000, 1000),
+    {ok, [E]} = erlkoenig_volume:resolve(<<"app-lc">>, Ephemeral, 1000, 1000),
+    ?assertEqual(persistent, maps:get(lifecycle, P)),
+    ?assertEqual(ephemeral,  maps:get(lifecycle, E)).
+
+t_invalid_name() ->
+    DslVols = [#{container => <<"/data">>, persist => <<"../bad">>}],
     ?assertEqual({error, invalid_persist_name},
-                 erlkoenig_volume:resolve(<<"app">>, DslVols)).
+                 erlkoenig_volume:resolve(<<"app-bad">>, DslVols, 1000, 1000)).
 
-resolve_multiple_test() ->
-    DslVols = [#{container => <<"/data/db">>, persist => <<"db">>},
-               #{container => <<"/var/log">>, persist => <<"logs">>}],
-    {ok, Resolved} = erlkoenig_volume:resolve(<<"app">>, DslVols),
-    ?assertEqual(2, length(Resolved)).
+t_idempotent() ->
+    DslVols = [#{container => <<"/x">>, persist => <<"idem">>}],
+    {ok, [R1]} = erlkoenig_volume:resolve(<<"app-idem">>, DslVols, 1000, 1000),
+    {ok, [R2]} = erlkoenig_volume:resolve(<<"app-idem">>, DslVols, 1000, 1000),
+    ?assertEqual(maps:get(uuid, R1), maps:get(uuid, R2)),
+    ?assertEqual(maps:get(host, R1), maps:get(host, R2)).
+
+t_multiple() ->
+    DslVols = [#{container => <<"/data/db">>, persist => <<"mdb">>},
+               #{container => <<"/var/log">>, persist => <<"mlogs">>}],
+    {ok, Resolved} = erlkoenig_volume:resolve(<<"app-multi">>, DslVols,
+                                               1000, 1000),
+    ?assertEqual(2, length(Resolved)),
+    [First, Second | _] = Resolved,
+    ?assertEqual(<<"/data/db">>, maps:get(container, First)),
+    ?assertEqual(<<"/var/log">>, maps:get(container, Second)).

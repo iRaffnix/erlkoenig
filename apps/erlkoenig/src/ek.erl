@@ -680,7 +680,7 @@ zones() ->
                     undefined -> "-";
                     GwIp -> format_ip4(GwIp)
                 end,
-                Mode = to_str(maps:get(mode, Net, bridge)),
+                Mode = to_str(maps:get(mode, Net, ipvlan)),
                 io:format("  ~-14s ~-18s ~-16s ~-16s~n",
                           [atom_to_list(Z), Subnet ++ "/" ++ Mask, Gateway, Mode])
             end, ZoneNames),

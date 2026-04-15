@@ -17,8 +17,11 @@ main([]) ->
         _   -> io:format("ERROR: must run as root~n"), halt(1)
     end,
 
+    true = code:add_patha(filename:dirname(escript:script_name())),
+    Root = test_helper:project_root(),
     code:add_pathsz(filelib:wildcard("/opt/erlkoenig/lib/*/ebin")),
-    code:add_pathsz(filelib:wildcard("_build/default/lib/*/ebin")),
+    code:add_pathsz(filelib:wildcard(
+        filename:join(Root, "_build/default/lib/*/ebin"))),
     application:load(erlkoenig),
 
     %% Ensure dummy parent
@@ -26,7 +29,7 @@ main([]) ->
 
     %% 1. Spawn container
     io:format("1. Spawn...~n"),
-    RtPath = find_rt(),
+    RtPath = test_helper:rt_binary(),
     Port = open_port({spawn_executable, RtPath},
                      [{packet, 4}, binary, exit_status, use_stdio]),
     port_command(Port, erlkoenig_proto:encode_handshake()),
@@ -35,7 +38,7 @@ main([]) ->
             ok = erlkoenig_proto:check_handshake_reply(HsReply)
     after 5000 -> io:format("TIMEOUT handshake~n"), halt(1) end,
 
-    DemoBin = list_to_binary(find_demo("echo_server")),
+    DemoBin = test_helper:demo("echo_server"),
     Cmd = erlkoenig_proto:encode_cmd_spawn(DemoBin, [<<"7777">>], [], 0, 0, 0),
     port_command(Port, Cmd),
     OsPid = receive
@@ -133,13 +136,3 @@ cleanup(Port) ->
     receive {Port, {data, _}} -> ok after 5000 -> ok end,
     port_close(Port).
 
-find_rt() ->
-    Paths = ["/usr/lib/erlkoenig/erlkoenig_rt",
-             "/opt/erlkoenig/rt/erlkoenig_rt"],
-    hd([P || P <- Paths, filelib:is_regular(P)]).
-
-find_demo(Name) ->
-    BinName = "test-erlkoenig-" ++ Name,
-    Paths = ["/opt/erlkoenig/rt/demo/" ++ BinName,
-             "/usr/lib/erlkoenig/" ++ BinName],
-    hd([P || P <- Paths, filelib:is_regular(P)]).

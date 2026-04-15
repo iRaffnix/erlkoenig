@@ -49,7 +49,7 @@ defmodule SignedDeployment do
 
   host do
     interface "eth0", zone: :wan
-    bridge "secure", subnet: {10, 0, 0, 0, 24}, uplink: "eth0"
+    ipvlan "secure", parent: {:device, "eth0"}, subnet: {10, 0, 0, 0, 24}
 
     nft_table :inet, "host" do
       nft_set "ban", :ipv4_addr
@@ -76,41 +76,28 @@ defmodule SignedDeployment do
 
     nft_table :inet, "erlkoenig" do
       nft_counter "forward_drop"
-      nft_counter "api_drop"
 
-      # ── 1. DNAT: priority -100 ──────────────────────
-      base_chain "prerouting_nat", hook: :prerouting, type: :nat,
-        priority: :dstnat, policy: :accept do
-        nft_rule :dnat, iifname: "eth0", tcp_dport: 8443,
-          dnat_to: {:replica_ips, "api", "server", 8443}
-      end
-
-      # ── 2. Egress-Chain (jump target) ───────────────
-      # API: darf nur antworten — kein aktiver Outbound
-      nft_chain "from-api" do
-        nft_rule :accept, ct_state: [:established, :related]
-        nft_rule :drop, counter: "api_drop"
-      end
-
-      # ── 3. Forward: priority 0 ──────────────────────
+      # ── 1. Forward: priority 0 ──────────────────────
+      # IPVLAN slaves sind nicht als iifname sichtbar — dispatch per IP.
       base_chain "forward", hook: :forward, type: :filter,
         priority: :filter, policy: :drop do
 
         nft_rule :accept, ct_state: [:established, :related]
-        nft_rule :jump, iifname: {:veth_of, "api", "server"}, to: "from-api"
 
+        # Ingress ins secure-Segment auf TCP 8443 (statt DNAT — Container
+        # sind L3-erreichbar direkt).
         nft_rule :accept,
           iifname: "eth0",
-          ip_daddr: {:replica_ips, "api", "server"},
+          ip_daddr: {10, 0, 0, 0, 24},
           tcp_dport: 8443
 
         nft_rule :drop, log_prefix: "FWD: ", counter: "forward_drop"
       end
 
-      # ── 4. Masquerade: priority +100 ────────────────
+      # ── 2. Masquerade: priority +100 ────────────────
       base_chain "postrouting", hook: :postrouting, type: :nat,
         priority: :srcnat, policy: :accept do
-        nft_rule :masquerade, ip_saddr: {10, 0, 0, 0, 24}, oifname_ne: "secure"
+        nft_rule :masquerade, ip_saddr: {10, 0, 0, 0, 24}, oifname_ne: "eth0"
       end
     end
   end
@@ -121,7 +108,9 @@ defmodule SignedDeployment do
       args: ["--port", "8443", "--tls"],
       limits: %{memory: 536_870_912, pids: 100},
       seccomp: :default,
-      restart: {:on_failure, 3} do
+      zone: "secure",
+      replicas: 2,
+      restart: :transient do
 
       publish interval: 2000 do
         metric :memory
@@ -142,6 +131,4 @@ defmodule SignedDeployment do
       end
     end
   end
-
-  attach "api", to: "secure", replicas: 2
 end

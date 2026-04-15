@@ -11,9 +11,8 @@ defmodule ThreeTier do
   use Erlkoenig.Stack
 
   host do
-    interface "eth0", zone: :wan
-    bridge "dmz", subnet: {10, 0, 0, 0, 24}, uplink: "eth0"
-    bridge "app", subnet: {10, 0, 1, 0, 24}
+    ipvlan "dmz", parent: {:device, "eth0"}, subnet: {10, 0, 0, 0, 24}
+    ipvlan "app", parent: {:dummy,  "ek_app"}, subnet: {10, 0, 1, 0, 24}
 
     nft_table :inet, "erlkoenig" do
       nft_counter "forward_drop"
@@ -21,23 +20,16 @@ defmodule ThreeTier do
       base_chain "forward", hook: :forward, type: :filter,
         priority: :filter, policy: :drop do
         nft_rule :accept, ct_state: [:established, :related]
-        nft_rule :jump, iifname: {:veth_of, "web", "nginx"}, to: "from-web"
         nft_rule :accept,
-          ip_saddr: {:replica_ips, "web", "nginx"},
-          ip_daddr: {:replica_ips, "app", "api"},
+          ip_saddr: {10, 0, 0, 0, 24},
+          ip_daddr: {10, 0, 1, 0, 24},
           tcp_dport: 4000
         nft_rule :drop, counter: "forward_drop"
       end
 
-      nft_chain "from-web" do
-        nft_rule :accept, ct_state: [:established, :related]
-        nft_rule :accept, tcp_dport: 4000
-        nft_rule :drop
-      end
-
       base_chain "postrouting", hook: :postrouting, type: :nat,
         priority: :srcnat, policy: :accept do
-        nft_rule :masquerade, ip_saddr: {10, 0, 0, 0, 24}, oifname_ne: "dmz"
+        nft_rule :masquerade, ip_saddr: {10, 0, 0, 0, 24}, oifname_ne: "eth0"
       end
     end
   end
@@ -47,7 +39,15 @@ defmodule ThreeTier do
       binary: "/opt/nginx",
       args: ["8443"],
       limits: %{memory: 268_435_456, pids: 100},
-      restart: :always do
+      restart: :permanent do
+
+      nft do
+        output do
+          nft_rule :accept, ct_state: [:established, :related]
+          nft_rule :accept, ip_daddr: {10, 0, 1, 0, 24}, tcp_dport: 4000
+          nft_rule :drop
+        end
+      end
 
       publish interval: 2000 do
         metric :memory
@@ -61,7 +61,7 @@ defmodule ThreeTier do
     container "api",
       binary: "/opt/api",
       args: ["4000"],
-      restart: :always
+      restart: :permanent
   end
 
   attach "web", to: "dmz", replicas: 3

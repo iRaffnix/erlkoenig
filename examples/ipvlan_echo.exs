@@ -2,22 +2,16 @@ defmodule IpvlanEcho do
   use Erlkoenig.Stack
 
   # ══════════════════════════════════════════════════════════
-  # IPVLAN Example — Container mit IPVLAN L3S statt Bridge
+  # IPVLAN Example — Slave auf physischem Host-Interface
   # ══════════════════════════════════════════════════════════
   #
-  # Zeigt: IPVLAN statt Bridge, keine MAC-Promiscuity noetig,
-  # Cloud-VPS kompatibel (Hetzner, AWS, etc.).
+  # Zeigt: IPVLAN L3S auf {:device, "eth0"} — keine MAC-Promiscuity,
+  # Cloud-VPS kompatibel (Hetzner, AWS, etc.). Unterschied zu simple_echo:
+  # dort ist Parent ein {:dummy, ...} (keine externe Konnektivität).
   #
-  # Unterschied zu simple_echo.exs:
-  #   bridge "echo", subnet: ...
-  #   →
-  #   ipvlan "edge", parent: "eth0", subnet: ...
-  #
-  # Der Rest ist identisch: Pod, Container, attach.
-  #
-  # Der Parent ("eth0") muss ein bestehendes Host-Interface sein.
+  # Der Parent muss ein bestehendes Host-Interface sein und UP.
   # erlkoenig verwaltet es nicht — es muss vom Operator konfiguriert
-  # und UP sein. IPVLAN-Slaves werden daran angehängt.
+  # sein. IPVLAN-Slaves werden daran angehängt.
   #
   # Starten:
   #   mix run -e '
@@ -38,8 +32,6 @@ defmodule IpvlanEcho do
     container "echo",
       binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
       args: ["7777"],
-      restart: :on_failure
+      zone: "edge", replicas: 1, restart: :transient
   end
-
-  attach "echo", to: "edge", replicas: 1
 end

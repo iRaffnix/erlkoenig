@@ -27,7 +27,9 @@ Usage:
   {ok, Pids} = erlkoenig_config:reload("/etc/erlkoenig/cluster.term").
 """.
 
--export([load/1, validate/1, reload/1, parse/1]).
+-export([load/1, validate/1, reload/1, parse/1, flatten_containers/1]).
+
+-include("erlkoenig_error.hrl").
 
 -ifdef(TEST).
 -export([resolve_host_refs/2, find_all_replica_ips/3]).
@@ -83,8 +85,13 @@ load(TermFile) ->
         erlkoenig_events:notify({config_loaded, TermFile, Config}),
         Result
     else
-        {error, _} = Err ->
+        {error, Reason} = Err ->
             erlkoenig_events:notify({config_failed, TermFile, Err}),
+            erlkoenig_error:emit(
+              ?EK_ERROR(config, config_load_failed,
+                        "erlkoenig_config:load rejected term file",
+                        #{path => unicode:characters_to_binary(TermFile),
+                          reason => Reason})),
             Err
     end.
 
@@ -289,100 +296,79 @@ apply_config_with_reconciliation(OldConfig, Config) ->
 container_names_from_old(undefined) -> [];
 container_names_from_old(Config) -> container_names(Config).
 
-%% Flatten containers from zones or legacy format.
-%% New format: zones may have `deployments` referencing pods.
-%% Pod expansion: each replica gets a unique name and auto-assigned IP.
+%% Flatten containers from pods.
+%%
+%% New term shape (as of the "one pod, inline zone+replicas" DSL refactor):
+%%
+%%   pods     = [#{name, strategy, containers: [#{name, binary, zone, replicas, ...}]}]
+%%   zones    = [#{name, subnet, netmask, network, pool}]   (no `deployments')
+%%
+%% Each container inside a pod carries its own `zone` and `replicas`.
+%% The flat container list is built by expanding each container N times
+%% where N = its replica count.
+%%
+%% A per-zone IP counter is maintained so that containers sharing a zone
+%% across different pods do not collide on IPs.
 -spec flatten_containers(map()) -> [map()].
 flatten_containers(Config) ->
     Pods = maps:get(pods, Config, []),
-    PodMap = maps:from_list([{iolist_to_binary(maps:get(name, P)), P} || P <- Pods]),
-    case maps:find(zones, Config) of
-        {ok, Zones} when is_list(Zones) ->
-            lists:flatmap(fun(Zone) ->
-                flatten_zone_containers(Zone, PodMap)
-            end, Zones);
-        _ ->
-            case maps:find(containers, Config) of
-                {ok, Containers} -> Containers;
-                _ -> []
-            end
+    Zones = maps:get(zones, Config, []),
+    ZoneSubnets = maps:from_list(
+        [{iolist_to_binary(maps:get(name, Z)),
+          zone_subnet_prefix(Z)} || Z <- Zones]),
+
+    %% Iterate pods → containers; expand replicas; one IP counter per zone.
+    {AllContainers, _} = lists:foldl(fun(Pod, {Acc, ZoneIps}) ->
+        PodBin = iolist_to_binary(maps:get(name, Pod)),
+        PodContainers = maps:get(containers, Pod, []),
+        {CtsFromPod, ZoneIps2} = lists:foldl(fun(Ct, {CtAcc, ZIps}) ->
+            {NewCts, ZIps3} = expand_container_replicas(PodBin, Ct, ZoneSubnets, ZIps),
+            {CtAcc ++ NewCts, ZIps3}
+        end, {[], ZoneIps}, PodContainers),
+        {Acc ++ CtsFromPod, ZoneIps2}
+    end, {[], #{}}, Pods),
+
+    %% Fallback: legacy flat `containers` key (no pods, no zones).
+    case {AllContainers, maps:find(containers, Config)} of
+        {[], {ok, Flat}} -> Flat;
+        _                -> AllContainers
     end.
 
-%% Flatten containers from a single zone — handles both old (containers)
-%% and new (deployments) formats.
--spec flatten_zone_containers(map(), map()) -> [map()].
-flatten_zone_containers(#{deployments := Deps} = Zone, PodMap) ->
-    ZoneName = iolist_to_binary(maps:get(name, Zone, <<"default">>)),
-    ZoneAtom = binary_to_atom(ZoneName),
+%% Extract {A, B, C} prefix from a zone's subnet (the /24 part).
+-spec zone_subnet_prefix(map()) -> {byte(), byte(), byte()}.
+zone_subnet_prefix(Zone) ->
     Net = maps:get(network, Zone, #{}),
-    Subnet = maps:get(subnet, Zone, maps:get(subnet, Net, {10, 0, 0, 0})),
-    {Sa, Sb, Sc, _} = Subnet,
+    {A, B, C, _} = maps:get(subnet, Zone, maps:get(subnet, Net, {10, 0, 0, 0})),
+    {A, B, C}.
 
-    %% Expand all deployments, tracking IP counter across pods
-    {AllContainers, _} = lists:foldl(fun(#{pod := PodName, replicas := Replicas}, {Acc, IpCounter}) ->
-        PodBin = iolist_to_binary(PodName),
-        case maps:find(PodBin, PodMap) of
-            {ok, Pod} ->
-                PodContainers = maps:get(containers, Pod, []),
-                {NewCts, NextIp} = expand_replicas(PodBin, PodContainers, Replicas,
-                                                    ZoneAtom, {Sa, Sb, Sc}, IpCounter, Pod),
-                {Acc ++ NewCts, NextIp};
-            error ->
-                logger:warning("erlkoenig_config: unknown pod ~s in zone ~s",
-                               [PodBin, ZoneName]),
-                {Acc, IpCounter}
-        end
-    end, {[], 2}, Deps),
-
-    %% Also include any standalone containers in the zone
-    Standalone = maps:get(containers, Zone, []),
-    StandaloneTagged = [Ct#{zone => ZoneAtom} || Ct <- Standalone],
-
-    AllContainers ++ StandaloneTagged;
-
-flatten_zone_containers(#{containers := Cts} = Zone, _PodMap) ->
-    ZoneName = maps:get(name, Zone, <<"default">>),
-    ZoneAtom = binary_to_atom(iolist_to_binary(ZoneName)),
-    [Ct#{zone => ZoneAtom} || Ct <- Cts];
-
-flatten_zone_containers(_, _) ->
-    [].
-
-%% Expand N replicas of a pod into concrete containers with IPs.
--spec expand_replicas(binary(), [map()], pos_integer(), atom(),
-                      {byte(), byte(), byte()}, pos_integer(), map()) ->
-    {[map()], pos_integer()}.
-expand_replicas(PodName, PodContainers, Replicas, ZoneAtom,
-                {Sa, Sb, Sc}, IpStart, Pod) ->
-    PodChains = maps:get(chains, Pod, []),
-    lists:foldl(fun(ReplicaIdx, {Acc, IpCounter}) ->
-        {Cts, NextIp} = lists:foldl(fun(Ct, {CtAcc, Ip}) ->
-            CtName = maps:get(name, Ct, <<"unnamed">>),
-            %% Name: podname-N-containername
-            FullName = iolist_to_binary([PodName, "-",
-                integer_to_binary(ReplicaIdx), "-",
-                iolist_to_binary(CtName)]),
-            CtIp = {Sa, Sb, Sc, Ip},
-            Expanded = Ct#{
-                name => FullName,
-                ip => CtIp,
-                zone => ZoneAtom,
-                pod => PodName,
-                pod_instance => ReplicaIdx
-            },
-            %% Attach per-container firewall if pod defines it
-            Expanded2 = case maps:find(firewall, Ct) of
-                {ok, _} -> Expanded;
-                error -> Expanded
-            end,
-            {CtAcc ++ [Expanded2], Ip + 1}
-        end, {[], IpCounter}, PodContainers),
-        %% TODO: pod-level chains (forward rules between containers)
-        %% will be applied via erlkoenig_firewall_nft when we implement
-        %% @ref resolution. For now, per-container chains work.
-        _ = PodChains,
-        {Acc ++ Cts, NextIp}
-    end, {[], IpStart}, lists:seq(0, Replicas - 1)).
+%% Expand one container into N replicas, with per-zone IP counters.
+-spec expand_container_replicas(binary(), map(), map(), map()) ->
+    {[map()], map()}.
+expand_container_replicas(PodName, Ct, ZoneSubnets, ZoneIps) ->
+    CtName = maps:get(name, Ct, <<"unnamed">>),
+    Replicas = maps:get(replicas, Ct, 1),
+    ZoneBin = iolist_to_binary(maps:get(zone, Ct)),
+    ZoneAtom = binary_to_atom(ZoneBin),
+    Prefix = case maps:find(ZoneBin, ZoneSubnets) of
+        {ok, P} -> P;
+        error   -> {10, 0, 0}  %% fallback if zone not declared (shouldn't happen)
+    end,
+    IpStart = maps:get(ZoneBin, ZoneIps, 2),
+    {Expanded, NextIp} = lists:foldl(fun(ReplicaIdx, {Acc, Ip}) ->
+        {A, B, C} = Prefix,
+        FullName = iolist_to_binary([PodName, "-",
+                                     integer_to_binary(ReplicaIdx), "-",
+                                     iolist_to_binary(CtName)]),
+        Instance = Ct#{
+            name => FullName,
+            ip => {A, B, C, Ip},
+            zone => ZoneAtom,
+            pod => PodName,
+            pod_instance => ReplicaIdx
+        },
+        {Acc ++ [Instance], Ip + 1}
+    end, {[], IpStart}, lists:seq(0, Replicas - 1)),
+    {Expanded, maps:put(ZoneBin, NextIp, ZoneIps)}.
 
 %% Validate image paths exist on disk
 -spec validate_images(map(), map()) -> map().

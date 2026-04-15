@@ -1,8 +1,9 @@
 # Networking
 
-erlkoenig creates isolated Layer 2 network segments using Linux bridges
-and veth pairs. All network setup happens via pure Netlink calls — no
-`ip` CLI, no shell commands.
+erlkoenig connects containers with **IPVLAN L3S** slaves placed directly into
+the container's network namespace. All link creation runs via pure Netlink
+calls — no `ip` CLI, no shell commands, and no host-side veth pairs (see
+ADR-0020 for the history of the bridge removal).
 
 ## Topology
 
@@ -10,102 +11,113 @@ and veth pairs. All network setup happens via pure Netlink calls — no
                     Internet
                        │
                     ┌──┴──┐
-                    │ eth0 │  (physical interface, zone: :wan)
+                    │ eth0 │  (physical parent, shared by all slaves)
                     └──┬──┘
                        │
-          ┌────────────┼────────────┐
-          │            │            │
-     ┌────┴────┐  ┌────┴────┐  ┌───┴─────┐
-     │   dmz   │  │   app   │  │  data   │  (bridges)
-     │10.0.0/24│  │10.0.1/24│  │10.0.2/24│
-     └────┬────┘  └────┬────┘  └────┬────┘
-          │            │            │
-      ┌───┴───┐    ┌───┴───┐   ┌───┴───┐
-      │vh.web │    │vh.app │   │vh.data│   (host veth)
-      │  0nginx│    │  0api │   │  0pg  │
-      └───┬───┘    └───┬───┘   └───┬───┘
-          │            │            │
-      ┌───┴───┐    ┌───┴───┐   ┌───┴───┐
-      │vp.web │    │vp.app │   │vp.data│   (container veth)
-      │  0nginx│    │  0api │   │  0pg  │
-      │  .0.2  │    │  .1.2 │   │  .2.2 │   (IP from pool)
-      └───────┘    └───────┘   └───────┘
-      namespace    namespace   namespace
+                 ┌─────┼─────┐
+                 │     │     │
+              ┌──┴──┬──┴──┬──┴──┐
+              │slave│slave│slave│   (IPVLAN L3S slaves,
+              │.0.2 │.0.3 │.0.4 │    each in its own netns)
+              └──┬──┴──┬──┴──┬──┘
+                 │     │     │
+              netns  netns  netns
 ```
 
-## Bridges
+Each slave has the same MAC as the parent. The kernel does per-slave L3
+forwarding between them — there is no host-visible host-side interface.
+Container-to-container traffic stays inside the IPVLAN fast path and does
+**not** pass through the host `FORWARD` chain (by design).
 
-Each `bridge` creates a Linux bridge — an isolated Layer 2 broadcast domain.
-Containers attached to the same bridge can communicate directly.
-Traffic between different bridges must pass through the nftables forward chain.
+## Zones
+
+A **zone** is an IPVLAN parent + subnet. It is declared via `ipvlan`:
 
 ```elixir
 host do
-  interface "eth0", zone: :wan
-
-  bridge "dmz",  subnet: {10, 0, 0, 0, 24}, uplink: "eth0"  # internet-facing
-  bridge "app",  subnet: {10, 0, 1, 0, 24}                   # internal only
-  bridge "data", subnet: {10, 0, 2, 0, 24}                   # isolated
+  ipvlan "dmz",  parent: {:device, "eth0"},    subnet: {10, 0, 0, 0, 24}
+  ipvlan "app",  parent: {:dummy,  "ek_app"},  subnet: {10, 0, 1, 0, 24}
+  ipvlan "data", parent: {:dummy,  "ek_data"}, subnet: {10, 0, 2, 0, 24}
 end
 ```
 
-- **Subnet**: `{a, b, c, d, mask}` — IPv4 CIDR notation
-- **Gateway**: automatically `.1` (e.g. `10.0.0.1`)
-- **IP Pool**: `.2` through `.254` — allocated to containers
-- **Uplink**: connects bridge to physical interface (needed for internet access, requires NAT)
+Parent types:
+- `{:device, "eth0"}` — an existing host interface. Traffic exits the box
+  via this link. Required for external connectivity.
+- `{:dummy,  "ek_<name>"}` — erlkoenig auto-creates a kernel `dummy0`
+  parent. The dummy owns the subnet but never sees real traffic; slaves
+  forward to each other via the kernel's IPVLAN code.
 
-## Veth Pairs
+Subnet notation: `{a, b, c, d, mask}` (IPv4 CIDR).
+- `.1` is reserved as gateway (only present for dummy parents).
+- `.2`–`.254` are handed out to containers by the IP pool.
 
-Each container gets a veth pair: one end in the host namespace (attached to
-the bridge), one end in the container namespace.
-
-Naming convention:
-- Host side: `vh.<pod><index><container>` (e.g. `vh.web0nginx`)
-- Container side: `vp.<pod><index><container>` (e.g. `vp.web0nginx`)
-
-In nft rules, `{:veth_of, "pod", "container"}` resolves to the host veth name:
-
-```elixir
-# Matches traffic FROM the nginx container
-nft_rule :jump, iifname: {:veth_of, "web", "nginx"}, to: "from-web-nginx"
-```
+Bare strings as `parent:` are rejected at compile time.
 
 ## IP Allocation
 
-IPs are allocated sequentially from the bridge's pool:
+IPs are allocated sequentially from the zone's pool. Each container inside
+a pod declares its own `zone:` and `replicas:`:
 
 ```elixir
-attach "web", to: "dmz", replicas: 3
+pod "web", strategy: :one_for_one do
+  container "nginx",
+    binary: "/opt/nginx",
+    zone: "dmz", replicas: 3, restart: :permanent
+end
 # web-0-nginx → 10.0.0.2
 # web-1-nginx → 10.0.0.3
 # web-2-nginx → 10.0.0.4
 ```
 
-In nft rules, `{:replica_ips, "pod", "container"}` expands to all replica IPs:
+Because slaves share the parent's MAC and are not visible in the host netns,
+**rules must key on IPs, not interface names**. The DSL keys
+`ip_saddr`/`ip_daddr` take either a single IP or a CIDR tuple:
 
 ```elixir
-# Allows traffic to ALL nginx replicas on port 8443
+# Allow DMZ → APP TCP 4000
 nft_rule :accept,
-  iifname: "eth0",
-  ip_daddr: {:replica_ips, "web", "nginx"},
-  tcp_dport: 8443
+  ip_saddr: {10, 0, 0, 0, 24},   # everything in dmz
+  ip_daddr: {10, 0, 1, 0, 24},   # to everything in app
+  tcp_dport: 4000
 ```
 
-With `replicas: 3`, this generates three individual nft rules — one per IP.
+For per-replica addressing, expand the pool yourself — interface helpers like
+`{:veth_of, ...}` or `{:replica_ips, ...}` are gone (they were bridge-era).
 
 ## NAT / Masquerade
 
-Containers in isolated bridges (no uplink) cannot reach the internet.
-For outbound access, add a masquerade rule in the postrouting chain:
+Containers on a dummy parent cannot reach the internet directly. For outbound
+access, masquerade through the uplink interface:
 
 ```elixir
 base_chain "postrouting", hook: :postrouting, type: :nat,
   priority: :srcnat, policy: :accept do
 
-  # Container traffic leaving the bridge gets source-NAT'd to host IP
-  nft_rule :masquerade, ip_saddr: {10, 0, 0, 0, 24}, oifname_ne: "dmz"
+  nft_rule :masquerade, ip_saddr: {10, 0, 0, 0, 24}, oifname_ne: "eth0"
 end
 ```
+
+## Per-Container Firewall
+
+IPVLAN L3S fires the OUTPUT/INPUT hooks inside the container netns. The DSL
+exposes these via a `nft do ... end` block on a container:
+
+```elixir
+container "nginx", binary: "/opt/nginx", args: ["8443"] do
+  nft do
+    output do
+      nft_rule :accept, ct_state: [:established, :related]
+      nft_rule :accept, ip_daddr: {10, 0, 1, 0, 24}, tcp_dport: 4000
+      nft_rule :drop
+    end
+  end
+end
+```
+
+At container boot the runtime sends `CMD_NFT_SETUP` with the compiled nft
+batch; the C binary calls `setns()` into the container netns and applies the
+rules atomically. See SPEC-EK-023.
 
 ## Zone Reconciliation
 
@@ -113,8 +125,8 @@ When switching between configs (e.g. deploying a different stack file),
 erlkoenig automatically:
 
 1. Stops containers not in the new config
-2. Destroys bridges not in the new config (including Netlink cleanup)
-3. Recreates bridges whose subnet changed
-4. Starts new containers
+2. Recreates zones whose parent or subnet changed (dummy parents only)
+3. Starts new containers
 
-This enables hot reconfiguration without manual cleanup.
+Slaves inside a container netns disappear when the container exits — there
+is no separate host-side cleanup.

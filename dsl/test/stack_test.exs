@@ -24,33 +24,29 @@ defmodule StackTest do
     """)
 
     config = mod.config()
-    assert %{network: %{mode: :ipvlan,
-      netmask: 24}} = config.host
+    assert %{network: %{mode: :ipvlan, netmask: 24}} = config.host
   end
 
-  test "ipvlan generates IP pool .1 and IP pool .2-.254" do
+  test "ipvlan generates IP pool .2-.254" do
     [{mod, _}] = Code.compile_string(~S"""
-    defmodule TestStack.BridgePool do
+    defmodule TestStack.Pool do
       use Erlkoenig.Stack
 
       host do
         ipvlan "net", parent: {:dummy, "ek_net"}, subnet: {192, 168, 5, 0, 24}
       end
 
-      pod "x" do
-        container "c", binary: "/opt/c"
+      pod "x", strategy: :one_for_one do
+        container "c",
+          binary: "/opt/c",
+          zone: "net",
+          replicas: 1,
+          restart: :permanent
       end
-
-      attach "x", to: "net", replicas: 1
     end
     """)
 
-    config = mod.config()
-    net = config.host.network
-    assert net.mode == :ipvlan
-    assert net.netmask == 24
-
-    zone = hd(config.zones)
+    zone = hd(mod.config().zones)
     assert zone.pool == %{start: {192, 168, 5, 2}, stop: {192, 168, 5, 254}}
   end
 
@@ -89,100 +85,314 @@ defmodule StackTest do
     assert eth1.zone == :lan
   end
 
-  test "attach replica naming: pod-index-container" do
+  # ═══════════════════════════════════════════════════════════
+  # pod + container — new inline form
+  # ═══════════════════════════════════════════════════════════
+
+  test "container carries zone and replicas inline" do
     [{mod, _}] = Code.compile_string(~S"""
-    defmodule TestStack.ReplicaNaming do
+    defmodule TestStack.Inline do
       use Erlkoenig.Stack
 
       host do
         ipvlan "net0", parent: {:dummy, "ek0"}, subnet: {10, 0, 0, 0, 24}
       end
 
-      pod "web" do
-        container "nginx", binary: "/opt/nginx"
-        container "sidecar", binary: "/opt/sidecar"
-      end
+      pod "web", strategy: :one_for_one do
+        container "nginx",
+          binary: "/opt/nginx",
+          zone: "net0",
+          replicas: 2,
+          restart: :permanent
 
-      attach "web", to: "net0", replicas: 2
+        container "sidecar",
+          binary: "/opt/sidecar",
+          zone: "net0",
+          replicas: 2,
+          restart: :permanent
+      end
     end
     """)
 
-    zone = hd(mod.config().zones)
-    assert zone.deployments == [%{pod: "web", replicas: 2}]
-    # Pod has 2 containers → 2 replicas = 4 total containers:
-    # web-0-nginx, web-0-sidecar, web-1-nginx, web-1-sidecar
     pod = hd(mod.config().pods)
+    assert pod.name == "web"
     assert length(pod.containers) == 2
-    names = Enum.map(pod.containers, & &1.name)
-    assert names == ["nginx", "sidecar"]
+    nginx = Enum.find(pod.containers, & &1.name == "nginx")
+    assert nginx.zone == "net0"
+    assert nginx.replicas == 2
+    assert nginx.restart == :permanent
   end
 
-  test "pod + attach compiles" do
-    [{mod, _}] = Code.compile_string(~S"""
-    defmodule TestStack.HostAttach do
-      use Erlkoenig.Stack
-
-      host do
-        interface "eth0", zone: :wan
-        ipvlan "net0", parent: {:dummy, "ek0"}, subnet: {10, 0, 0, 0, 24}
-      end
-
-      pod "web" do
-        container "frontend", binary: "/opt/frontend"
-        container "api", binary: "/opt/api"
-      end
-
-      attach "web", to: "net0", replicas: 3
-    end
-    """)
-
-    config = mod.config()
-    assert length(config.zones) == 1
-    zone = hd(config.zones)
-    assert zone.name == "net0"
-    assert zone.deployments == [%{pod: "web", replicas: 3}]
-  end
-
-  test "multi-ipvlan three-tier" do
+  test "multi-ipvlan three-tier: one pod bracket, per-container zones" do
     [{mod, _}] = Code.compile_string(~S"""
     defmodule TestStack.ThreeTier do
       use Erlkoenig.Stack
 
       host do
         interface "eth0", zone: :wan
-        ipvlan "dmz", parent: {:dummy, "ek_dmz"}, subnet: {10, 0, 0, 0, 24}
-        ipvlan "app", parent: {:dummy, "ek_app"}, subnet: {10, 0, 1, 0, 24}
+        ipvlan "dmz",  parent: {:dummy, "ek_dmz"},  subnet: {10, 0, 0, 0, 24}
+        ipvlan "app",  parent: {:dummy, "ek_app"},  subnet: {10, 0, 1, 0, 24}
         ipvlan "data", parent: {:dummy, "ek_data"}, subnet: {10, 0, 2, 0, 24}
       end
 
-      pod "web" do
-        container "nginx", binary: "/opt/nginx"
-      end
+      pod "three_tier", strategy: :one_for_one do
+        container "nginx",
+          binary: "/opt/nginx",
+          zone: "dmz",  replicas: 3, restart: :permanent
 
-      pod "app" do
-        container "api", binary: "/opt/api"
-      end
+        container "api",
+          binary: "/opt/api",
+          zone: "app",  replicas: 2, restart: :permanent
 
-      pod "data" do
-        container "postgres", binary: "/opt/pg"
+        container "postgres",
+          binary: "/opt/pg",
+          zone: "data", replicas: 1, restart: :permanent
       end
-
-      attach "web",  to: "dmz",  replicas: 3
-      attach "app",  to: "app",  replicas: 2
-      attach "data", to: "data", replicas: 1
     end
     """)
 
     config = mod.config()
     assert length(config.zones) == 3
-    names = Enum.map(config.zones, & &1.name)
-    assert "dmz" in names
-    assert "app" in names
-    assert "data" in names
 
-    dmz = Enum.find(config.zones, & &1.name == "dmz")
-    assert dmz.subnet == {10, 0, 0, 0}
-    assert dmz.deployments == [%{pod: "web", replicas: 3}]
+    pod = hd(config.pods)
+    zones_by_ct = Map.new(pod.containers, &{&1.name, &1.zone})
+    assert zones_by_ct == %{"nginx" => "dmz", "api" => "app", "postgres" => "data"}
+
+    replicas_by_ct = Map.new(pod.containers, &{&1.name, &1.replicas})
+    assert replicas_by_ct == %{"nginx" => 3, "api" => 2, "postgres" => 1}
+  end
+
+  test "container zone references unknown ipvlan raises" do
+    assert_raise CompileError, ~r/zone "missing" is not declared/, fn ->
+      Code.compile_string(~S"""
+      defmodule TestStack.BadZone do
+        use Erlkoenig.Stack
+        host do
+          ipvlan "net0", parent: {:dummy, "ek0"}, subnet: {10, 0, 0, 0, 24}
+        end
+        pod "web", strategy: :one_for_one do
+          container "app",
+            binary: "/opt/app",
+            zone: "missing",
+            replicas: 1,
+            restart: :permanent
+        end
+      end
+      """)
+    end
+  end
+
+  test "pod with duplicate container names raises" do
+    assert_raise CompileError, ~r/duplicate container/, fn ->
+      Code.compile_string(~S"""
+      defmodule TestStack.DupCt do
+        use Erlkoenig.Stack
+        host do
+          ipvlan "net0", parent: {:dummy, "ek0"}, subnet: {10, 0, 0, 0, 24}
+        end
+        pod "bad", strategy: :one_for_one do
+          container "web",
+            binary: "/a", zone: "net0", replicas: 1, restart: :permanent
+          container "web",
+            binary: "/b", zone: "net0", replicas: 1, restart: :permanent
+        end
+      end
+      """)
+    end
+  end
+
+  test "pod without containers raises" do
+    assert_raise CompileError, ~r/at least one container/, fn ->
+      Code.compile_string(~S"""
+      defmodule TestStack.EmptyPod do
+        use Erlkoenig.Stack
+        pod "empty", strategy: :one_for_one do
+        end
+      end
+      """)
+    end
+  end
+
+  test "pod strategy is required" do
+    assert_raise CompileError, ~r/strategy: is required/, fn ->
+      Code.compile_string(~S"""
+      defmodule TestStack.NoStrategy do
+        use Erlkoenig.Stack
+        host do
+          ipvlan "net0", parent: {:dummy, "ek0"}, subnet: {10, 0, 0, 0, 24}
+        end
+        pod "web" do
+          container "app",
+            binary: "/opt/app", zone: "net0", replicas: 1, restart: :permanent
+        end
+      end
+      """)
+    end
+  end
+
+  test "pod strategy :one_for_all" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestStack.LinkedPod do
+      use Erlkoenig.Stack
+      host do
+        ipvlan "net0", parent: {:dummy, "ek0"}, subnet: {10, 0, 0, 0, 24}
+      end
+      pod "backend", strategy: :one_for_all do
+        container "db",
+          binary: "/opt/db",  zone: "net0", replicas: 1, restart: :permanent
+        container "api",
+          binary: "/opt/api", zone: "net0", replicas: 1, restart: :permanent
+      end
+    end
+    """)
+
+    pod = hd(mod.config().pods)
+    assert pod.name == "backend"
+    assert pod.strategy == :one_for_all
+    assert length(pod.containers) == 2
+  end
+
+  test "pod strategy :rest_for_one preserves container order" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestStack.OrderedPod do
+      use Erlkoenig.Stack
+      host do
+        ipvlan "net0", parent: {:dummy, "ek0"}, subnet: {10, 0, 0, 0, 24}
+      end
+      pod "pipeline", strategy: :rest_for_one do
+        container "db",
+          binary: "/opt/db",    zone: "net0", replicas: 1, restart: :permanent
+        container "api",
+          binary: "/opt/api",   zone: "net0", replicas: 1, restart: :permanent
+        container "proxy",
+          binary: "/opt/proxy", zone: "net0", replicas: 1, restart: :permanent
+      end
+    end
+    """)
+
+    pod = hd(mod.config().pods)
+    assert pod.strategy == :rest_for_one
+    names = Enum.map(pod.containers, & &1.name)
+    assert names == ["db", "api", "proxy"]
+  end
+
+  test "pod strategy invalid value raises" do
+    assert_raise CompileError, ~r/invalid strategy.*:banana/, fn ->
+      Code.compile_string(~S"""
+      defmodule TestStack.BadStrategy do
+        use Erlkoenig.Stack
+        host do
+          ipvlan "net0", parent: {:dummy, "ek0"}, subnet: {10, 0, 0, 0, 24}
+        end
+        pod "bad", strategy: :banana do
+          container "x",
+            binary: "/opt/x", zone: "net0", replicas: 1, restart: :permanent
+        end
+      end
+      """)
+    end
+  end
+
+  test "container without binary raises" do
+    assert_raise CompileError, ~r/binary.*is required/, fn ->
+      Code.compile_string(~S"""
+      defmodule TestStack.NoBin do
+        use Erlkoenig.Stack
+        host do
+          ipvlan "net0", parent: {:dummy, "ek0"}, subnet: {10, 0, 0, 0, 24}
+        end
+        pod "bad", strategy: :one_for_one do
+          container "web",
+            image: "foo", zone: "net0", replicas: 1, restart: :permanent
+        end
+      end
+      """)
+    end
+  end
+
+  test "container without zone raises" do
+    assert_raise CompileError, ~r/zone.*is required/, fn ->
+      Code.compile_string(~S"""
+      defmodule TestStack.NoZone do
+        use Erlkoenig.Stack
+        host do
+          ipvlan "net0", parent: {:dummy, "ek0"}, subnet: {10, 0, 0, 0, 24}
+        end
+        pod "bad", strategy: :one_for_one do
+          container "web",
+            binary: "/opt/web", replicas: 1, restart: :permanent
+        end
+      end
+      """)
+    end
+  end
+
+  test "container without replicas raises" do
+    assert_raise CompileError, ~r/replicas.*is required/, fn ->
+      Code.compile_string(~S"""
+      defmodule TestStack.NoReplicas do
+        use Erlkoenig.Stack
+        host do
+          ipvlan "net0", parent: {:dummy, "ek0"}, subnet: {10, 0, 0, 0, 24}
+        end
+        pod "bad", strategy: :one_for_one do
+          container "web",
+            binary: "/opt/web", zone: "net0", restart: :permanent
+        end
+      end
+      """)
+    end
+  end
+
+  test "container without restart raises" do
+    assert_raise CompileError, ~r/restart.*is required/, fn ->
+      Code.compile_string(~S"""
+      defmodule TestStack.NoRestart do
+        use Erlkoenig.Stack
+        host do
+          ipvlan "net0", parent: {:dummy, "ek0"}, subnet: {10, 0, 0, 0, 24}
+        end
+        pod "bad", strategy: :one_for_one do
+          container "web",
+            binary: "/opt/web", zone: "net0", replicas: 1
+        end
+      end
+      """)
+    end
+  end
+
+  test "container replicas must be positive integer" do
+    assert_raise CompileError, ~r/replicas.*positive integer/, fn ->
+      Code.compile_string(~S"""
+      defmodule TestStack.BadReplicas do
+        use Erlkoenig.Stack
+        host do
+          ipvlan "net0", parent: {:dummy, "ek0"}, subnet: {10, 0, 0, 0, 24}
+        end
+        pod "bad", strategy: :one_for_one do
+          container "web",
+            binary: "/opt/web", zone: "net0", replicas: 0, restart: :permanent
+        end
+      end
+      """)
+    end
+  end
+
+  test "container invalid restart raises" do
+    assert_raise CompileError, ~r/invalid restart/, fn ->
+      Code.compile_string(~S"""
+      defmodule TestStack.BadRestart do
+        use Erlkoenig.Stack
+        host do
+          ipvlan "net0", parent: {:dummy, "ek0"}, subnet: {10, 0, 0, 0, 24}
+        end
+        pod "bad", strategy: :one_for_one do
+          container "web",
+            binary: "/opt/web", zone: "net0", replicas: 1, restart: :always
+        end
+      end
+      """)
+    end
   end
 
   test "guard compiles" do
@@ -214,202 +424,6 @@ defmodule StackTest do
     assert {127, 0, 0, 1} in guard.whitelist
   end
 
-  test "same pod attached to multiple ipvlans" do
-    [{mod, _}] = Code.compile_string(~S"""
-    defmodule TestStack.MultiAttach do
-      use Erlkoenig.Stack
-
-      host do
-        ipvlan "region_eu", parent: {:dummy, "ek_eu"}, subnet: {10, 1, 0, 0, 24}
-        ipvlan "region_us", parent: {:dummy, "ek_us"}, subnet: {10, 2, 0, 0, 24}
-      end
-
-      pod "worker" do
-        container "fn", binary: "/opt/fn"
-      end
-
-      attach "worker", to: "region_eu", replicas: 3
-      attach "worker", to: "region_us", replicas: 2
-    end
-    """)
-
-    config = mod.config()
-    eu = Enum.find(config.zones, & &1.name == "region_eu")
-    us = Enum.find(config.zones, & &1.name == "region_us")
-
-    assert eu.deployments == [%{pod: "worker", replicas: 3}]
-    assert us.deployments == [%{pod: "worker", replicas: 2}]
-  end
-
-  test "attach references unknown pod raises" do
-    assert_raise CompileError, ~r/unknown pod/, fn ->
-      Code.compile_string(~S"""
-      defmodule TestStack.BadAttach do
-        use Erlkoenig.Stack
-        host do
-          ipvlan "net0", parent: {:dummy, "ek0"}, subnet: {10, 0, 0, 0, 24}
-        end
-        attach "nonexistent", to: "net0", replicas: 1
-      end
-      """)
-    end
-  end
-
-  test "attach references unknown network raises" do
-    assert_raise CompileError, ~r/unknown network/, fn ->
-      Code.compile_string(~S"""
-      defmodule TestStack.BadBridge do
-        use Erlkoenig.Stack
-        pod "web" do
-          container "app", binary: "/opt/app"
-        end
-        host do
-          ipvlan "net0", parent: {:dummy, "ek0"}, subnet: {10, 0, 0, 0, 24}
-        end
-        attach "web", to: "missing", replicas: 1
-      end
-      """)
-    end
-  end
-
-  test "pod with duplicate container names raises" do
-    assert_raise CompileError, ~r/duplicate container/, fn ->
-      Code.compile_string(~S"""
-      defmodule TestStack.DupCt do
-        use Erlkoenig.Stack
-        pod "bad" do
-          container "web", binary: "/a"
-          container "web", binary: "/b"
-        end
-      end
-      """)
-    end
-  end
-
-  test "pod without containers raises" do
-    assert_raise CompileError, ~r/at least one container/, fn ->
-      Code.compile_string(~S"""
-      defmodule TestStack.EmptyPod do
-        use Erlkoenig.Stack
-        pod "empty" do
-        end
-      end
-      """)
-    end
-  end
-
-  test "pod strategy: defaults to one_for_one" do
-    [{mod, _}] = Code.compile_string(~S"""
-    defmodule TestStack.DefaultStrategy do
-      use Erlkoenig.Stack
-      pod "web" do
-        container "app", binary: "/opt/app"
-      end
-    end
-    """)
-
-    pod = hd(mod.config().pods)
-    assert pod.strategy == :one_for_one
-  end
-
-  test "pod strategy: :one_for_all" do
-    [{mod, _}] = Code.compile_string(~S"""
-    defmodule TestStack.LinkedPod do
-      use Erlkoenig.Stack
-      pod "backend", strategy: :one_for_all do
-        container "db", binary: "/opt/db"
-        container "api", binary: "/opt/api"
-      end
-    end
-    """)
-
-    pod = hd(mod.config().pods)
-    assert pod.name == "backend"
-    assert pod.strategy == :one_for_all
-    assert length(pod.containers) == 2
-  end
-
-  test "pod strategy: :rest_for_one preserves container order" do
-    [{mod, _}] = Code.compile_string(~S"""
-    defmodule TestStack.OrderedPod do
-      use Erlkoenig.Stack
-      pod "pipeline", strategy: :rest_for_one do
-        container "db", binary: "/opt/db"
-        container "api", binary: "/opt/api"
-        container "proxy", binary: "/opt/proxy"
-      end
-    end
-    """)
-
-    pod = hd(mod.config().pods)
-    assert pod.strategy == :rest_for_one
-    names = Enum.map(pod.containers, & &1.name)
-    assert names == ["db", "api", "proxy"]
-  end
-
-  test "pod strategy: invalid value raises" do
-    assert_raise CompileError, ~r/invalid strategy.*:banana/, fn ->
-      Code.compile_string(~S"""
-      defmodule TestStack.BadStrategy do
-        use Erlkoenig.Stack
-        pod "bad", strategy: :banana do
-          container "x", binary: "/opt/x"
-        end
-      end
-      """)
-    end
-  end
-
-  test "mixed strategies in one stack" do
-    [{mod, _}] = Code.compile_string(~S"""
-    defmodule TestStack.MixedStrategies do
-      use Erlkoenig.Stack
-
-      host do
-        ipvlan "net0", parent: {:dummy, "ek0"}, subnet: {10, 0, 0, 0, 24}
-      end
-
-      pod "db", strategy: :one_for_all do
-        container "primary", binary: "/opt/pg"
-        container "replica", binary: "/opt/pg"
-      end
-
-      pod "workers" do
-        container "fn", binary: "/opt/fn"
-      end
-
-      pod "pipeline", strategy: :rest_for_one do
-        container "ingest", binary: "/opt/ingest"
-        container "process", binary: "/opt/proc"
-        container "export", binary: "/opt/export"
-      end
-
-      attach "db", to: "net0", replicas: 1
-      attach "workers", to: "net0", replicas: 5
-      attach "pipeline", to: "net0", replicas: 1
-    end
-    """)
-
-    config = mod.config()
-    strategies = Map.new(config.pods, &{&1.name, &1.strategy})
-    assert strategies["db"] == :one_for_all
-    assert strategies["workers"] == :one_for_one
-    assert strategies["pipeline"] == :rest_for_one
-  end
-
-  test "pod container without binary raises" do
-    assert_raise CompileError, ~r/missing binary/, fn ->
-      Code.compile_string(~S"""
-      defmodule TestStack.NoBin do
-        use Erlkoenig.Stack
-        pod "bad" do
-          container "web", image: "foo"
-        end
-      end
-      """)
-    end
-  end
-
   # ═══════════════════════════════════════════════════════════
   # publish block tests (SPEC-EK-007)
   # ═══════════════════════════════════════════════════════════
@@ -418,8 +432,13 @@ defmodule StackTest do
     [{mod, _}] = Code.compile_string(~S"""
     defmodule TestStack.PublishSingle do
       use Erlkoenig.Stack
-      pod "web" do
-        container "nginx", binary: "/opt/nginx" do
+      host do
+        ipvlan "net", parent: {:dummy, "ek"}, subnet: {10, 0, 0, 0, 24}
+      end
+      pod "web", strategy: :one_for_one do
+        container "nginx",
+          binary: "/opt/nginx",
+          zone: "net", replicas: 1, restart: :permanent do
           publish interval: 2000 do
             metric :memory
             metric :cpu
@@ -438,8 +457,13 @@ defmodule StackTest do
     [{mod, _}] = Code.compile_string(~S"""
     defmodule TestStack.PublishMulti do
       use Erlkoenig.Stack
-      pod "web" do
-        container "nginx", binary: "/opt/nginx" do
+      host do
+        ipvlan "net", parent: {:dummy, "ek"}, subnet: {10, 0, 0, 0, 24}
+      end
+      pod "web", strategy: :one_for_one do
+        container "nginx",
+          binary: "/opt/nginx",
+          zone: "net", replicas: 1, restart: :permanent do
           publish interval: 1000 do
             metric :memory
             metric :cpu
@@ -466,8 +490,13 @@ defmodule StackTest do
     [{mod, _}] = Code.compile_string(~S"""
     defmodule TestStack.NoPublish do
       use Erlkoenig.Stack
-      pod "web" do
-        container "nginx", binary: "/opt/nginx"
+      host do
+        ipvlan "net", parent: {:dummy, "ek"}, subnet: {10, 0, 0, 0, 24}
+      end
+      pod "web", strategy: :one_for_one do
+        container "nginx",
+          binary: "/opt/nginx",
+          zone: "net", replicas: 1, restart: :permanent
       end
     end
     """)
@@ -482,8 +511,13 @@ defmodule StackTest do
       Code.compile_string(~S"""
       defmodule TestStack.PublishTooFast do
         use Erlkoenig.Stack
-        pod "web" do
-          container "nginx", binary: "/opt/nginx" do
+        host do
+          ipvlan "net", parent: {:dummy, "ek"}, subnet: {10, 0, 0, 0, 24}
+        end
+        pod "web", strategy: :one_for_one do
+          container "nginx",
+            binary: "/opt/nginx",
+            zone: "net", replicas: 1, restart: :permanent do
             publish interval: 500 do
               metric :memory
             end
@@ -499,8 +533,13 @@ defmodule StackTest do
       Code.compile_string(~S"""
       defmodule TestStack.PublishBadMetric do
         use Erlkoenig.Stack
-        pod "web" do
-          container "nginx", binary: "/opt/nginx" do
+        host do
+          ipvlan "net", parent: {:dummy, "ek"}, subnet: {10, 0, 0, 0, 24}
+        end
+        pod "web", strategy: :one_for_one do
+          container "nginx",
+            binary: "/opt/nginx",
+            zone: "net", replicas: 1, restart: :permanent do
             publish interval: 1000 do
               metric :bandwidth
             end
@@ -516,8 +555,13 @@ defmodule StackTest do
       Code.compile_string(~S"""
       defmodule TestStack.PublishDupMetric do
         use Erlkoenig.Stack
-        pod "web" do
-          container "nginx", binary: "/opt/nginx" do
+        host do
+          ipvlan "net", parent: {:dummy, "ek"}, subnet: {10, 0, 0, 0, 24}
+        end
+        pod "web", strategy: :one_for_one do
+          container "nginx",
+            binary: "/opt/nginx",
+            zone: "net", replicas: 1, restart: :permanent do
             publish interval: 1000 do
               metric :memory
               metric :memory
@@ -534,8 +578,13 @@ defmodule StackTest do
       Code.compile_string(~S"""
       defmodule TestStack.PublishEmpty do
         use Erlkoenig.Stack
-        pod "web" do
-          container "nginx", binary: "/opt/nginx" do
+        host do
+          ipvlan "net", parent: {:dummy, "ek"}, subnet: {10, 0, 0, 0, 24}
+        end
+        pod "web", strategy: :one_for_one do
+          container "nginx",
+            binary: "/opt/nginx",
+            zone: "net", replicas: 1, restart: :permanent do
             publish interval: 1000 do
             end
           end
@@ -549,13 +598,20 @@ defmodule StackTest do
     [{mod, _}] = Code.compile_string(~S"""
     defmodule TestStack.PublishMixed do
       use Erlkoenig.Stack
-      pod "stack" do
-        container "nginx", binary: "/opt/nginx" do
+      host do
+        ipvlan "net", parent: {:dummy, "ek"}, subnet: {10, 0, 0, 0, 24}
+      end
+      pod "stack", strategy: :one_for_one do
+        container "nginx",
+          binary: "/opt/nginx",
+          zone: "net", replicas: 1, restart: :permanent do
           publish interval: 2000 do
             metric :memory
           end
         end
-        container "worker", binary: "/opt/worker"
+        container "worker",
+          binary: "/opt/worker",
+          zone: "net", replicas: 1, restart: :permanent
       end
     end
     """)
@@ -574,8 +630,13 @@ defmodule StackTest do
     [{mod, _}] = Code.compile_string(~S"""
     defmodule TestStack.StreamBoth do
       use Erlkoenig.Stack
+      host do
+        ipvlan "net", parent: {:dummy, "ek"}, subnet: {10, 0, 0, 0, 24}
+      end
       pod "web", strategy: :one_for_one do
-        container "api", binary: "/opt/api" do
+        container "api",
+          binary: "/opt/api",
+          zone: "net", replicas: 1, restart: :permanent do
           stream retention: {90, :days} do
             channel :stdout
             channel :stderr
@@ -594,8 +655,13 @@ defmodule StackTest do
     [{mod, _}] = Code.compile_string(~S"""
     defmodule TestStack.StreamStderr do
       use Erlkoenig.Stack
+      host do
+        ipvlan "net", parent: {:dummy, "ek"}, subnet: {10, 0, 0, 0, 24}
+      end
       pod "web", strategy: :one_for_one do
-        container "api", binary: "/opt/api" do
+        container "api",
+          binary: "/opt/api",
+          zone: "net", replicas: 1, restart: :permanent do
           stream retention: {30, :days}, max_bytes: {5, :gb} do
             channel :stderr
           end
@@ -614,8 +680,13 @@ defmodule StackTest do
     [{mod, _}] = Code.compile_string(~S"""
     defmodule TestStack.StreamDefault do
       use Erlkoenig.Stack
+      host do
+        ipvlan "net", parent: {:dummy, "ek"}, subnet: {10, 0, 0, 0, 24}
+      end
       pod "web", strategy: :one_for_one do
-        container "api", binary: "/opt/api" do
+        container "api",
+          binary: "/opt/api",
+          zone: "net", replicas: 1, restart: :permanent do
           stream do
             channel :stdout
           end
@@ -633,8 +704,13 @@ defmodule StackTest do
     [{mod, _}] = Code.compile_string(~S"""
     defmodule TestStack.NoStream do
       use Erlkoenig.Stack
+      host do
+        ipvlan "net", parent: {:dummy, "ek"}, subnet: {10, 0, 0, 0, 24}
+      end
       pod "web", strategy: :one_for_one do
-        container "api", binary: "/opt/api"
+        container "api",
+          binary: "/opt/api",
+          zone: "net", replicas: 1, restart: :permanent
       end
     end
     """)
@@ -648,8 +724,13 @@ defmodule StackTest do
       Code.compile_string(~S"""
       defmodule TestStack.StreamBadChannel do
         use Erlkoenig.Stack
+        host do
+          ipvlan "net", parent: {:dummy, "ek"}, subnet: {10, 0, 0, 0, 24}
+        end
         pod "web", strategy: :one_for_one do
-          container "api", binary: "/opt/api" do
+          container "api",
+            binary: "/opt/api",
+            zone: "net", replicas: 1, restart: :permanent do
             stream do
               channel :stdin
             end
@@ -665,8 +746,13 @@ defmodule StackTest do
       Code.compile_string(~S"""
       defmodule TestStack.StreamDupChannel do
         use Erlkoenig.Stack
+        host do
+          ipvlan "net", parent: {:dummy, "ek"}, subnet: {10, 0, 0, 0, 24}
+        end
         pod "web", strategy: :one_for_one do
-          container "api", binary: "/opt/api" do
+          container "api",
+            binary: "/opt/api",
+            zone: "net", replicas: 1, restart: :permanent do
             stream do
               channel :stderr
               channel :stderr
@@ -683,8 +769,13 @@ defmodule StackTest do
       Code.compile_string(~S"""
       defmodule TestStack.StreamEmpty do
         use Erlkoenig.Stack
+        host do
+          ipvlan "net", parent: {:dummy, "ek"}, subnet: {10, 0, 0, 0, 24}
+        end
         pod "web", strategy: :one_for_one do
-          container "api", binary: "/opt/api" do
+          container "api",
+            binary: "/opt/api",
+            zone: "net", replicas: 1, restart: :permanent do
             stream do
             end
           end
@@ -699,8 +790,13 @@ defmodule StackTest do
       Code.compile_string(~S"""
       defmodule TestStack.StreamDouble do
         use Erlkoenig.Stack
+        host do
+          ipvlan "net", parent: {:dummy, "ek"}, subnet: {10, 0, 0, 0, 24}
+        end
         pod "web", strategy: :one_for_one do
-          container "api", binary: "/opt/api" do
+          container "api",
+            binary: "/opt/api",
+            zone: "net", replicas: 1, restart: :permanent do
             stream do
               channel :stdout
             end
@@ -718,8 +814,13 @@ defmodule StackTest do
     [{mod, _}] = Code.compile_string(~S"""
     defmodule TestStack.StreamAndPublish do
       use Erlkoenig.Stack
+      host do
+        ipvlan "net", parent: {:dummy, "ek"}, subnet: {10, 0, 0, 0, 24}
+      end
       pod "web", strategy: :one_for_one do
-        container "api", binary: "/opt/api" do
+        container "api",
+          binary: "/opt/api",
+          zone: "net", replicas: 1, restart: :permanent do
           publish interval: 2000 do
             metric :memory
           end
@@ -735,5 +836,181 @@ defmodule StackTest do
     ct = hd(hd(mod.config().pods).containers)
     assert ct.publish == [%{interval: 2000, metrics: [:memory]}]
     assert ct.stream == %{channels: [:stdout, :stderr], retention_days: 90}
+  end
+
+  # ─── volume macro ───────────────────────────────────────
+
+  test "volume with persist only (rw, no opts)" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestStack.VolPlain do
+      use Erlkoenig.Stack
+      host do
+        ipvlan "net", parent: {:dummy, "ek"}, subnet: {10, 0, 0, 0, 24}
+      end
+      pod "app", strategy: :one_for_one do
+        container "svc",
+          binary: "/opt/svc",
+          zone: "net", replicas: 1, restart: :permanent do
+          volume "/data", persist: "svc-data"
+        end
+      end
+    end
+    """)
+
+    ct = hd(hd(mod.config().pods).containers)
+    assert ct.volumes == [
+      %{container: "/data", persist: "svc-data",
+        read_only: false, ephemeral: false}
+    ]
+  end
+
+  test "ephemeral: true flows into the volume term" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestStack.VolEphemeral do
+      use Erlkoenig.Stack
+      host do
+        ipvlan "net", parent: {:dummy, "ek"}, subnet: {10, 0, 0, 0, 24}
+      end
+      pod "app", strategy: :one_for_one do
+        container "svc",
+          binary: "/opt/svc",
+          zone: "net", replicas: 1, restart: :permanent do
+          volume "/scratch", persist: "scratch", ephemeral: true
+          volume "/data",    persist: "data"
+        end
+      end
+    end
+    """)
+
+    vols = hd(hd(mod.config().pods).containers).volumes
+    [scratch, data] = vols
+    assert scratch.ephemeral == true
+    assert data.ephemeral == false
+  end
+
+  test "ephemeral: non-boolean raises ArgumentError" do
+    assert_raise ArgumentError, ~r/expected a boolean/, fn ->
+      Code.compile_string(~S"""
+      defmodule TestStack.VolBadEphemeral do
+        use Erlkoenig.Stack
+        host do
+          ipvlan "net", parent: {:dummy, "ek"}, subnet: {10, 0, 0, 0, 24}
+        end
+        pod "app", strategy: :one_for_one do
+          container "svc",
+            binary: "/opt/svc",
+            zone: "net", replicas: 1, restart: :permanent do
+            volume "/x", persist: "p", ephemeral: "yes"
+          end
+        end
+      end
+      """)
+    end
+  end
+
+  test "volume with opts string survives into term" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestStack.VolOpts do
+      use Erlkoenig.Stack
+      host do
+        ipvlan "net", parent: {:dummy, "ek"}, subnet: {10, 0, 0, 0, 24}
+      end
+      pod "app", strategy: :one_for_one do
+        container "svc",
+          binary: "/opt/svc",
+          zone: "net", replicas: 1, restart: :permanent do
+          volume "/uploads", persist: "svc-uploads",
+                             opts: "rw,nosuid,nodev,noexec"
+        end
+      end
+    end
+    """)
+
+    ct = hd(hd(mod.config().pods).containers)
+    [vol] = ct.volumes
+    assert vol.container == "/uploads"
+    assert vol.persist == "svc-uploads"
+    assert vol.opts == "rw,nosuid,nodev,noexec"
+  end
+
+  test "volume with read_only: true (legacy boolean)" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestStack.VolRo do
+      use Erlkoenig.Stack
+      host do
+        ipvlan "net", parent: {:dummy, "ek"}, subnet: {10, 0, 0, 0, 24}
+      end
+      pod "app", strategy: :one_for_one do
+        container "svc",
+          binary: "/opt/svc",
+          zone: "net", replicas: 1, restart: :permanent do
+          volume "/etc/app", persist: "svc-cfg", read_only: true
+        end
+      end
+    end
+    """)
+
+    [vol] = hd(hd(mod.config().pods).containers).volumes
+    assert vol.read_only == true
+  end
+
+  test "volume opts: non-binary raises ArgumentError" do
+    assert_raise ArgumentError, ~r/expected a binary string/, fn ->
+      Code.compile_string(~S"""
+      defmodule TestStack.VolBadOpts do
+        use Erlkoenig.Stack
+        host do
+          ipvlan "net", parent: {:dummy, "ek"}, subnet: {10, 0, 0, 0, 24}
+        end
+        pod "app", strategy: :one_for_one do
+          container "svc",
+            binary: "/opt/svc",
+            zone: "net", replicas: 1, restart: :permanent do
+            volume "/x", persist: "p", opts: :not_a_string
+          end
+        end
+      end
+      """)
+    end
+  end
+
+  test "volume outside a container raises CompileError" do
+    assert_raise CompileError, ~r/inside a container block/, fn ->
+      Code.compile_string(~S"""
+      defmodule TestStack.VolStray do
+        use Erlkoenig.Stack
+        host do
+          ipvlan "net", parent: {:dummy, "ek"}, subnet: {10, 0, 0, 0, 24}
+        end
+        pod "app", strategy: :one_for_one do
+          volume "/nope", persist: "nope"
+        end
+      end
+      """)
+    end
+  end
+
+  test "multiple volumes preserve declaration order" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestStack.VolMany do
+      use Erlkoenig.Stack
+      host do
+        ipvlan "net", parent: {:dummy, "ek"}, subnet: {10, 0, 0, 0, 24}
+      end
+      pod "app", strategy: :one_for_one do
+        container "svc",
+          binary: "/opt/svc",
+          zone: "net", replicas: 1, restart: :permanent do
+          volume "/a", persist: "first"
+          volume "/b", persist: "second", read_only: true
+          volume "/c", persist: "third",  opts: "ro,nosuid"
+        end
+      end
+    end
+    """)
+
+    vols = hd(hd(mod.config().pods).containers).volumes
+    assert Enum.map(vols, & &1.container) == ["/a", "/b", "/c"]
+    assert Enum.map(vols, & &1.persist)   == ["first", "second", "third"]
   end
 end

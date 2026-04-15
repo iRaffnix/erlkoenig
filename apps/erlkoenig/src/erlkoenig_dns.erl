@@ -18,12 +18,13 @@
 -moduledoc """
 Built-in DNS server for container service discovery.
 
-Listens on the bridge IP (10.0.0.1:53) for DNS queries.
-Resolves *.erlkoenig names to container IPs, forwards everything
-else to an upstream DNS server.
+Binds per zone on the zone's gateway IP (dummy-parent zones) or on the
+loopback (default zone, IPVLAN without gateway) and listens on port 53.
+Resolves `*.erlkoenig` names to container IPs, forwards everything else
+to an upstream DNS server.
 
-Container names are registered/unregistered via register/2 and
-unregister/1. erlkoenig_ct calls these during lifecycle transitions.
+Container names are registered/unregistered via `register/2` and
+`unregister/1`. `erlkoenig_ct` calls these during lifecycle transitions.
 """.
 
 -behaviour(gen_server).
@@ -37,8 +38,6 @@ unregister/1. erlkoenig_ct calls these during lifecycle transitions.
          terminate/2]).
 
 -define(DNS_PORT, 53).
-%% Legacy default, now overridable via zone config
--define(BRIDGE_IP, {10, 0, 0, 1}).
 
 %% DNS constants
 -define(TYPE_A,     1).

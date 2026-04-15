@@ -19,10 +19,10 @@
 Zone registry and configuration manager.
 
 Reads zone definitions from application env and stores them in
-an ETS table together with service PIDs (bridge, ip_pool, dns).
+an ETS table together with service PIDs (ip_pool, dns).
 
-If no {zones, ...} key is set, a single `default' zone is built
-from the legacy keys bridge_name, subnet, gateway, netmask.
+If no `{zones, ...}` key is set, a single `default` zone is built
+as an IPVLAN L3S zone on a dummy parent (`ek_default`).
 
 This module is purely a registry -- supervision lives in
 erlkoenig_zone_sup.
@@ -47,20 +47,16 @@ erlkoenig_zone_sup.
 -define(TAB, erlkoenig_zones).
 
 -type zone_name()   :: atom().
--type network_config() :: #{mode := bridge,
-                            bridge := binary(),
-                            subnet := inet:ip4_address(),
-                            gateway := inet:ip4_address(),
-                            netmask := 0..32}
-                        | #{mode := ipvlan,
+-type network_config() :: #{mode := ipvlan,
                             parent := binary(),
+                            parent_type => dummy | device,
                             ipvlan_mode := l2 | l3 | l3s,
                             subnet := inet:ip4_address(),
                             gateway := inet:ip4_address() | undefined,
                             netmask := 0..32}.
 -type zone_config() :: #{network := network_config(),
                          policy  := allow_outbound | isolate | strict}.
--type service_type() :: bridge | ip_pool | dns.
+-type service_type() :: ip_pool | dns.
 
 -export_type([zone_name/0, zone_config/0, network_config/0, service_type/0]).
 
@@ -100,8 +96,8 @@ ip_pool(Zone) ->
 dns(Zone) ->
     lookup_service_or_crash(Zone, dns).
 
--doc "Get the network mode for a zone (bridge or ipvlan).".
--spec network_mode(zone_name()) -> bridge | ipvlan.
+-doc "Get the network mode for a zone. Always `ipvlan` (since ADR-0020).".
+-spec network_mode(zone_name()) -> ipvlan.
 network_mode(Zone) ->
     #{network := #{mode := Mode}} = zone_config(Zone),
     Mode.
@@ -129,7 +125,7 @@ link_state(Zone) ->
 default_zone() ->
     default.
 
--doc "Create a new zone at runtime. Starts bridge, ip_pool, dns.".
+-doc "Create a new zone at runtime. Starts ip_pool and dns services.".
 -spec create(zone_name(), zone_config()) -> ok | {error, term()}.
 create(Name, Config) when is_atom(Name), is_map(Config) ->
     gen_server:call(?MODULE, {create_zone, Name, normalize_config(Config)}, 15000).
@@ -168,7 +164,7 @@ handle_call({create_zone, Name, Cfg}, From, State) ->
         _ ->
             true = ets:insert(?TAB, {Name, Cfg}),
             %% Start zone supervisor asynchronously to avoid deadlock:
-            %% bridge init calls register_service back into this gen_server.
+            %% zone children call register_service back into this gen_server.
             spawn_link(fun() ->
                 Result = case erlkoenig_zone_sup:start_zone(Name) of
                     {ok, _Pid} ->
@@ -199,7 +195,6 @@ handle_call({destroy_zone, Name}, _From, State) ->
                 false ->
                     case erlkoenig_zone_sup:stop_zone(Name) of
                         ok ->
-                            ets:delete(?TAB, {Name, bridge}),
                             ets:delete(?TAB, {Name, ip_pool}),
                             ets:delete(?TAB, {Name, dns}),
                             ets:delete(?TAB, Name),
@@ -227,7 +222,7 @@ terminate(_Reason, _State) ->
 %%% Internal
 %%%===================================================================
 
--doc "Load zone configs from app env. Falls back to legacy keys.".
+-doc "Load zone configs from app env. Falls back to a single default zone.".
 -spec load_zones() -> [{zone_name(), zone_config()}].
 load_zones() ->
     case application:get_env(erlkoenig, zones) of
@@ -237,7 +232,7 @@ load_zones() ->
             [build_default_zone()]
     end.
 
--doc "Build a single default zone from legacy flat config keys.".
+-doc "Build the default IPVLAN L3S zone on a dummy parent.".
 -spec build_default_zone() -> {zone_name(), zone_config()}.
 build_default_zone() ->
     Subnet  = application:get_env(erlkoenig, subnet,  {10, 0, 0, 0}),
@@ -255,10 +250,10 @@ build_default_zone() ->
 -doc """
 Ensure all required keys are present, fill in defaults.
 
-Handles three input formats:
-  1. New format: #{network => #{mode => bridge|ipvlan, ...}, ...}
-  2. Legacy format: #{bridge => ..., subnet => ..., ...}
-  3. IPVLAN format: #{network => #{mode => ipvlan, parent => ..., ...}, ...}
+Handles two input formats:
+  1. Full IPVLAN format: `#{network => #{mode => ipvlan, parent => ..., ...}, ...}`
+  2. Legacy flat format: `#{bridge => ..., subnet => ..., ...}` —
+     the `bridge' key (if present) is used as a dummy parent name.
 """.
 -spec normalize_config(map()) -> zone_config().
 normalize_config(#{network := #{mode := ipvlan} = Net} = Cfg) ->

@@ -22,6 +22,7 @@ Routing key schema (v2):
     guard.threat.<event>          — ban, unban
     control.<scope>.<action>      — nft/set operations
     policy.<name>.violation       — policy violations
+    error.<type>.<reason>         — structured runtime/config/io/network errors
 
 Requires: pip install pika
 """

@@ -59,7 +59,9 @@ Replies from the C runtime use a simpler positional format.
          encode_cmd_spawn/10,
          encode_cmd_spawn/11,
          encode_volumes/1,
-         volume_opts/1]).
+         volume_opts/1,
+         resolve_volume/1,
+         encode_volume_tlv/1]).
 
 %% -- Protocol version ---------------------------------------------
 
@@ -294,14 +296,10 @@ encode_cmd_spawn(Opts) when is_map(Opts) ->
         Cpu -> Attrs11 ++ [tlv_u32(?EK_ATTR_CPU_WEIGHT, Cpu)]
     end,
 
-    %% Volumes (each as TLV: "host_path\0container_path\0opts_u32")
+    %% Volumes — extended TLV: see encode_volume_tlv/1 for wire format.
     Volumes = maps:get(volumes, Opts, []),
-    Attrs13 = Attrs12 ++ lists:map(fun(#{host := H, container := C} = V) ->
-        Opt = maps:get(opts, V, 0),
-        HB = iolist_to_binary(H),
-        CB = iolist_to_binary(C),
-        tlv_str(?EK_ATTR_VOLUME, <<HB/binary, 0, CB/binary, 0, Opt:32/big>>)
-    end, Volumes),
+    Attrs13 = Attrs12 ++ [tlv_str(?EK_ATTR_VOLUME, encode_volume_tlv(V))
+                          || V <- Volumes],
 
     msg(?TAG_CMD_SPAWN, Attrs13).
 
@@ -395,8 +393,11 @@ encode_cmd_query_status() ->
 
 -spec encode_cmd_stdin(binary()) -> binary().
 encode_cmd_stdin(Data) ->
-    %% STDIN is raw bytes after Tag+Ver, no TLV
-    <<?TAG_CMD_STDIN, ?PROTOCOL_VERSION, Data/binary>>.
+    %% Wire: Tag + Ver + <<DataLen:16/big, Data/binary>>
+    %% The C runtime's handle_cmd_stdin reads a 16-bit length prefix,
+    %% not a bare payload (see erlkoenig_rt.c::handle_cmd_stdin).
+    DataLen = byte_size(Data),
+    <<?TAG_CMD_STDIN, ?PROTOCOL_VERSION, DataLen:16/big, Data/binary>>.
 
 -spec encode_cmd_resize(non_neg_integer(), non_neg_integer()) -> binary().
 encode_cmd_resize(Rows, Cols) ->
@@ -438,6 +439,14 @@ spawn_flag_pty() -> ?SPAWN_FLAG_PTY.
 %% =================================================================
 
 -spec decode(binary()) -> {ok, atom(), map()} | {error, term()}.
+%% REPLY_STDOUT / REPLY_STDERR are streaming frames: `<<Tag:8, Data/binary>>`
+%% without a version byte (see erlkoenig_rt.c::forward_output). Match them
+%% first, BEFORE the generic TLV decode that would otherwise swallow the
+%% first data byte as a "version" field.
+decode(<<?TAG_REPLY_STDOUT, Data/binary>>) ->
+    decode_tag(?TAG_REPLY_STDOUT, Data);
+decode(<<?TAG_REPLY_STDERR, Data/binary>>) ->
+    decode_tag(?TAG_REPLY_STDERR, Data);
 decode(<<Tag, _Ver, Payload/binary>>) ->
     %% TLV replies: Tag + Version + Payload
     decode_tag(Tag, Payload);
@@ -546,16 +555,116 @@ strip_nulls(Bin) ->
     end.
 
 %% =================================================================
-%% Volume helpers (legacy compat)
+%% Volume helpers
+%%
+%% Wire format (value of a single EK_ATTR_VOLUME TLV):
+%%
+%%   host_path\0 container_path\0
+%%   Flags:u32 Clear:u32 Propagation:u8 Recursive:u8
+%%   DataLen:u16 Data:DataLen/bytes
+%%
+%% Flags / Clear are Linux MS_* bitmasks (see erlkoenig_mount_opts).
+%% Propagation is an enum (EK_PROP_*); 0 = none (inherit parent).
+%% Data is fs-specific passthrough — e.g. "size=64m,mode=0755" for
+%% tmpfs. The kernel / fs driver validates it, we don't.
 %% =================================================================
 
+%% Legacy semantic bit (still recognised on input for back-compat).
 -define(EK_VOLUME_F_READONLY, 16#01).
 
+%% Linux MS_* ABI constant (kept local so we don't depend on the
+%% mount_opts module internals).
+-define(MS_RDONLY, 16#00000001).
+
+%% Propagation wire enum (must stay in sync with the C runtime's
+%% EK_PROP_* values in erlkoenig_proto.h).
+-define(EK_PROP_NONE,       0).
+-define(EK_PROP_PRIVATE,    1).
+-define(EK_PROP_SLAVE,      2).
+-define(EK_PROP_SHARED,     3).
+-define(EK_PROP_UNBINDABLE, 4).
+
+-doc """
+Normalise a list of volumes into the on-wire map shape.
+
+Accepts the DSL's richer input (`opts: binary()`, `read_only: bool`,
+etc.) and returns maps the encode path can consume directly.
+""".
 -spec encode_volumes([map()]) -> [map()].
 encode_volumes(Volumes) ->
-    [#{host => H, container => C, opts => O}
-     || #{host := H, container := C, opts := O} <- Volumes].
+    [V || V <- Volumes, is_map(V)].
 
+-doc """
+Legacy: return a u32 bitmask for a volume, honouring only the
+`read_only:` boolean. Kept so pre-structured callers keep compiling;
+new code should use `resolve_volume/1` which returns the full
+mount-opts struct.
+""".
 -spec volume_opts(map()) -> non_neg_integer().
 volume_opts(#{read_only := true}) -> ?EK_VOLUME_F_READONLY;
 volume_opts(_) -> 0.
+
+-doc """
+Resolve a volume map into a canonical `erlkoenig_mount_opts:opts()`.
+
+Inputs recognised (in order of precedence):
+
+- `opts: iodata()` — a mount-options string, parsed via
+  `erlkoenig_mount_opts:parse/1` (raises on invalid).
+- `opts: integer()` — a legacy u32 flag bitmask; only the
+  `EK_VOLUME_F_READONLY` bit is honoured.
+- `read_only: true` — legacy boolean; maps to MS_RDONLY.
+
+Anything else produces the default (no flags, no propagation, no
+data). If both `opts:` and `read_only:` are present, `opts:` wins —
+the string is the canonical representation.
+""".
+-spec resolve_volume(map()) -> erlkoenig_mount_opts:opts().
+resolve_volume(#{opts := O}) when is_binary(O); is_list(O) ->
+    case erlkoenig_mount_opts:parse(O) of
+        {ok, Parsed} ->
+            Parsed;
+        {error, Reason} ->
+            erlang:error({invalid_mount_opts, Reason, O})
+    end;
+resolve_volume(#{opts := N}) when is_integer(N) ->
+    case N band ?EK_VOLUME_F_READONLY of
+        0 -> erlkoenig_mount_opts:default();
+        _ ->
+            Def = erlkoenig_mount_opts:default(),
+            Def#{flags := ?MS_RDONLY}
+    end;
+resolve_volume(#{read_only := true}) ->
+    Def = erlkoenig_mount_opts:default(),
+    Def#{flags := ?MS_RDONLY};
+resolve_volume(_) ->
+    erlkoenig_mount_opts:default().
+
+-doc """
+Encode the TLV *value* bytes for one volume. See the section header
+above for the wire layout. The caller wraps this in an EK_ATTR_VOLUME
+TLV frame.
+""".
+-spec encode_volume_tlv(map()) -> binary().
+encode_volume_tlv(#{host := H, container := C} = V) ->
+    HB = iolist_to_binary(H),
+    CB = iolist_to_binary(C),
+    #{flags := Flags, clear := Clear, propagation := Prop,
+      recursive := Rec, data := Data} = resolve_volume(V),
+    PropInt = propagation_to_int(Prop),
+    RecInt  = if Rec -> 1; true -> 0 end,
+    DataLen = byte_size(Data),
+    <<HB/binary, 0,
+      CB/binary, 0,
+      Flags:32/big,
+      Clear:32/big,
+      PropInt:8,
+      RecInt:8,
+      DataLen:16/big,
+      Data:DataLen/binary>>.
+
+propagation_to_int(none)       -> ?EK_PROP_NONE;
+propagation_to_int(private)    -> ?EK_PROP_PRIVATE;
+propagation_to_int(slave)      -> ?EK_PROP_SLAVE;
+propagation_to_int(shared)     -> ?EK_PROP_SHARED;
+propagation_to_int(unbindable) -> ?EK_PROP_UNBINDABLE.

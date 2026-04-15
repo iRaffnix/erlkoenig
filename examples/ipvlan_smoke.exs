@@ -19,8 +19,8 @@ defmodule IpvlanSmoke do
     container "server",
       binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
       args: ["7777"],
-      restart: :always
+      zone: "test",
+      replicas: 1,
+      restart: :permanent
   end
-
-  attach "echo", to: "test", replicas: 1
 end

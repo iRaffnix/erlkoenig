@@ -33,7 +33,7 @@ translates rules to Netlink messages via `erlkoenig_nft` — no `nft` CLI involv
                          │
               ┌──────────┼──────────┐
               │          │          │
-         iifname?   ct state?   ip daddr?
+         ip saddr?  ct state?   ip daddr?
               │          │          │
          jump to     accept     accept if
          egress      if est.    port matches
@@ -47,6 +47,10 @@ translates rules to Netlink messages via `erlkoenig_nft` — no `nft` CLI involv
          accept / drop
 ```
 
+Note: IPVLAN slaves are not host-visible, so `iifname` matches won't work
+for container egress dispatch — match by **source IP** via
+`ip_saddr: {:replica_ips, pod, ct}` instead.
+
 ## Two-Level Filtering
 
 ### 1. Egress Chains (what can a container send?)
@@ -55,9 +59,10 @@ Regular chains entered via `jump` from the forward chain.
 Each container gets its own egress chain:
 
 ```elixir
-# Forward chain: route to egress chains based on source veth
-nft_rule :jump, iifname: {:veth_of, "web", "nginx"}, to: "from-web-nginx"
-nft_rule :jump, iifname: {:veth_of, "app", "api"},   to: "from-app-api"
+# Forward chain: route to egress chains based on source IP
+# (IPVLAN slaves have no host-visible interface — key on ip saddr)
+nft_rule :jump, ip_saddr: {:replica_ips, "web", "nginx"}, to: "from-web-nginx"
+nft_rule :jump, ip_saddr: {:replica_ips, "app", "api"},   to: "from-app-api"
 
 # Nginx: may only talk to API on :4000
 nft_chain "from-web-nginx" do
@@ -147,10 +152,10 @@ nft_table :inet, "erlkoenig" do
 
     nft_rule :accept, ct_state: [:established, :related]
 
-    # Egress filters
-    nft_rule :jump, iifname: {:veth_of, "web", "nginx"},    to: "from-web"
-    nft_rule :jump, iifname: {:veth_of, "app", "api"},      to: "from-api"
-    nft_rule :jump, iifname: {:veth_of, "data", "postgres"}, to: "from-db"
+    # Egress filters — dispatch by source IP (IPVLAN slaves invisible on host)
+    nft_rule :jump, ip_saddr: {:replica_ips, "web",  "nginx"},    to: "from-web"
+    nft_rule :jump, ip_saddr: {:replica_ips, "app",  "api"},      to: "from-api"
+    nft_rule :jump, ip_saddr: {:replica_ips, "data", "postgres"}, to: "from-db"
 
     # Allowed paths
     nft_rule :accept, iifname: "eth0",
@@ -185,7 +190,7 @@ nft_table :inet, "erlkoenig" do
 
   base_chain "postrouting", hook: :postrouting, type: :nat,
     priority: :srcnat, policy: :accept do
-    nft_rule :masquerade, ip_saddr: {10, 0, 0, 0, 24}, oifname_ne: "dmz"
+    nft_rule :masquerade, ip_saddr: {10, 0, 0, 0, 24}, oifname_ne: "eth0"
   end
 end
 ```

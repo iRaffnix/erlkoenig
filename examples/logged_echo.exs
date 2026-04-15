@@ -38,7 +38,7 @@ defmodule LoggedEcho do
   #   3. At-most-once — Container-I/O wird nie blockiert
 
   host do
-    bridge "net", subnet: {10, 0, 0, 0, 24}
+    ipvlan "net", parent: {:dummy, "ek_net"}, subnet: {10, 0, 0, 0, 24}
 
     nft_table :inet, "host" do
       nft_set "ban", :ipv4_addr
@@ -69,7 +69,9 @@ defmodule LoggedEcho do
       binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
       args: ["7777"],
       limits: %{memory: 134_217_728, pids: 50},
-      restart: :on_failure do
+      zone: "net",
+      replicas: 1,
+      restart: :transient do
 
       publish interval: 2000 do
         metric :memory
@@ -100,6 +102,4 @@ defmodule LoggedEcho do
       end
     end
   end
-
-  attach "echo", to: "net", replicas: 1
 end

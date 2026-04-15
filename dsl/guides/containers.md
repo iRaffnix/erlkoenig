@@ -22,7 +22,7 @@ creating ──→ namespace_ready ──→ starting ──→ running
 ```
 
 - **creating**: C runtime started via Unix socket, handshake in progress
-- **namespace_ready**: Container PID known, network setup window (veth, IP, cgroup, firewall)
+- **namespace_ready**: Container PID known, network setup window (IPVLAN slave, IP, cgroup, firewall)
 - **starting**: GO command sent, waiting for ack
 - **running**: Container executing, stats timers active
 - **stopping**: SIGTERM sent, waiting for exit (5s timeout → SIGKILL)

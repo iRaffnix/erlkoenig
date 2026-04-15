@@ -48,10 +48,8 @@ batches.
 -define(POSTROUTING_CHAIN, <<"postrouting">>).
 -define(PREROUTING_CHAIN, <<"prerouting">>).
 -define(OUTPUT_CHAIN, <<"output">>).
--define(BRIDGE_NAME, <<"erlkoenig_br0">>).
 -define(SERVER, erlkoenig_nft_srv).
 -define(IP_FORWARD_PATH, "/proc/sys/net/ipv4/ip_forward").
--define(ROUTE_LOCALNET_FMT, "/proc/sys/net/ipv4/conf/~s/route_localnet").
 
 %%====================================================================
 %% Public API
@@ -124,14 +122,14 @@ setup_table() ->
     ]).
 
 -doc """
-Create table with zone-aware masquerade rules.
+Create the shared `erlkoenig` nft table and its forward chain.
 
-Zones is a list of zone config maps:
-  [#{bridge => <<"br0">>, subnet => {10,0,0,0}, netmask => 24,
-     policy => allow_outbound}, ...]
+Zones is a list of zone config maps (kept for API shape, even though
+IPVLAN-only zones do not need masquerade/route_localnet — see ADR-0020):
+  [#{subnet => {10,0,0,0}, netmask => 24, policy => allow_outbound}, ...]
 
-Each zone with policy allow_outbound gets its own masquerade rule.
-Zones with policy isolate or strict get no masquerade.
+Policies `isolate` and `strict` add no additional rules; `allow_outbound`
+still reserves the hook for future per-zone egress rules.
 """.
 -spec setup_table([map()]) -> ok | {error, term()}.
 setup_table(Zones) when is_list(Zones) ->

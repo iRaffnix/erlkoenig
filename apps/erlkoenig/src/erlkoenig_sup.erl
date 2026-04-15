@@ -68,7 +68,7 @@ init([]) ->
     %% erlkoenig_sup (rest_for_one)
     %%   ├── pg scope (erlkoenig_pg)
     %%   ├── erlkoenig_zone (zone registry, must start before zone_sup)
-    %%   ├── erlkoenig_zone_sup (one_for_one, per-zone bridge/pool/dns)
+    %%   ├── erlkoenig_zone_sup (one_for_one, per-zone ip_pool + dns)
     %%   ├── erlkoenig_cgroup
     %%   ├── erlkoenig_events
     %%   ├── erlkoenig_health
@@ -137,6 +137,12 @@ init([]) ->
         type => supervisor,
         shutdown => infinity
     },
+    VolumeStoreSpec = #{
+        id => erlkoenig_volume_store,
+        start => {erlkoenig_volume_store, start_link, []},
+        restart => permanent,
+        type => worker
+    },
     PodSupSupSpec = #{
         id => erlkoenig_pod_sup_sup,
         start => {supervisor, start_link, [{local, erlkoenig_pod_sup_sup}, ?MODULE, pod_sup_sup]},
@@ -144,7 +150,8 @@ init([]) ->
         type => supervisor
     },
     {ok, {SupFlags, [PgSpec, ZoneSpec, ZoneSupSpec, CgroupSpec, EventsSpec,
-                     HealthSpec, AuditSpec, PkiSpec, NftSupSpec, PodSupSupSpec]}};
+                     HealthSpec, AuditSpec, PkiSpec, NftSupSpec,
+                     VolumeStoreSpec, PodSupSupSpec]}};
 
 init(pod_sup_sup) ->
     SupFlags = #{

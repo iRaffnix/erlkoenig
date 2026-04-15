@@ -195,7 +195,7 @@ iif_accept() ->
         nft_expr_ir:accept()
     ].
 
--doc "Accept all traffic on a named interface (e.g. <<\"br0\">>, <<\"wg0\">>).".
+-doc "Accept all traffic on a named interface (e.g. <<\"eth0\">>, <<\"wg0\">>).".
 -spec iifname_accept(binary()) -> rule().
 iifname_accept(Name) ->
     %% iifname is a 16-byte null-padded string

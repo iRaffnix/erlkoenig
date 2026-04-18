@@ -90,6 +90,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+          pattern: release-*
           merge-multiple: true
 
       - uses: actions/checkout@v4
@@ -97,7 +98,9 @@ jobs:
       - name: Prepare release files
         run: |
           mkdir -p release
-          cp artifacts/erlkoenig-*.tar.gz release/
+          echo "=== Downloaded artifacts ==="
+          find artifacts -type f | sort
+          find artifacts -name 'erlkoenig-*.tar.gz' -exec cp {} release/ \;
           cp install.sh release/install.sh
           echo "=== Release files ==="
           ls -lh release/

@@ -1,6 +1,6 @@
 {application, erlkoenig, [
     {description, "Zero-trust container runtime with integrated firewall"},
-    {vsn, "0.6.0"},
+    {vsn, "0.8.0"},
     {registered, [
         %% Orchestrator
         erlkoenig_sup, erlkoenig_zone, erlkoenig_zone_sup,

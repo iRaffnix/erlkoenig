@@ -843,44 +843,54 @@ compile_generic_rule(Verdict, Opts) ->
         {true, _} -> Exprs1;
         {_, true} -> Exprs2;
         _ ->
-            %% Build match expressions (always, regardless of special handlers)
-            Matches = compile_generic_matches(Opts),
-
-            %% Delegate to specific handlers for complex verdict types
+            %% Delegate to specific handlers for complex verdict types.
+            %% Tagged return shapes:
+            %%   {ok, with_matches, Exprs}  — handler already baked in the
+            %%       proto/port match (e.g. tcp_reject, notrack_rule,
+            %%       tcp_dnat). Use Exprs as-is; prepending Matches would
+            %%       duplicate the tcp/udp match. Additional keys like
+            %%       saddr/iif that aren't covered by the handler are
+            %%       rejected at DSL level (or ignored here).
+            %%   {ok, Exprs}                — verdict-only result; the
+            %%       caller must prepend generic matches. This is the path
+            %%       for snat/fib_rpf/connlimit/vmap_* etc.
+            %%   false                      — no special handler; fall
+            %%       through to matches + modifiers + verdict pipeline.
             case compile_generic_special(Verdict, Opts) of
+                {ok, with_matches, SpecialResult} ->
+                    %% Multi-rule (e.g. tcp_accept_limited) and single-rule
+                    %% both supported — handler baked in all needed matches.
+                    SpecialResult;
                 {ok, SpecialResult} ->
-                    %% Special handler builds the verdict part.
-                    %% Some handlers (e.g. tcp_accept_limited) return
-                    %% MULTIPLE rules as [[expr1], [expr2]]. Detect
-                    %% this and prepend generic matches to each sub-rule.
+                    Matches = compile_generic_matches(Opts),
                     case SpecialResult of
                         [H | _] when is_list(H) ->
-                            %% Multi-rule result
                             [Matches ++ R || R <- SpecialResult];
                         _ ->
-                            %% Single rule
                             case Matches of
                                 [] -> SpecialResult;
                                 _  -> Matches ++ SpecialResult
                             end
                     end;
                 false ->
-                    %% Modifiers (counter, limit, log)
+                    %% Matches + Modifiers (counter, limit, log) + Verdict
+                    Matches = compile_generic_matches(Opts),
                     Mods = compile_generic_modifiers(Opts),
-
-                    %% Verdict
                     V = compile_generic_verdict(Verdict, Opts),
-
                     Matches ++ Mods ++ V
             end
     end.
 
-%% Handle rule types that need special compilation (not match+modifier+verdict)
--spec compile_generic_special(atom(), map()) -> {ok, list()} | false.
+%% Handle rule types that need special compilation (not match+modifier+verdict).
+%% `{ok, with_matches, ...}` signals that the handler has already emitted
+%% proto/port match expressions, so compile_generic_rule must NOT prepend
+%% compile_generic_matches — otherwise tcp/udp matches are duplicated.
+-spec compile_generic_special(atom(), map()) ->
+    {ok, list()} | {ok, with_matches, list()} | false.
 compile_generic_special(notrack, #{udp := Port}) ->
-    {ok, nft_rules:notrack_rule(Port, udp)};
+    {ok, with_matches, nft_rules:notrack_rule(Port, udp)};
 compile_generic_special(notrack, #{tcp := Port}) ->
-    {ok, nft_rules:notrack_rule(Port, tcp)};
+    {ok, with_matches, nft_rules:notrack_rule(Port, tcp)};
 compile_generic_special(ct_mark_set, #{value := Value}) ->
     {ok, nft_rules:ct_mark_set(Value)};
 compile_generic_special(ct_mark_match, #{value := Value, verdict := Verdict}) ->
@@ -890,7 +900,7 @@ compile_generic_special(snat, #{addr := Addr, port := Port}) ->
 compile_generic_special(snat, #{addr := Addr}) ->
     {ok, nft_rules:snat_rule(ensure_ip_binary(Addr), 0)};
 compile_generic_special(dnat, #{tcp := MatchPort, addr := Addr, dport := DstPort}) ->
-    {ok, nft_rules:tcp_dnat(MatchPort, ensure_ip_binary(Addr), DstPort)};
+    {ok, with_matches, nft_rules:tcp_dnat(MatchPort, ensure_ip_binary(Addr), DstPort)};
 compile_generic_special(fib_rpf, _) ->
     {ok, nft_rules:fib_rpf_drop()};
 compile_generic_special(connlimit_drop, #{max := Max}) ->
@@ -906,10 +916,10 @@ compile_generic_special(accept, #{tcp_range := {From, To}}) ->
 compile_generic_special(accept, #{protocol := Proto}) ->
     {ok, nft_rules:protocol_accept(Proto)};
 compile_generic_special(reject, #{tcp := Port}) ->
-    {ok, nft_rules:tcp_reject(Port)};
+    {ok, with_matches, nft_rules:tcp_reject(Port)};
 compile_generic_special(accept, #{tcp := Port, counter := Counter, limit := #{rate := Rate, burst := Burst}}) ->
-    {ok, nft_rules:tcp_accept_limited(Port, iolist_to_binary(Counter),
-                                       #{rate => Rate, burst => Burst})};
+    {ok, with_matches, nft_rules:tcp_accept_limited(Port, iolist_to_binary(Counter),
+                                                     #{rate => Rate, burst => Burst})};
 compile_generic_special(dnat_lb, #{targets := Targets, dport := Port,
                                     map_name := MapName, map_id := MapId})
   when is_list(Targets), length(Targets) > 0 ->

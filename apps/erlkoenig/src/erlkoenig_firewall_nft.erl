@@ -364,15 +364,37 @@ remove_container(ContainerId) ->
 
 -doc "Rebuild forward jump + DNAT rules for one container.".
 -spec rebuild_shared_rules(tuple()) -> [fun()].
+%% IPVLAN containers have no host-side veth — dispatch by source/destination
+%% IP instead. Mirrors the branching in add_container/6.
+rebuild_shared_rules({_Id, undefined, Ip, [], Chain2}) ->
+    IpBin = ip_to_binary(Ip),
+    [nft_encode:rule_fun(inet, ?TABLE, ?FORWARD_CHAIN,
+        nft_rules:ip_saddr_jump(IpBin, Chain2)),
+     nft_encode:rule_fun(inet, ?TABLE, ?FORWARD_CHAIN,
+        nft_rules:ip_daddr_jump(IpBin, Chain2))];
+rebuild_shared_rules({_Id, undefined, Ip, Ports, Chain2}) ->
+    %% IPVLAN with port-forwards: same IP-based dispatch; DNAT rules
+    %% below carry the port-forwards as usual.
+    IpBin = ip_to_binary(Ip),
+    [nft_encode:rule_fun(inet, ?TABLE, ?FORWARD_CHAIN,
+        nft_rules:ip_saddr_jump(IpBin, Chain2)),
+     nft_encode:rule_fun(inet, ?TABLE, ?FORWARD_CHAIN,
+        nft_rules:ip_daddr_jump(IpBin, Chain2))] ++
+    rebuild_port_forwards(Ip, Ports);
 rebuild_shared_rules({_Id, Veth, _Ip, [], Chain2}) ->
     [nft_encode:rule_fun(inet, ?TABLE, ?FORWARD_CHAIN,
         nft_rules:iifname_jump(Veth, Chain2))];
 rebuild_shared_rules({_Id, Veth, Ip, Ports, Chain2}) ->
-    IpBin = ip_to_binary(Ip),
     [nft_encode:rule_fun(inet, ?TABLE, ?FORWARD_CHAIN,
         nft_rules:iifname_jump(Veth, Chain2)),
      nft_encode:rule_fun(inet, ?TABLE, ?FORWARD_CHAIN,
         nft_rules:oifname_accept(Veth))] ++
+    rebuild_port_forwards(Ip, Ports).
+
+%% Port-forward rules only — shared between bridge and IPVLAN paths.
+-spec rebuild_port_forwards(inet:ip_address(), [{non_neg_integer(), non_neg_integer()}]) -> [fun()].
+rebuild_port_forwards(Ip, Ports) ->
+    IpBin = ip_to_binary(Ip),
     lists:append([
         [nft_encode:rule_fun(inet, ?TABLE, ?PREROUTING_CHAIN,
             nft_rules:tcp_dnat(HP, IpBin, CP)),
@@ -627,6 +649,9 @@ compile_rule(fib_rpf_drop) ->
 %% Connlimit (full form)
 compile_rule({connlimit_drop, Max}) ->
     nft_rules:connlimit_drop(Max, 0);
+%% Flow offload
+compile_rule({flow_offload, FlowtableName}) ->
+    nft_rules:flow_offload(iolist_to_binary(FlowtableName));
 
 %% Catch-all
 compile_rule(Unknown) ->
@@ -825,11 +850,19 @@ compile_generic_rule(Verdict, Opts) ->
             case compile_generic_special(Verdict, Opts) of
                 {ok, SpecialResult} ->
                     %% Special handler builds the verdict part.
-                    %% Prepend generic matches so IP/interface filters
-                    %% are not silently dropped.
-                    case Matches of
-                        [] -> SpecialResult;
-                        _  -> Matches ++ SpecialResult
+                    %% Some handlers (e.g. tcp_accept_limited) return
+                    %% MULTIPLE rules as [[expr1], [expr2]]. Detect
+                    %% this and prepend generic matches to each sub-rule.
+                    case SpecialResult of
+                        [H | _] when is_list(H) ->
+                            %% Multi-rule result
+                            [Matches ++ R || R <- SpecialResult];
+                        _ ->
+                            %% Single rule
+                            case Matches of
+                                [] -> SpecialResult;
+                                _  -> Matches ++ SpecialResult
+                            end
                     end;
                 false ->
                     %% Modifiers (counter, limit, log)

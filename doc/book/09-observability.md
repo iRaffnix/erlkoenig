@@ -10,10 +10,10 @@ subscribe to the slices they care about.
 
 Inside the BEAM, events flow through `erlkoenig_events` — a gen_event
 manager. Any module calls `erlkoenig_events:notify(Event)` and the
-event is handed to every registered handler. Two handlers ship by
-default: `erlkoenig_event_log` (writes to the Erlang logger) and
-`erlkoenig_amqp_forwarder` (encodes the event and publishes to
-RabbitMQ).
+event is handed to every registered handler. One handler is always present: `erlkoenig_event_log` (writes to the
+Erlang logger). When the AMQP publisher starts and connects to
+RabbitMQ, it dynamically registers `erlkoenig_amqp_forwarder` which
+encodes events and publishes them to the exchange.
 
 The forwarder runs `erlkoenig_amqp_codec:encode/1` on every event.
 That function pattern-matches the event tuple and produces a tuple
@@ -76,13 +76,13 @@ sustained values matter).
 
 The five metric atoms map onto cgroup v2 interfaces:
 
-| Metric         | Payload                                              |
+| Metric         | Payload fields (map)                                 |
 |----------------|------------------------------------------------------|
-| `:memory`      | `{current, peak, max, pct, swap}`                    |
-| `:cpu`         | `{usec, delta_usec, throttled_usec, nr_throttled}`   |
-| `:pids`        | `{current, max}`                                     |
-| `:pressure`    | `{cpu_some_avg10, memory_some_avg10, io_some_avg10}` |
-| `:oom_events`  | `{kills, events, high, max}`                         |
+| `:memory`      | `current, peak, max, pct, swap`                      |
+| `:cpu`         | `usec, delta_usec, throttled_usec, nr_throttled`     |
+| `:pids`        | `current, max`                                       |
+| `:pressure`    | `cpu_some_avg10, cpu_some_avg60, memory_some_avg10, io_some_avg10` |
+| `:oom_events`  | `kills, events, high, max`                           |
 
 Each metric produces its own event — `stats.web-0-api.memory`,
 `stats.web-0-api.cpu`, and so on.
@@ -125,3 +125,142 @@ headers for node identity and an event version, plus the JSON
 payload produced by the codec. Consumers that want to build their
 own decoders should read `erlkoenig_amqp_codec.erl` — it's the
 schema.
+
+## Hands-on: subscribe, trigger, observe
+
+Bring up a container with `publish` enabled, subscribe to the event
+bus, and watch events fire in real time.
+
+**1. Stack with cgroup publishing.** Save as `~/obs_demo.exs`:
+
+```elixir
+defmodule ObsDemo do
+  use Erlkoenig.Stack
+
+  host do
+    ipvlan "obs", parent: {:dummy, "ek_obs"}, subnet: {10, 77, 0, 0, 24}
+  end
+
+  pod "o", strategy: :one_for_one do
+    container "echo",
+      binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
+      args: ["9000"],
+      zone: "obs",
+      replicas: 1,
+      restart: :permanent do
+
+      publish interval: 2_000 do
+        metric :memory
+        metric :cpu
+        metric :pids
+      end
+    end
+  end
+end
+```
+
+```bash
+ek dsl compile ~/obs_demo.exs -o /tmp/obs.term
+ek up /tmp/obs.term
+```
+
+**2. Subscribe to the bus.** In a second terminal:
+
+```bash
+tools/event_consumer.py amqp://erlkoenig@localhost '#'
+```
+
+The wildcard `#` matches every routing key. You should see:
+
+    container.o-0-echo.started    { pid: 156329, ip: "10.77.0.2" }
+    stats.o-0-echo.memory         { current: 2411520, peak: 2457600, ... }
+    stats.o-0-echo.cpu            { usec: 15234, delta_usec: 15234, ... }
+    stats.o-0-echo.pids           { current: 1, max: 100 }
+    stats.o-0-echo.memory         { current: 2412544, ... }      # 2s later
+    stats.o-0-echo.cpu            { ... }
+    stats.o-0-echo.pids           { ... }
+    ...
+
+Three stats events every two seconds, one per declared metric.
+
+**3. Slice by category.** Separate consumers for different patterns:
+
+```bash
+# Only lifecycle transitions
+tools/event_consumer.py amqp://... 'container.*.*'
+
+# Only stats
+tools/event_consumer.py amqp://... 'stats.#'
+
+# Everything the firewall produces
+tools/event_consumer.py amqp://... 'firewall.#'
+
+# Threat detection
+tools/event_consumer.py amqp://... 'guard.threat.*'
+
+# Anything that went wrong
+tools/event_consumer.py amqp://... 'error.*.*'
+```
+
+Routing-key patterns are the topic exchange's standard syntax: `*`
+matches one word, `#` matches zero or more.
+
+**4. Trigger a drop event.** Kill the container to see a non-clean
+exit:
+
+```bash
+os_pid=$(ek --format json ct inspect o-0-echo | jq -r .os_pid)
+kill -9 $os_pid
+```
+
+The bus emits:
+
+    container.o-0-echo.failed    { reason: {signal, 9}, exit_code: -1 }
+    container.o-0-echo.restarting { backoff_ms: 1000 }
+    container.o-0-echo.started    { pid: <new>, ... }
+
+Use `ek ct inspect` to confirm the `restart_count` bumped.
+
+**5. Dashboard view.** The richer TUI consumer:
+
+```bash
+tools/dashboard.py amqp://erlkoenig@localhost
+```
+
+Five panels update in place: overview (counts + rates), threats
+(active bans), containers (running/failed/restarting), network
+(drop counters), raw events (last 50 messages). Ctrl-C to exit.
+
+**6. Structured errors in practice.** Force a configuration error to
+see the error channel:
+
+```bash
+# Intentionally bad stack
+cat > /tmp/bad.exs << 'EOF'
+defmodule Bad do
+  use Erlkoenig.Stack
+  pod "p", strategy: :bogus do
+    container "x", binary: "/no/such/file", zone: "none",
+      replicas: 1, restart: :permanent
+  end
+end
+EOF
+ek dsl compile /tmp/bad.exs -o /tmp/bad.term
+ek up /tmp/bad.term
+```
+
+The subscriber sees:
+
+    error.config.invalid_strategy   { pod: "p", got: "bogus",
+                                       valid: ["one_for_one",
+                                               "one_for_all",
+                                               "rest_for_one"] }
+
+**7. Tear down.**
+
+```bash
+ek down /tmp/obs.term
+```
+
+The bus emits `container.o-0-echo.stopped` and the subscriber's
+steady stream of stats events ceases.

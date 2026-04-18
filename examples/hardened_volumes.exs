@@ -42,9 +42,17 @@ defmodule HardenedVolumes do
     nft_table :inet, "host" do
       base_chain "input", hook: :input, type: :filter,
         priority: :filter, policy: :drop do
+        # ── Standard-Härtung ──────────────────────────────
         nft_rule :accept, ct_state: [:established, :related]
         nft_rule :accept, iifname: "lo"
         nft_rule :accept, tcp_dport: 22
+
+        # ── Runtime-Services ──────────────────────────────
+        # erlkoenig DNS-Resolver pro Zone auf der Gateway-IP.
+        # Ohne diese Regel timeoutet jedes getaddrinfo() im
+        # Container. Glasbox: explizit, kein Magic-Inject
+        # (Kapitel 6 Service-Catalogue).
+        nft_rule :accept, ip_saddr: {10, 0, 0, 0, 24}, udp_dport: 53
       end
     end
   end

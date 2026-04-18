@@ -89,9 +89,23 @@ init([]) ->
 init({zone, #{zone := ZoneName, network := #{gateway := Gateway}} = _Config})
   when Gateway =/= undefined ->
     do_init(ZoneName, Gateway);
-init({zone, #{zone := ZoneName, network := #{}} = _Config}) ->
-    %% IPVLAN without gateway: bind on loopback (containers reach DNS via lo)
-    do_init(ZoneName, {127, 0, 0, 1});
+init({zone, #{zone := ZoneName, network := Net} = _Config}) ->
+    %% No explicit gateway: for IPVLAN-L3S zones the runtime
+    %% materialises a host-side slave at `.1' of the subnet (see
+    %% `erlkoenig_zone_link_ipvlan'). Bind there if it exists,
+    %% otherwise fall back to loopback (legacy / not-yet-attached
+    %% zones).
+    BindIp = case maps:get(subnet, Net, undefined) of
+        {A, B, C, _} ->
+            Candidate = {A, B, C, 1},
+            case ip_assigned_locally(Candidate) of
+                true  -> Candidate;
+                false -> {127, 0, 0, 1}
+            end;
+        _ ->
+            {127, 0, 0, 1}
+    end,
+    do_init(ZoneName, BindIp);
 %% Legacy: flat config
 init({zone, #{zone := ZoneName, gateway := Gateway} = _Config}) ->
     do_init(ZoneName, Gateway).
@@ -115,6 +129,21 @@ do_init(ZoneName, BindIp) ->
                         pending  = #{}}};
         {error, Reason} ->
             {stop, {dns_bind_failed, Reason}}
+    end.
+
+%% True if `Ip' is configured on any local interface in the host
+%% netns. Used to avoid trying to bind UDP/53 on the gateway address
+%% before the host-side IPVLAN slave has been brought up.
+-spec ip_assigned_locally(inet:ip4_address()) -> boolean().
+ip_assigned_locally(Ip) ->
+    case inet:getifaddrs() of
+        {ok, IfList} ->
+            lists:any(fun({_, Props}) ->
+                lists:any(fun({addr, A}) -> A =:= Ip; (_) -> false end,
+                          Props)
+            end, IfList);
+        _ ->
+            false
     end.
 
 register_zone_service(ZoneName) ->

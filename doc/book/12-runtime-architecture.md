@@ -165,3 +165,60 @@ the kernel's responsibility.
 - Seccomp profile generation → Chapter 13.
 - Netlink from the BEAM during NET_SETUP and NFT_SETUP → Chapter 14.
 - Wire-level errors and signature rejection → Chapter 10.
+
+## Hands-on: trace a spawn
+
+Start a container and observe the side effects at each layer.
+
+**1. Mounts appear when a container spawns.**
+
+```bash
+# Terminal 1: baseline
+wc -l /proc/mounts                  # e.g. 27
+
+# Terminal 2: start something
+ek up examples/simple_echo.exs
+
+# Terminal 1: after spawn
+wc -l /proc/mounts                  # 30 (+3: rootfs tmpfs, dev, proc)
+```
+
+**2. Inspect the container's namespaces.**
+
+```bash
+pid=$(ek --format json ct inspect app-0-echo | jq -r .os_pid)
+ls -la /proc/$pid/ns/
+```
+
+Mnt, net, pid differ from the host. User NS matches — erlkoenig
+runs without user namespaces; caps are dropped explicitly instead.
+
+**3. Peek at the container's status.**
+
+```bash
+cat /proc/$pid/status | grep -E 'Uid|Gid|Cap|Seccomp'
+# Uid:     70  70  70  70
+# Gid:     70  70  70  70
+# CapEff:  0000000000000000     # all caps dropped
+# Seccomp: 2                    # FILTER mode
+# Seccomp_filters: 1
+```
+
+**4. Enter the container's view (diagnostic only).**
+
+```bash
+nsenter --target $pid --net --mount ls /
+```
+
+Shows what the container sees — its rootfs with bind-mounted
+volumes at the declared paths.
+
+**5. Clean shutdown.**
+
+```bash
+ek down examples/simple_echo.exs
+wc -l /proc/mounts    # back to 27
+```
+
+All three tmpfs mounts disappear with the mount namespace; the pid
+and net namespaces are reaped by the kernel. No orphans.

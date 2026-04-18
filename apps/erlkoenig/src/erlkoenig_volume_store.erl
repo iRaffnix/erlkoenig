@@ -57,6 +57,8 @@ store is authoritative.
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
          terminate/2, code_change/3]).
 
+-include_lib("kernel/include/file.hrl").
+
 -define(SERVER, ?MODULE).
 -define(TABLE, erlkoenig_volumes).
 -define(DEFAULT_VOLUMES_ROOT, <<"/var/lib/erlkoenig/volumes">>).
@@ -291,9 +293,11 @@ do_ensure(#{container := Container, persist := Persist,
             uid := Uid, gid := Gid} = Req) ->
     case do_find(Container, Persist) of
         {ok, Existing} ->
-            %% Volume exists. If the caller asks for a quota that
-            %% differs from the stored one, apply the change — this
-            %% lets operators raise/lower limits via a config reload.
+            %% Volume exists. Reconcile ownership first (cheap stat,
+            %% chown only if the config's uid/gid differ from what's
+            %% on disk — handles an operator changing `uid:` in the
+            %% stack file), then quota.
+            _ = maybe_reconcile_ownership(Existing, Uid, Gid),
             case maybe_reconcile_quota(Existing, Req) of
                 {ok, Updated} -> {ok, Updated};
                 {error, _} = E -> E
@@ -320,6 +324,19 @@ do_ensure(#{container := Container, persist := Persist,
                 {error, _} = Err ->
                     Err
             end
+    end.
+
+-spec maybe_reconcile_ownership(volume(), non_neg_integer(), non_neg_integer()) -> ok.
+maybe_reconcile_ownership(#{host_path := HostPath}, Uid, Gid) ->
+    Path = binary_to_list(HostPath),
+    case file:read_file_info(Path) of
+        {ok, #file_info{uid = Uid, gid = Gid}} ->
+            ok;
+        {ok, _} ->
+            _ = chown_and_mode(Path, Uid, Gid),
+            ok;
+        {error, _} ->
+            ok
     end.
 
 -spec maybe_reconcile_quota(volume(), map()) ->
@@ -456,9 +473,21 @@ ensure_dir(HostPath, Uid, Gid) ->
         ok ->
             chown_and_mode(Path, Uid, Gid);
         {error, eexist} ->
-            %% Directory already exists — leave permissions alone,
-            %% operator may have customised them.
-            ok;
+            %% Directory already exists. Re-apply chown only if the
+            %% current ownership differs from what the config asks for:
+            %% this keeps re-ensure cheap when nothing changed and also
+            %% makes `ek up` with a new uid actually update the bind-
+            %% mount source. An operator who manually chown'd a volume
+            %% will see their change overwritten on the next reconcile
+            %% — that's the contract: the DSL is the source of truth.
+            case file:read_file_info(Path) of
+                {ok, #file_info{uid = Uid, gid = Gid}} ->
+                    ok;
+                {ok, _} ->
+                    chown_and_mode(Path, Uid, Gid);
+                {error, _} = Err ->
+                    Err
+            end;
         {error, _} = Err ->
             Err
     end.

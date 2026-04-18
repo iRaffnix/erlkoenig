@@ -140,6 +140,96 @@ normal use: they shape the runtime's behaviour without anyone
 having to think about them. The DSL stays clean; the product's
 security and stability properties land in the supervisor tree.
 
+## Hands-on: trip all three safety nets
+
+Each of the three mechanisms (fail-closed firewall, crashloop
+quarantine, admission gate) can be tripped deliberately to observe
+the behaviour.
+
+**1. Crashloop quarantine.** Write a container that exits immediately:
+
+```bash
+cat > /tmp/crash.c << 'EOF'
+int main(void) { return 1; }
+EOF
+musl-gcc -static -o /tmp/crash /tmp/crash.c
+
+cat > ~/crash.exs << 'EOF'
+defmodule CrashStack do
+  use Erlkoenig.Stack
+  host do
+    ipvlan "c", parent: {:dummy, "ek_c"}, subnet: {10, 120, 0, 0, 24}
+  end
+  pod "cp", strategy: :one_for_one do
+    container "crasher", binary: "/tmp/crash", args: [],
+      zone: "c", replicas: 1, restart: :permanent
+  end
+end
+EOF
+
+ek dsl compile ~/crash.exs -o /tmp/crash.term
+ek up /tmp/crash.term
+```
+
+Watch the container crash, restart, crash again — the exponential
+backoff stretches out to 30 s. After 5 failures within 60 s, the
+runtime logs:
+
+    [erlkoenig_quarantine] binary quarantined
+    hash=<SHA256>  reason={crashloop,5,60000}
+
+Further spawns of that binary fail immediately with `{quarantined, Hash}`.
+Lift it manually once the underlying issue is fixed:
+
+```bash
+ek quarantine list
+ek quarantine remove <hash>
+```
+
+Clean up: `ek down /tmp/crash.term`.
+
+**2. Admission gate saturation.** Declare a pod that asks for more
+concurrent spawns than the host's admission limit allows:
+
+```elixir
+pod "bp", strategy: :one_for_one do
+  container "w",
+    binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
+    args: ["9000"],
+    zone: "b", replicas: 30, restart: :permanent
+end
+```
+
+In another terminal, snapshot the admission gate during the spawn
+burst: `watch -n0.5 ek admission snapshot`.
+
+Expected: `in_flight` sits at `max_host` (default 10), `queue`
+climbs, then drains as each spawn completes. All 30 containers
+eventually come up — the gate paces, it doesn't drop.
+
+If the queue had overflowed (`queue_limit`, default 100), the
+overflow spawns would fail with `{admission, queue_full}` rather
+than queuing forever.
+
+**3. Fail-closed firewall.** Kill the nft firewall gen_server
+repeatedly to trigger its significant-child fail-closed behaviour:
+
+```erlang
+%% In an erlkoenig remote_console:
+exit(whereis(erlkoenig_nft_firewall), kill).       %% restarts
+[exit(whereis(erlkoenig_nft_firewall), kill)
+   || _ <- lists:seq(1, 10)].                      %% exceeds intensity
+```
+
+The daemon exits. systemd respawns it, the firewall comes back up
+with fresh state. During the outage, existing containers keep
+running (their kernel state is independent), but **no new spawn
+succeeds** — the spawn gate treats a missing firewall as fail-closed.
+
+In production this is almost impossible to hit — the firewall
+gen_server is thin. But the supervisor-tree invariant stands: if
+the firewall is broken, nothing new runs.
+
 ## Where to go next
 
 - Chapter 4 (Containers & Pods) covers what happens after admission

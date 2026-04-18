@@ -166,6 +166,13 @@ handle_call({create_zone, Name, Cfg}, From, State) ->
             %% Start zone supervisor asynchronously to avoid deadlock:
             %% zone children call register_service back into this gen_server.
             spawn_link(fun() ->
+                %% Materialise the IPVLAN dummy + host-side slave first
+                %% so per-zone services (especially erlkoenig_dns) can
+                %% bind on the gateway IP at startup. Without this,
+                %% DNS would race the lazy ensure_dummy/3 path that
+                %% runs on first container attach and end up bound on
+                %% an interface that's about to be re-flushed.
+                _ = preprovision_link(Cfg),
                 Result = case erlkoenig_zone_sup:start_zone(Name) of
                     {ok, _Pid} ->
                         #{network := Net} = Cfg,
@@ -221,6 +228,20 @@ terminate(_Reason, _State) ->
 %%%===================================================================
 %%% Internal
 %%%===================================================================
+
+%% Best-effort: bring up the IPVLAN dummy + host-side slave so the
+%% gateway IP exists on a host-resident interface before any per-zone
+%% service (in particular `erlkoenig_dns') tries to bind on it. The
+%% lazy ensure_dummy/3 path inside attach_container/3 still runs on
+%% first container attach and is idempotent — this is just an early
+%% trigger.
+preprovision_link(#{network := #{mode := ipvlan}} = Cfg) ->
+    try erlkoenig_zone_link:init(Cfg) of
+        {ok, _}    -> ok;
+        {error, _} -> ok
+    catch _:_ -> ok
+    end;
+preprovision_link(_) -> ok.
 
 -doc "Load zone configs from app env. Falls back to a single default zone.".
 -spec load_zones() -> [{zone_name(), zone_config()}].

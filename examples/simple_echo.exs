@@ -122,7 +122,18 @@ defmodule SimpleEcho do
         nft_rule :accept, tcp_dport: 9100
 
         # ┌─────────────────────────────────────────────────┐
-        # │ 7. DEFAULT DROP                                 │
+        # │ 7. RUNTIME-SERVICES                             │
+        # │                                                 │
+        # │ erlkoenig betreibt einen DNS-Resolver pro Zone  │
+        # │ auf der Gateway-IP (10.0.0.1). Ohne diese Regel │
+        # │ timeoutet jedes getaddrinfo() im Container.     │
+        # │ Magic-Inject gibt's nicht — explizit hinschreiben│
+        # │ ist Pflicht (siehe Kapitel 6 Service-Catalogue).│
+        # └─────────────────────────────────────────────────┘
+        nft_rule :accept, ip_saddr: {10, 0, 0, 0, 24}, udp_dport: 53
+
+        # ┌─────────────────────────────────────────────────┐
+        # │ 8. DEFAULT DROP                                 │
         # │                                                 │
         # │ Alles was bis hier nicht gematcht hat.           │
         # │ Counter zählt Drops (sichtbar über AMQP).       │

@@ -40,15 +40,20 @@ Four options are required on every container: `binary:`, `zone:`,
 | `replicas:`   | positive integer        | required   | How many copies of this container to run          |
 | `restart:`    | atom                    | required   | See *restart policies* below                      |
 | `args:`       | list of strings         | `[]`       | Arguments passed to `execve()`                    |
+| `env:`        | map of string → string  | `%{}`      | Environment variables for the binary              |
+| `files:`      | map of path → content   | `%{}`      | Files written into the rootfs before `execve()`   |
 | `image:`      | string                  | `nil`      | Optional EROFS image path (composefs)             |
 | `ports:`      | list                    | `[]`       | Port metadata (audit only, no forwarding)         |
 | `limits:`     | map                     | `%{}`      | cgroup v2 limits — memory, cpu, pids              |
-| `seccomp:`    | `:default` \| `:none` \| `:auto` | `:default` | Seccomp profile selection (→ Chapter 13)      |
-| `uid:` / `gid:` | integer               | 65534      | UID/GID the binary runs as inside the container   |
+| `seccomp:`    | `:none` \| `:default` \| `:strict` \| `:network` | `:none`    | Seccomp profile (→ Chapter 13)           |
+| `uid:` / `gid:` | integer               | 0          | UID/GID the binary runs as inside the container   |
 | `caps:`       | list of atoms           | `[]`       | Linux capabilities to keep (see below)            |
+| `health_check:` | map                   | none       | Reachability probe (→ Chapter 9)                  |
+| `signature:`  | `:required` \| string   | none       | Require a valid Ed25519 signature (→ Chapter 10)  |
 | `volume` block | —                     | none       | Persistent bind-mounts (→ Chapter 8)              |
 | `publish` block | —                    | none       | Cgroup metric emission (→ Chapter 9)              |
 | `stream` block | —                     | none       | stdout/stderr streaming (→ Chapter 11)            |
+| `nft` block   | —                       | none       | Per-container netfilter rules (→ Chapter 6)       |
 
 ## Restart policies
 
@@ -65,8 +70,11 @@ Three aliases, identical semantics, pick whichever fits your voice:
 match the vocabulary developers already use for child specs.
 
 A container that restarts doesn't retry immediately. The backoff is
-exponential: 1 s, 2 s, 4 s, 8 s, 16 s, capped at 30 s. The counter resets
-after the container stays up long enough — a shortcut against crash loops.
+exponential and saturates quickly: 1 s, 2 s, 4 s, 8 s, 16 s, 30 s, then
+30 s for every further attempt. The counter itself lives in `persistent_term`
+keyed by container name; it survives pod-supervisor respawns and
+drift-driven reconcile-restarts, and only resets when the name leaves
+the declared stack entirely.
 
 ## Replicas and zones
 
@@ -105,20 +113,22 @@ on runtime internals (→ Chapter 12) covers the drop sequence.
 A container transitions through the following states:
 
 ```
-creating ──→ namespace_ready ──→ starting ──→ running
-                                                │
-                         ┌──────────────────────┼──────────────────────┐
-                         ▼                      ▼                      ▼
-                     stopping              disconnected              failed
-                         │                      │                      │
-                         ▼                      │                      │
-                      stopped ◄─────────────────┘                      │
-                         │                                             │
-                    ┌────┴────┐                                        │
-                    ▼         ▼                                        │
-                restarting  (exit)                                 (inspect)
-                    │
-                    └──→ creating
+creating --> namespace_ready --> starting --> running
+                                                |
+                         +-----------+----------+-----------+
+                         v           v                      v
+                     stopping   disconnected              failed
+                         |           |                      |
+                         v           |                      |
+                      stopped <------+                      |
+                         |                                  |
+                    +----+----+                             |
+                    v         v                             |
+                restarting  (exit)                      (inspect)
+                    |
+                    +--> creating
+
+          recovering --> running     (BEAM restart: reattach to live process)
 ```
 
 A few states deserve attention:
@@ -132,6 +142,110 @@ A few states deserve attention:
 - **`failed`** is terminal-until-inspected: the container stays around
   long enough to grab its exit reason and logs, then transitions to
   `stopped` or `restarting` according to policy.
+
+## Hands-on: seeing pod strategies in action
+
+The three strategies look very similar on paper. The difference only
+shows up when a container actually dies. This section puts three
+minimal pods next to each other, kills the middle container in each,
+and observes how the siblings react.
+
+The stack file `examples/pod_strategies.exs` defines three pods:
+
+```
+pod "ofo", strategy: :one_for_one   → containers a, b, c
+pod "ofa", strategy: :one_for_all   → containers a, b, c
+pod "rfo", strategy: :rest_for_one  → containers a, b, c
+```
+
+Each container is a tiny echo server on a distinct IP in zone
+`strategies` (10.99.200.0/24). Nine containers, one zone, one file.
+
+```bash
+cp /opt/erlkoenig/examples/pod_strategies.exs ~/strategies.exs
+ek up ~/strategies.exs
+ek ps
+```
+
+Snapshot the `os_pid` of every container:
+
+```bash
+for name in ofo-0-a ofo-0-b ofo-0-c \
+            ofa-0-a ofa-0-b ofa-0-c \
+            rfo-0-a rfo-0-b rfo-0-c; do
+  printf '%-12s  ' "$name"
+  ek --format json ct inspect $name \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["os_pid"])'
+done
+```
+
+Now kill the middle container in each pod, bypassing erlkoenig:
+
+```bash
+for name in ofo-0-b ofa-0-b rfo-0-b; do
+  kill -KILL $(ek --format json ct inspect $name \
+                 | python3 -c 'import json,sys; print(json.load(sys.stdin)["os_pid"])')
+done
+sleep 4
+```
+
+Read the table again. What you should see:
+
+| Pod  | -0-a         | -0-b          | -0-c          |
+|------|--------------|---------------|---------------|
+| ofo  | **unchanged**| new os_pid    | **unchanged** |
+| ofa  | new os_pid   | new os_pid    | new os_pid    |
+| rfo  | **unchanged**| new os_pid    | new os_pid    |
+
+The `restart_count` in `ek ct inspect` echoes the coupling: in `ofo`
+only `b` went to 1; in `ofa` all three; in `rfo` `b` and `c`. The
+counter bumps for *every* gen_statem reincarnation, regardless of
+whether that specific container was the one that crashed.
+
+**Caveat for the coupled strategies.** `:one_for_all` and
+`:rest_for_one` tear down siblings concurrently. The pod supervisor
+respawns them the instant the old gen_statems exit, while the kernel
+still holds the previous ipvlan slaves and their addresses. You may
+see `net_setup_failed, -98, Address in use` transiently before the
+new slaves settle. `:one_for_one` does not trigger this race; use it
+for the first walkthrough and treat the other two as advanced.
+
+## Hands-on: watching the backoff
+
+Kill the same container three times in quick succession and watch the
+backoff widen:
+
+```bash
+for i in 1 2 3; do
+  T_BEFORE=$(date +%s)
+  kill -KILL $(ek --format json ct inspect ofo-0-a \
+                 | python3 -c 'import json,sys; print(json.load(sys.stdin)["os_pid"])')
+  until ek ct inspect ofo-0-a 2>/dev/null | grep -q '^state .*running'; do
+    sleep 0.5
+  done
+  T_AFTER=$(date +%s)
+  printf 'kill #%d: %ds to recover, restart_count=%s\n' \
+         "$i" $((T_AFTER - T_BEFORE)) \
+         "$(ek --format json ct inspect ofo-0-a \
+              | python3 -c 'import json,sys; print(json.load(sys.stdin)["restart_count"])')"
+done
+```
+
+Expected timings: roughly 1 s, 2 s, 4 s. Pushing further — 8 s, 16 s,
+30 s — is fine, but remember that a fifth consecutive crash within the
+quarantine window (default 60 s) trips the crashloop quarantine: the
+binary's hash is blacklisted and subsequent spawns return
+`{error, {quarantined, …}}` until `ek quarantine remove` clears it.
+The backoff itself saturates at 30 s and stays there regardless of
+how many more attempts follow.
+
+To wipe the counter, remove the container from the stack and
+re-introduce it: `ek down` clears every name that leaves the declared
+set, a subsequent `ek up` starts the affected names at 0 again.
+
+```bash
+ek down ~/strategies.exs
+```
 
 ## Where this chapter points
 

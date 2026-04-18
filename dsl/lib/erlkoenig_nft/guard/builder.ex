@@ -27,7 +27,7 @@ defmodule ErlkoenigNft.Guard.Builder do
           flood over: 50, within: s(10)
           port_scan over: 20, within: m(1)
           slow_scan over: 5, within: h(1)
-          honeypot [21, 22, 23, 445, ...]
+          honeypot [21, 23, 445, 3389]  # NEVER include your SSH port
         end
 
         respond do        # what happens when detected

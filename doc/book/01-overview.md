@@ -2,12 +2,13 @@
 
 **Erlkoenig — Speed and Control.**
 
-A container runtime for Linux, deliberately lean. A 168 KB static C binary
+A container runtime for Linux, deliberately lean. A ~170 KB static C binary
 (`erlkoenig_rt`) spawns the Linux namespaces; the BEAM (Erlang/OTP 28) does
 everything else — networking through Netlink, firewalling through nftables
 (pure Erlang, no `nft` CLI on the hot path), cgroups v2 with PSI metrics,
 Ed25519 signatures, AMQP events. An Elixir DSL compiles to Erlang terms, no
-YAML. About 50 milliseconds per container spawn.
+YAML. About 50 milliseconds from `creating` to `running` per container on a
+warm host.
 
 ## The five layers
 
@@ -64,9 +65,10 @@ about TLV bytes, the C binary knows nothing about pods.
 
 The supervisor tree starts in `erlkoenig_sup.erl` with strategy
 `rest_for_one`: pg → zone registry → zone supervisor → cgroup → events →
-health → audit → PKI → nft supervisor → volume store → volume stats → pod
-supervisor. If a child dies, all later children restart; earlier ones stay
-stable. Containers themselves live inside *pods*, their own supervisor
+health → audit → PKI → nft supervisor → crashloop quarantine → spawn
+admission gate → volume store → volume stats → pod supervisor. If a
+child dies, all later children restart; earlier ones stay stable.
+Containers themselves live inside *pods*, their own supervisor
 subtrees, never as bare processes under the root supervisor.
 
 This has two consequences. First, a crash in a pod never takes down the
@@ -93,6 +95,18 @@ Threat detection runs as per-IP `gen_statem` instances
 its own state; bans are synchronised across nodes through a `pg`-based
 mesh. The kernel holds the ban list in nft sets with timeouts — the actual
 enforcement is below userspace.
+
+## Operator surface
+
+Operators interact through one binary: `ek`, an escript wrapper over
+the public Erlang APIs. `ek up <file>` compiles an `.exs` (via a
+bundled Elixir runtime, no separate install) and reconciles the node
+against the declared stack; `ek down` is the inverse. `ek ps`,
+`ek pod list`, `ek ct inspect` surface runtime state; `ek dsl compile`,
+`ek vol`, `ek quarantine`, `ek admission` round out the operational
+inventory. Everything the CLI does is also available programmatically
+on the same modules — the CLI is a convenience layer, not a separate
+API (→ Chapter 18).
 
 ## Boot and recovery
 

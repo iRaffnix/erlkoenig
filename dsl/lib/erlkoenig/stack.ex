@@ -1406,6 +1406,51 @@ defmodule Erlkoenig.Stack do
   end
 
   @doc """
+  Declare a flowtable for hardware/software fast-path offload.
+
+  Flowtables bypass the full nftables evaluation pipeline for
+  established connections. Once a flow is offloaded, subsequent
+  packets are fast-pathed at the ingress hook — skipping all
+  chains. This is nftables' native alternative to eBPF-based
+  packet acceleration.
+
+  ## Arguments
+
+  | Argument | Type | Description |
+  |----------|------|-------------|
+  | `name` | string | Flowtable name (referenced by `nft_rule :flow_offload`) |
+
+  ## Options
+
+  | Option | Type | Default | Description |
+  |--------|------|---------|-------------|
+  | `devices:` | list of strings | required | Network interfaces to attach to |
+  | `priority:` | integer | 0 | Ingress hook priority |
+
+  ## Example
+
+      nft_table :inet, "filter" do
+        nft_flowtable "ft0", devices: ["eth0"]
+
+        base_chain "forward", hook: :forward, type: :filter,
+                   priority: :filter, policy: :accept do
+          nft_rule :flow_offload, flowtable: "ft0"
+          nft_rule :accept, ct_state: [:established, :related]
+        end
+      end
+
+  The first packet of a connection traverses the full chain. Once
+  the connection is established, the kernel offloads it to the
+  flowtable's ingress hook — no more chain evaluation for that flow.
+  """
+  defmacro nft_flowtable(name, opts) do
+    quote do
+      var!(ek_nft_table) = Erlkoenig.Nft.TableBuilder.add_flowtable(
+        var!(ek_nft_table), unquote(name), unquote(opts))
+    end
+  end
+
+  @doc """
   Declare a verdict map (vmap) at table level.
 
   Verdict maps associate keys with verdicts (accept/drop/jump). Used for

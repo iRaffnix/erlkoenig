@@ -56,11 +56,11 @@ Each chunk becomes one AMQP message. Headers carry the metadata:
 |---------------|------------------|------------------------------------------------|
 | `fd`          | `"stdout"` / `"stderr"` | Which file descriptor the chunk came from |
 | `name`        | `"web-0-api"`    | Container name                                 |
+| `node`        | `"ek@host1"`     | Erlang node that published the chunk           |
 | `instance`    | `"a1b2c3d4"`     | UUID prefix unique per spawn                   |
 | `seq`         | `42`             | Monotonic sequence within an instance          |
 | `boot`        | `1`              | Restart counter                                |
 | `wall_ts_ms`  | `1712412182456`  | Wall-clock timestamp in milliseconds           |
-| `eof`         | `true`           | Last chunk before container stops (optional)   |
 
 The body is the raw bytes — no framing, no encoding, no size prefix.
 A consumer that wants line boundaries reassembles them itself, which
@@ -112,3 +112,122 @@ a time cursor: every message carries its `wall_ts_ms`, which
 approximately maps onto broker arrival time. Consumers that need
 exact wall-clock ordering read by offset and group by timestamp
 client-side.
+
+## Hands-on: stream a container's stdout
+
+Start a container with stream forwarding enabled, consume its output
+from the broker, and induce backpressure to see the drop accounting.
+
+**1. Stack with streaming enabled.** Save as `~/log_demo.exs`:
+
+```elixir
+defmodule LogDemo do
+  use Erlkoenig.Stack
+
+  host do
+    ipvlan "l", parent: {:dummy, "ek_l"}, subnet: {10, 112, 0, 0, 24}
+  end
+
+  pod "lg", strategy: :one_for_one do
+    container "chatty",
+      binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
+      args: ["9000"],
+      zone: "l",
+      replicas: 1,
+      restart: :permanent do
+
+      stream retention: {1, :days}, max_bytes: {100, :mb} do
+        channel :stdout
+        channel :stderr
+      end
+    end
+  end
+end
+```
+
+```bash
+ek dsl compile ~/log_demo.exs -o /tmp/log.term
+ek up /tmp/log.term
+```
+
+**2. Consume the stream.** Requires RabbitMQ broker reachable at
+`amqp://erlkoenig@localhost`:
+
+```bash
+tools/stream_consumer.py amqp://erlkoenig@localhost \
+    erlkoenig.log.lg-0-chatty --follow
+```
+
+Expected output:
+
+    [2026-04-17T13:04:12Z stdout seq=1] hello from echo_server
+    [2026-04-17T13:04:12Z stdout seq=2] listening on 9000
+    [2026-04-17T13:04:15Z stderr seq=3] warning: using default config
+    ...
+
+**3. Filter stdout vs stderr client-side.**
+
+```bash
+tools/stream_consumer.py amqp://... erlkoenig.log.lg-0-chatty \
+    --fd stderr
+```
+
+The `--fd` flag filters on the `fd` header. Server-side Bloom
+filtering (`x-stream-filter-value`) is an optimisation; the header
+match is exact.
+
+**4. Offset-based replay.** Every chunk has an offset. Read the last
+100 messages:
+
+```bash
+tools/stream_consumer.py amqp://... erlkoenig.log.lg-0-chatty \
+    --offset last-100
+```
+
+Or replay from a specific wall-clock approximation — the stream
+consumer searches by `wall_ts_ms` header:
+
+```bash
+tools/stream_consumer.py amqp://... erlkoenig.log.lg-0-chatty \
+    --since '2026-04-17T13:00:00Z'
+```
+
+**5. Induce backpressure.** Kill the broker or suspend the consumer
+to back up the queue. The erlkoenig side keeps publishing until the
+per-container queue (1000 chunks) fills, then drops oldest chunks:
+
+```bash
+# Pause all incoming on the broker — simulate slow downstream
+rabbitmqctl stop_app
+
+# Watch the bus on another terminal for overflow events
+tools/event_consumer.py amqp://... 'system.log.overflow'
+```
+
+Resume and read the overflow accounting:
+
+    system.log.overflow    { name: "lg-0-chatty",
+                              dropped_count: 247,
+                              dropped_bytes: 124518 }
+
+Container I/O never blocks — `write()` on the container's stdout
+fd proceeds at full speed. Drops are accounted for but the
+application doesn't know; this is deliberate.
+
+**6. Multi-replica separation.** With `replicas: 3`, the streams
+are `erlkoenig.log.lg-0-chatty`, `erlkoenig.log.lg-1-chatty`,
+`erlkoenig.log.lg-2-chatty`. A consumer interested in a single
+replica subscribes to one stream name; a consumer interested in all
+replicas opens three subscriptions or uses a broker-side topic
+binding.
+
+**7. Tear down.**
+
+```bash
+ek down /tmp/log.term
+```
+
+The stream itself (RabbitMQ resource) is not deleted — retention
+determines when the data ages out. A subsequent `ek up` with the
+same container name would re-attach to the same stream and continue
+appending after the last offset.

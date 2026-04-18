@@ -131,3 +131,78 @@ handled in the specific caller modules.
 captured, but the `NLMSGERR_ATTR_*` decoder has only the essentials.
 Richer error reporting (attribute-level offsets, context strings) is
 a planned addition.
+
+## Hands-on: watch the transport in action
+
+Three experiments against a running daemon that make the abstract
+transport concrete.
+
+**1. Round-trip a tiny request.**
+
+```erlang
+erlkoenig eval '
+  R = nfnl_server:apply_msgs(erlkoenig_nft_srv, [
+    fun(S) -> nft_table:add(1, <<"ek_handson_t14">>, S) end,
+    fun(S) -> nft_delete:table(1, <<"ek_handson_t14">>, S) end
+  ]),
+  io:format("result: ~p~n", [R]).'
+```
+
+Output: `result: ok`. One send, one recv — a batch with 2 inner
+messages (each ACKed) wrapped in BATCH_BEGIN/BATCH_END (not ACKed).
+
+**2. Inspect the sequence counter.**
+
+```erlang
+erlkoenig eval '
+  io:format("~p~n", [sys:get_state(erlkoenig_nft_srv)]).'
+```
+
+You see the current `seq`, the open socket reference. Every
+`apply_msgs` bumps `seq` by the message count plus 2 (the envelope).
+
+**3. Force a kernel error.**
+
+```erlang
+erlkoenig eval '
+  R = nfnl_server:apply_msgs(erlkoenig_nft_srv, [
+    fun(S) -> nft_delete:table(1, <<"no_such_table">>, S) end
+  ]),
+  io:format("~p~n", [R]).'
+%% => {error, #{code => noent, attrs => []}}
+```
+
+`noent` = `ENOENT` translated. In a larger batch each ACK's
+sequence number maps back to the specific message that failed — no
+guessing which op the kernel rejected.
+
+**4. Dump the ruleset.**
+
+```erlang
+erlkoenig eval '
+  {ok, Ruleset} = nfnl_server:get_ruleset(erlkoenig_nft_srv, 1),
+  io:format("~p messages~n", [length(Ruleset)]).'
+```
+
+Each message is one object (table, chain, rule, set, counter). A
+vanilla daemon shows ~10-15; a production firewall shows hundreds.
+
+**5. Watch seq advance under load.** One terminal drives traffic:
+
+```bash
+while true; do ek vol list --format plain >/dev/null; sleep 0.1; done
+```
+
+Another samples state:
+
+```bash
+for i in {1..5}; do
+  erlkoenig eval 'io:format("~p~n",
+    [maps:get(seq, sys:get_state(erlkoenig_nft_srv))]).'
+  sleep 1
+done
+```
+
+The counter climbs monotonically. A stuck counter would mean a
+hung gen_server call — something to investigate. In healthy
+operation it just counts up.

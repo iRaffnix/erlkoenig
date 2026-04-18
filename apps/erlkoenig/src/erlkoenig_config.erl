@@ -32,6 +32,7 @@ Usage:
 
 -include("erlkoenig_error.hrl").
 
+-export([apply_nft_tables/5]).
 -ifdef(TEST).
 -export([resolve_host_refs/2, find_all_replica_ips/3]).
 -endif.
@@ -201,7 +202,10 @@ apply_config_with_reconciliation(OldConfig, Config) ->
     ToStop = RunningNames -- DeclaredNames,
     lists:foreach(fun(Name) ->
         logger:info("erlkoenig_config: stopping removed container ~s", [Name]),
-        stop_by_name(Name)
+        stop_by_name(Name),
+        %% Name has left the declared set — reset its persistent restart
+        %% counter so a later re-introduction starts at zero.
+        erlkoenig_ct:forget_restart_count(Name)
     end, ToStop),
 
     Drifted = detect_drifted(OldConfig, Config),
@@ -854,6 +858,18 @@ apply_nft_table(#{name := TableName, chains := Chains} = Table, VethMap, Replica
     SetMsgs = [compile_set_msg(FamilyNum, TableBin, SetDef)
                || SetDef <- maps:get(sets, Table, [])],
 
+    %% 4a-ft. Create flowtables (declared via nft_flowtable).
+    %% Must exist before any rule references them via flow_offload.
+    FlowtableMsgs = [fun(S) ->
+        nft_flowtable:add(FamilyNum, #{
+            table => TableBin,
+            name => iolist_to_binary(maps:get(name, Ft)),
+            hook => maps:get(hook, Ft, ingress),
+            priority => maps:get(priority, Ft, 0),
+            devices => [iolist_to_binary(D) || D <- maps:get(devices, Ft, [])]
+        }, S)
+    end || Ft <- maps:get(flowtables, Table, [])],
+
     %% 4b. Compile explicit maps (nft_map) from DSL
     ExplicitMaps = maps:get(maps, Table, []),
     ExplicitMapMsgs = lists:flatmap(fun(M) ->
@@ -877,6 +893,7 @@ apply_nft_table(#{name := TableName, chains := Chains} = Table, VethMap, Replica
     {MapCreates, MapElems} = split_create_elems(ExplicitMapMsgs),
     AllMsgs = CounterMsgs
         ++ SetMsgs
+        ++ FlowtableMsgs
         ++ MapCreates ++ VmapCreates ++ AllMapCreates
         ++ AllChainCreates
         ++ MapElems ++ VmapElems
@@ -952,11 +969,21 @@ compile_nft_chain_split(Family, Table, #{name := Name, rules := Rules} = Chain,
 
     %% Compile rules — no implicit collapsing, no auto-generated maps.
     %% Maps and vmaps are created explicitly from DSL nft_map/nft_vmap blocks.
+    %%
+    %% Some rule builders (e.g. tcp_accept_limited) return MULTIPLE rules
+    %% as [[expr1], [expr2]]. Detect this and produce one rule_fun per sub-rule.
     {RuleMsgs, MapMsgs} = lists:foldl(fun(Rule, {RA, MA}) ->
         try
             Compiled = erlkoenig_firewall_nft:compile_rule(Rule),
-            RuleMsg = nft_encode:rule_fun(Family, Table, ChainBin, Compiled),
-            {[RuleMsg | RA], MA}
+            NewMsgs = case Compiled of
+                [H | _] when is_list(H) ->
+                    %% Multiple rules (e.g. rate-limit: over→drop, under→accept)
+                    [nft_encode:rule_fun(Family, Table, ChainBin, R)
+                     || R <- Compiled];
+                _ ->
+                    [nft_encode:rule_fun(Family, Table, ChainBin, Compiled)]
+            end,
+            {lists:reverse(NewMsgs) ++ RA, MA}
         catch C:Err ->
             logger:warning("erlkoenig_config: nft rule compile error: ~p:~p for ~p",
                            [C, Err, Rule]),
@@ -1153,6 +1180,9 @@ expand_nft_rule(vmap_lookup, #{vmap := VmapName} = Opts, _VethMap, _ReplicaIpMap
     [{rule, vmap_lookup, Base3}];
 
 %% dnat_jhash: explicit map reference, no implicit map creation
+expand_nft_rule(flow_offload, #{flowtable := FtName}, _VethMap, _ReplicaIpMap) ->
+    [{flow_offload, iolist_to_binary(FtName)}];
+
 expand_nft_rule(dnat_jhash, Opts, VethMap, _ReplicaIpMap) ->
     MapName = maps:get(map, Opts),
     Port = maps:get(port, Opts, 0),

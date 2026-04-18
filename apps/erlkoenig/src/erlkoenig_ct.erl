@@ -49,7 +49,8 @@ States:
          list/0,
          attach/2,
          send_input/2,
-         resize/3]).
+         resize/3,
+         forget_restart_count/1]).
 
 %% gen_statem callbacks
 -export([callback_mode/0, init/1, terminate/3]).
@@ -171,6 +172,39 @@ list() ->
         end
     end, Pids).
 
+%% Drop the persistent restart counter for a container name. Called from
+%% erlkoenig_config when a name leaves the declared set — after that,
+%% the next spawn with the same name starts counting from zero again.
+-spec forget_restart_count(binary() | undefined) -> ok.
+forget_restart_count(undefined) -> ok;
+forget_restart_count(Name) when is_binary(Name) ->
+    _ = persistent_term:erase({?MODULE, restart_count, Name}),
+    ok.
+
+%% Internal: read-and-bump the persistent restart counter for this name.
+%% First spawn of a name → 0 (stored). Every later spawn under the same
+%% name → previous + 1 (stored and returned). A nameless container (for
+%% ad-hoc spawns from the REPL) bypasses persistence entirely.
+-spec initial_restart_count(binary() | undefined) -> non_neg_integer().
+initial_restart_count(undefined) -> 0;
+initial_restart_count(Name) when is_binary(Name) ->
+    Key = {?MODULE, restart_count, Name},
+    case persistent_term:get(Key, undefined) of
+        undefined ->
+            ok = persistent_term:put(Key, 0),
+            0;
+        Prior ->
+            Next = Prior + 1,
+            ok = persistent_term:put(Key, Next),
+            Next
+    end.
+
+-spec persist_restart_count(binary() | undefined, non_neg_integer()) -> ok.
+persist_restart_count(undefined, _) -> ok;
+persist_restart_count(Name, Count) when is_binary(Name) ->
+    ok = persistent_term:put({?MODULE, restart_count, Name}, Count),
+    ok.
+
 -spec attach(pid(), pid()) -> ok | {error, term()}.
 attach(Pid, OutputPid) ->
     gen_statem:call(Pid, {attach, OutputPid}).
@@ -193,6 +227,13 @@ init({normal, BinaryPath, Opts}) ->
     Id = make_id(),
     proc_lib:set_label({erlkoenig_ct, Id}),
     Restart = validate_restart(maps:get(restart, Opts, no_restart)),
+    Name = maps:get(name, Opts, undefined),
+    %% Restart counter survives gen_statem reincarnations (pod-supervisor
+    %% respawn, drift-reconcile teardown/re-spawn) by living in
+    %% persistent_term keyed by container name. A brand-new name starts
+    %% at 0; every later init/1 under the same name bumps the stored
+    %% count by one.
+    InitRestartCount = initial_restart_count(Name),
     Data = #ct_data{
         id          = Id,
         binary_path = BinaryPath,
@@ -203,11 +244,12 @@ init({normal, BinaryPath, Opts}) ->
         ip          = maps:get(ip, Opts, undefined),
         zone        = maps:get(zone, Opts, default),
         restart     = Restart,
+        restart_count = InitRestartCount,
         limits      = maps:get(limits, Opts, #{}),
         seccomp     = seccomp_profile_id(maps:get(seccomp, Opts, none)),
         caps_keep   = caps_to_mask(maps:get(caps, Opts, [])),
         output      = maps:get(output, Opts, undefined),
-        name        = maps:get(name, Opts, undefined),
+        name        = Name,
         files       = maps:get(files, Opts, #{}),
         pty         = maps:get(pty, Opts, false),
         firewall    = maps:get(firewall, Opts, #{}),
@@ -285,7 +327,10 @@ creating(state_timeout, spawn_timeout, Data) ->
     {next_state, failed, Data#ct_data{error_reason = spawn_timeout}};
 
 creating({call, _From}, _, _Data) ->
-    {keep_state_and_data, [postpone]}.
+    {keep_state_and_data, [postpone]};
+
+creating(info, {poll_stats, _, _}, _Data) -> keep_state_and_data;
+creating(info, check_restart, _Data) -> keep_state_and_data.
 
 creating_do_spawn(#ct_data{id = ContainerId,
                             binary_path = BinaryPath,
@@ -464,7 +509,10 @@ namespace_ready(info, {tcp_closed, Sock}, #ct_data{sock = Sock} = Data) ->
 
 namespace_ready(info, {tcp_error, Sock, Reason}, #ct_data{sock = Sock} = Data) ->
     {next_state, failed,
-     Data#ct_data{sock = undefined, error_reason = {socket_error, Reason}}}.
+     Data#ct_data{sock = undefined, error_reason = {socket_error, Reason}}};
+
+namespace_ready(info, {poll_stats, _, _}, _Data) -> keep_state_and_data;
+namespace_ready(info, check_restart, _Data) -> keep_state_and_data.
 
 namespace_ready_handle_data(Reply, Data) ->
     case erlkoenig_proto:decode(Reply) of
@@ -499,7 +547,12 @@ starting(state_timeout, go_timeout, Data) ->
     {next_state, failed, Data2#ct_data{error_reason = go_timeout}};
 
 starting({call, _From}, _, _Data) ->
-    {keep_state_and_data, [postpone]}.
+    {keep_state_and_data, [postpone]};
+
+%% Stale timer messages from the previous gen_statem incarnation may
+%% arrive while we're bringing a fresh container up. Discard.
+starting(info, {poll_stats, _, _}, _Data) -> keep_state_and_data;
+starting(info, check_restart, _Data) -> keep_state_and_data.
 
 %% =================================================================
 %% running - Container executing
@@ -922,7 +975,10 @@ recovering({call, From}, stop_container, Data) ->
      Data#ct_data{user_stopped = true}, [{reply, From, ok}]};
 
 recovering({call, _From}, _, _Data) ->
-    {keep_state_and_data, [postpone]}.
+    {keep_state_and_data, [postpone]};
+
+recovering(info, {poll_stats, _, _}, _Data) -> keep_state_and_data;
+recovering(info, check_restart, _Data) -> keep_state_and_data.
 
 %% =================================================================
 %% disconnected - Socket lost while running, attempting reconnect
@@ -958,7 +1014,10 @@ disconnected({call, From}, get_info, Data) ->
     {keep_state_and_data, [{reply, From, build_info(disconnected, Data)}]};
 
 disconnected({call, From}, _, _Data) ->
-    {keep_state_and_data, [{reply, From, {error, disconnected}}]}.
+    {keep_state_and_data, [{reply, From, {error, disconnected}}]};
+
+disconnected(info, {poll_stats, _, _}, _Data) -> keep_state_and_data;
+disconnected(info, check_restart, _Data) -> keep_state_and_data.
 
 %% =================================================================
 %% Internal
@@ -1206,8 +1265,10 @@ handle_check_restart(Data) ->
     Data2 = Data#ct_data{net_info = undefined},
     case should_restart(Data2) of
         true ->
+            NewCount = Data2#ct_data.restart_count + 1,
+            persist_restart_count(Data2#ct_data.name, NewCount),
             {next_state, restarting,
-             Data2#ct_data{restart_count = Data2#ct_data.restart_count + 1}};
+             Data2#ct_data{restart_count = NewCount}};
         false ->
             Data3 = release_ip(Data2),
             {keep_state, Data3}

@@ -106,10 +106,10 @@ dispatch(["vol", "set-quota", Uuid, Size], O)         -> vol_set_quota(O, list_t
 
 %% --- Quarantine ---------------------------------------------------
 dispatch(["quarantine", "list"], O)                   -> q_list(O);
-dispatch(["quarantine", "add", Hash], O)              -> q_add(O, list_to_binary(Hash), manual);
-dispatch(["quarantine", "add", Hash, "--reason", R], O) -> q_add(O, list_to_binary(Hash),
+dispatch(["quarantine", "add", Hash], O)              -> q_add(O, decode_hash(Hash), manual);
+dispatch(["quarantine", "add", Hash, "--reason", R], O) -> q_add(O, decode_hash(Hash),
                                                                  list_to_atom(R));
-dispatch(["quarantine", "remove", Hash], O)           -> q_remove(O, list_to_binary(Hash));
+dispatch(["quarantine", "remove", Hash], O)           -> q_remove(O, decode_hash(Hash));
 
 %% --- Admission ----------------------------------------------------
 dispatch(["admission", "snapshot"], O) -> adm_snapshot(O);
@@ -802,6 +802,15 @@ hex(Bin) when is_binary(Bin), byte_size(Bin) >= 8 ->
     binary:encode_hex(Bin);
 hex(Other) ->
     io_lib:format("~p", [Other]).
+
+decode_hash(Str) when is_list(Str) ->
+    decode_hash(list_to_binary(Str));
+decode_hash(Bin) when is_binary(Bin) ->
+    try binary:decode_hex(Bin) of
+        Raw when byte_size(Raw) =:= 32 -> Raw;
+        _ -> die("quarantine hash must be 64 hex chars (SHA-256)")
+    catch _:_ -> die("quarantine hash must be hex-encoded")
+    end.
 
 %%====================================================================
 %% Help / fatal errors

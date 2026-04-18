@@ -16,6 +16,7 @@ defmodule Erlkoenig.Nft.TableBuilder do
             sets: [],
             maps: [],
             vmaps: [],
+            flowtables: [],
             chains: []
 
   def new(family, name) do
@@ -51,6 +52,24 @@ defmodule Erlkoenig.Nft.TableBuilder do
   def add_concat_vmap(%__MODULE__{vmaps: vs} = t, name, fields, entries) do
     vmap = %{name: name, fields: fields, entries: entries, concat: true}
     %{t | vmaps: vs ++ [vmap]}
+  end
+
+  def add_flowtable(%__MODULE__{flowtables: fts} = t, name, opts) do
+    devices = Keyword.get(opts, :devices, [])
+    priority = Keyword.get(opts, :priority, 0)
+
+    if devices == [] do
+      raise CompileError,
+        description: "nft_flowtable #{inspect(name)}: devices: must list at least one interface"
+    end
+
+    ft = %{
+      name: name,
+      hook: :ingress,
+      priority: priority,
+      devices: devices
+    }
+    %{t | flowtables: fts ++ [ft]}
   end
 
   def validate!(%__MODULE__{} = t) do
@@ -89,6 +108,7 @@ defmodule Erlkoenig.Nft.TableBuilder do
     base = if t.sets != [], do: Map.put(base, :sets, t.sets), else: base
     base = if t.maps != [], do: Map.put(base, :maps, t.maps), else: base
     base = if t.vmaps != [], do: Map.put(base, :vmaps, t.vmaps), else: base
+    base = if t.flowtables != [], do: Map.put(base, :flowtables, t.flowtables), else: base
     base
   end
 

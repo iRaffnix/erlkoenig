@@ -19,9 +19,10 @@ injection upstream of the release pipeline.
 
 ## Trust roots
 
-A trust root is an X.509 certificate in PEM form, placed under
-`/etc/erlkoenig/ca/` (or wherever sys.config points). The runtime
-loads all of them at boot into an in-memory pool. Signature
+A trust root is an X.509 certificate in PEM form. The paths are
+listed explicitly in sys.config under `trust_roots` (default: empty
+list). The runtime loads all listed certificates at boot into an
+in-memory pool. Signature
 verification uses `public_key:pkix_path_validation/3` to chain the
 signer's certificate back to a root in the pool — standard X.509
 semantics, including expiry and revocation checks.
@@ -57,10 +58,11 @@ validates the certificate chain against the trust pool. Any failure
 returns `{error, Reason}` and the container transitions to `failed`
 with the reason recorded for inspection.
 
-The failure modes are all distinct atoms — `hash_mismatch`,
+The failure modes are all distinct atoms — `sha256_mismatch`,
 `signature_invalid`, `chain_too_short`, `untrusted_root`,
-`cert_expired`, `sig_file_missing` — so operators can tell at a
-glance what went wrong.
+`sig_not_found` — so operators can tell at a glance what went wrong.
+Certificate expiry is caught by `pkix_path_validation` and surfaces
+as part of the chain validation error.
 
 ## Operation modes
 
@@ -105,3 +107,157 @@ host; the runtime does the rest.
 Audit trails land on `security.<name>.verified` and
 `security.<name>.rejected` routing keys (→ Chapter 9), so every
 verification outcome is observable centrally.
+
+## Hands-on: sign, verify, tamper, reject
+
+This walkthrough takes a binary through the full signature lifecycle.
+Requires `openssl` on the host for key generation.
+
+**1. Generate a signing key and self-signed cert.**
+
+```bash
+mkdir -p /tmp/pki && cd /tmp/pki
+
+# Ed25519 private key
+openssl genpkey -algorithm ed25519 -out signer.key
+
+# Self-signed cert (production: this would be issued by a CA)
+openssl req -new -x509 -key signer.key -out signer.pem \
+    -days 365 -subj "/CN=erlkoenig-build-signer/O=example"
+
+# Inspect
+openssl x509 -in signer.pem -noout -text | head -15
+```
+
+**2. Sign a binary.**
+
+```bash
+cp /opt/erlkoenig/rt/demo/test-erlkoenig-echo_server /tmp/pki/demo
+erlkoenig eval '
+  erlkoenig_sig:sign(
+    "/tmp/pki/demo",
+    "/tmp/pki/signer.pem",
+    "/tmp/pki/signer.key",
+    #{git_sha => <<"abcdef0123456789abcdef0123456789abcdef01">>}
+  ).'
+# Writes /tmp/pki/demo.sig
+ls -la /tmp/pki/demo.sig
+```
+
+The `.sig` file is compact binary — cert chain (PEM), signature
+(base64), and the signed payload (SHA-256 of the binary + git SHA +
+timestamp + signer CN).
+
+**3. Configure trust.** Edit the runtime config to trust this root
+certificate:
+
+```bash
+mkdir -p /etc/erlkoenig/ca
+cp /tmp/pki/signer.pem /etc/erlkoenig/ca/
+```
+
+Update `sys.config` to enable enforcement:
+
+```erlang
+{erlkoenig, [
+    ...,
+    {signature, #{
+        mode            => on,
+        trust_roots     => ["/etc/erlkoenig/ca/signer.pem"],
+        min_chain_depth => 2
+    }}
+]}.
+```
+
+Restart the daemon for `sys.config` changes to take effect.
+
+**4. Verify the signature directly (no daemon needed).**
+
+```bash
+erlkoenig eval '
+  case erlkoenig_sig:verify(
+    "/tmp/pki/demo",
+    "/tmp/pki/demo.sig") of
+    {ok, Meta} ->
+      io:format("VERIFIED~n"
+                "  signer:    ~s~n"
+                "  git_sha:   ~s~n"
+                "  sha256:    ~s~n",
+        [maps:get(signer, Meta),
+         maps:get(git_sha, Meta),
+         binary:encode_hex(maps:get(sha256, Meta))]);
+    {error, Reason} ->
+      io:format("REJECTED: ~p~n", [Reason])
+  end.'
+```
+
+Output (on success):
+
+    VERIFIED
+      signer:    erlkoenig-build-signer
+      git_sha:   abcdef0123456789abcdef0123456789abcdef01
+      sha256:    AB0C33F207D8588F...
+
+**5. Spawn a container with the signed binary.** With `mode => on`
+the runtime rejects any spawn whose binary lacks a valid signature.
+A correctly-signed binary spawns normally:
+
+```bash
+cat > /tmp/pki/stack.exs << 'EOF'
+defmodule SignedStack do
+  use Erlkoenig.Stack
+  host do
+    ipvlan "s", parent: {:dummy, "ek_s"}, subnet: {10, 111, 0, 0, 24}
+  end
+  pod "p", strategy: :one_for_one do
+    container "app", binary: "/tmp/pki/demo", args: ["9000"],
+      signature: :required,
+      zone: "s", replicas: 1, restart: :permanent
+  end
+end
+EOF
+ek dsl compile /tmp/pki/stack.exs -o /tmp/pki/stack.term
+ek up /tmp/pki/stack.term
+ek ps       # app-0-app running
+```
+
+An AMQP event `security.app-0-app.verified` fires on spawn.
+
+**6. Tamper, observe rejection.**
+
+```bash
+ek down /tmp/pki/stack.term
+# Modify one byte — breaks the SHA-256 in the signature
+printf '\x00' | dd of=/tmp/pki/demo bs=1 count=1 conv=notrunc seek=100
+ek up /tmp/pki/stack.term
+ek ps   # empty — container refused to start
+```
+
+The daemon logs a rejection; the AMQP bus produces:
+
+    security.app-0-app.rejected   { reason: sha256_mismatch,
+                                     binary: "/tmp/pki/demo" }
+
+`ek ct inspect` on the failed container shows
+`error_reason: sha256_mismatch`.
+
+**7. Delete the `.sig` file, see the next failure mode.**
+
+```bash
+rm /tmp/pki/demo.sig
+ek up /tmp/pki/stack.term
+# error_reason: sig_not_found
+```
+
+**8. Mode switches for migration.** On systems that don't yet have
+all binaries signed, `mode => warn` logs the outcome without
+enforcing — useful to observe the blast radius before flipping to
+`on`:
+
+```erlang
+{signature, #{mode => warn, ...}}
+```
+
+Every unsigned or mismatched binary produces a `security.*.rejected`
+event, but the spawn goes through. Once the warnings stop, flip to
+`on` and the enforcement is live.

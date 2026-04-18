@@ -122,3 +122,101 @@ used_count_after_release(_Pid) ->
     erlkoenig_ip_pool:release(Ip1),
     timer:sleep(10),
     ?_assertEqual(2, erlkoenig_ip_pool:used_count()).
+
+%% =================================================================
+%% Non-/24 prefixes — pool sizes itself based on netmask
+%% =================================================================
+
+prefix_test_() ->
+    [
+     {"prefix /28 yields 13 host addresses",  fun prefix_28_size/0},
+     {"prefix /28 last address is .14",       fun prefix_28_last/0},
+     {"prefix /16 supports 65 533 addresses", fun prefix_16_capacity/0},
+     {"prefix /30 yields exactly one host",   fun prefix_30_one_host/0},
+     {"prefix /31 is rejected at boot",       fun prefix_31_rejected/0},
+     {"release outside pool range is no-op",  fun release_out_of_range/0}
+    ].
+
+prefix_28_size() ->
+    %% 10.99.0.16/28: network=.16, gateway=.17, hosts=.18..30, bcast=.31
+    %% pool capacity = 13 (.18 through .30)
+    Pid = start_zone(strat28, {10, 99, 0, 16}, 28),
+    try
+        Allocated = collect_until_exhausted(Pid),
+        ?assertEqual(13, length(Allocated)),
+        ?assertEqual({10, 99, 0, 18}, hd(Allocated)),
+        ?assertEqual({10, 99, 0, 30}, lists:last(Allocated))
+    after stop_zone(Pid)
+    end.
+
+prefix_28_last() ->
+    Pid = start_zone(strat28b, {10, 99, 0, 16}, 28),
+    try
+        _ = [gen_server:call(Pid, allocate) || _ <- lists:seq(1, 12)],
+        ?assertEqual({ok, {10, 99, 0, 30}}, gen_server:call(Pid, allocate)),
+        ?assertEqual({error, exhausted},   gen_server:call(Pid, allocate))
+    after stop_zone(Pid)
+    end.
+
+prefix_16_capacity() ->
+    %% /16 has 2^16 - 3 = 65533 host addresses (network, gateway, broadcast all skipped)
+    Pid = start_zone(strat16, {10, 99, 0, 0}, 16),
+    try
+        First = gen_server:call(Pid, allocate),
+        ?assertEqual({ok, {10, 99, 0, 2}}, First),
+        %% Walking 65 533 allocations is slow but not slow enough to skip;
+        %% bound to ~250 ms on a normal machine.
+        Rest = [gen_server:call(Pid, allocate) || _ <- lists:seq(1, 65532)],
+        ?assertMatch({ok, {10, 99, 255, 254}}, lists:last(Rest)),
+        ?assertEqual({error, exhausted}, gen_server:call(Pid, allocate))
+    after stop_zone(Pid)
+    end.
+
+prefix_30_one_host() ->
+    %% 10.99.0.0/30: network=.0, gateway=.1, host=.2, bcast=.3 → exactly 1 host
+    Pid = start_zone(strat30, {10, 99, 0, 0}, 30),
+    try
+        ?assertEqual({ok, {10, 99, 0, 2}}, gen_server:call(Pid, allocate)),
+        ?assertEqual({error, exhausted},   gen_server:call(Pid, allocate))
+    after stop_zone(Pid)
+    end.
+
+prefix_31_rejected() ->
+    %% /31 leaves no room for gateway + host. Pool refuses to start.
+    process_flag(trap_exit, true),
+    Result = (catch erlkoenig_ip_pool:start_link(
+                      #{zone => strat31,
+                        network => #{subnet => {10, 99, 0, 0}, netmask => 31}})),
+    ?assertMatch({error, {unsupported_netmask, 31, _, _}}, Result).
+
+release_out_of_range() ->
+    %% Releasing an address outside the pool's window must not corrupt
+    %% the free list — this guards against operator/test typos.
+    Pid = start_zone(stratrr, {10, 99, 0, 0}, 28),
+    try
+        gen_server:cast(Pid, {release, {99, 99, 99, 99}}),
+        timer:sleep(10),
+        %% First allocate should still be the natural .2, not .99.99.99.99
+        ?assertEqual({ok, {10, 99, 0, 2}}, gen_server:call(Pid, allocate))
+    after stop_zone(Pid)
+    end.
+
+start_zone(Name, Subnet, Netmask) ->
+    {ok, Pid} = erlkoenig_ip_pool:start_link(
+                  #{zone => Name,
+                    network => #{subnet => Subnet, netmask => Netmask}}),
+    Pid.
+
+stop_zone(Pid) ->
+    unlink(Pid),
+    exit(Pid, shutdown),
+    MRef = monitor(process, Pid),
+    receive {'DOWN', MRef, process, Pid, _} -> ok
+    after 1000 -> ok
+    end.
+
+collect_until_exhausted(Pid) ->
+    case gen_server:call(Pid, allocate) of
+        {ok, Ip}            -> [Ip | collect_until_exhausted(Pid)];
+        {error, exhausted}  -> []
+    end.

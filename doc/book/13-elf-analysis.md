@@ -5,7 +5,9 @@ file, infers the source language from structural markers, walks the
 instruction stream to enumerate every syscall the binary can issue,
 and generates a seccomp-BPF profile restricting the kernel to
 exactly that set. All of it happens in Erlang, without external
-tools, at config-load time.
+tools, at container spawn time (during rootfs setup, after the
+namespace is ready). Results are cached per binary so subsequent
+spawns of the same container skip the analysis.
 
 ## Why analyse binaries
 
@@ -132,3 +134,101 @@ language not yet supported), the container spawn fails loud rather
 than running with no filter. Operators who know what they're doing
 can force `:none`, but the failure mode is designed to be a
 deliberate choice, not a silent fallback.
+
+## Hands-on: inspect the generated seccomp profile
+
+This walkthrough runs the analyser on an arbitrary binary and shows
+the resulting syscall set. No container spawn required — the analyser
+is pure Erlang, call it directly.
+
+**1. Parse the ELF header.**
+
+```bash
+erlkoenig eval '
+  {ok, Elf} = erlkoenig_elf:parse(
+    "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server"),
+  io:format("arch:     ~p~n", [maps:get(arch, Elf)]),
+  io:format("class:    ~p~n", [maps:get(class, Elf)]),
+  io:format("sections: ~p~n", [length(maps:get(sections, Elf, []))]).'
+```
+
+Expected:
+
+    arch:     x86_64
+    class:    elf64
+    sections: 29
+
+**2. Detect the source language.**
+
+```bash
+erlkoenig eval '
+  {ok, Elf} = erlkoenig_elf:parse(
+    "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server"),
+  Lang = elf_lang:detect(Elf),
+  io:format("language: ~p~n", [Lang]).'
+```
+
+The heuristic scans for structural fingerprints: Go's `.gopclntab`
+section with a magic header, Rust's `__RUST_` debug symbols, C++'s
+mangled names. The demo binary is C — output:
+
+    language: c
+
+**3. Enumerate syscalls.**
+
+```bash
+erlkoenig eval '
+  {ok, Syscalls} = erlkoenig_seccomp_gen:analyse(
+    "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server"),
+  io:format("syscall count: ~p~n", [length(Syscalls)]),
+  io:format("first 15: ~p~n", [lists:sublist(Syscalls, 15)]).'
+```
+
+Expected (subset will vary by binary):
+
+    syscall count: 42
+    first 15: [accept4, bind, brk, clock_gettime, close, connect,
+               exit_group, fcntl, fstat, getsockopt, ioctl, listen,
+               mmap, openat, read]
+
+**4. Inspect the compiled BPF filter.**
+
+```bash
+erlkoenig eval '
+  {ok, BPF} = erlkoenig_seccomp_gen:build(
+    "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server"),
+  io:format("BPF bytes: ~p~n", [byte_size(BPF)]),
+  %% First 16 bytes for sanity
+  <<Head:16/binary, _/binary>> = BPF,
+  io:format("head: ~p~n", [Head]).'
+```
+
+The bytes are the raw `sock_filter` array that gets passed to
+`prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, ...)` in the child.
+Each filter entry is 8 bytes; a typical binary's profile is a few
+hundred bytes.
+
+**5. Compare against a different binary.**
+
+```bash
+# A Go binary (if you have one handy)
+erlkoenig eval '
+  {ok, Syscalls} = erlkoenig_seccomp_gen:analyse("/usr/bin/go"),
+  io:format("~p syscalls~n", [length(Syscalls)]).'
+```
+
+Go binaries typically end up with 80–120 syscalls — Go's runtime
+touches more of the kernel (scheduler signals, network poll,
+timers) than a minimal C server.
+
+**6. Force a failure mode.** Point the analyser at a non-ELF file:
+
+```bash
+erlkoenig eval '
+  io:format("~p~n", [erlkoenig_elf:parse("/etc/passwd")]).'
+# => {error, not_elf}
+```
+
+If you put `seccomp: :default` on a container whose binary fails
+analysis, the spawn fails with an explicit error reason. The
+container never runs with an empty filter.

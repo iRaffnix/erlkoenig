@@ -1,9 +1,10 @@
 defmodule Erlkoenig.Host.Builder do
   @moduledoc """
-  Accumulates host topology: interfaces, bridges, and firewall chains.
+  Accumulates host topology: interfaces, IPVLAN zones, and firewall chains.
 
-  The host block describes the machine — its interfaces, bridges,
-  and the nftables chains that protect it and control forwarding.
+  The host block describes the machine — its interfaces, the IPVLAN
+  zones containers attach to, and the nftables chains that protect the
+  host and control forwarding.
   """
 
   defstruct interfaces: [],
@@ -105,7 +106,7 @@ defmodule Erlkoenig.Host.Builder do
     case Map.get(opts, key) do
       nil -> :ok
       name when is_binary(name) ->
-        # Could be "eth0", "br0", "web.frontend", or "lo"
+        # Could be "eth0", "lo", an IPVLAN zone name, or "pod.container"
         # Pod-qualified names (pod.container) are checked separately
         base = name |> String.split(".") |> hd()
         unless MapSet.member?(valid_names, name) or

@@ -447,6 +447,17 @@ if [ ! -f "$COOKIE_FILE" ]; then
     ok "Cookie generated: $COOKIE_FILE"
 fi
 
+# Operator cookie path — `ek` CLI defaults to /etc/erlkoenig/cookie.
+# Keep them in sync so operators can run `ek node ping` without any
+# --cookie-file flag.
+mkdir -p /etc/erlkoenig
+if [ ! -f /etc/erlkoenig/cookie ] || ! cmp -s "$COOKIE_FILE" /etc/erlkoenig/cookie; then
+    cp "$COOKIE_FILE" /etc/erlkoenig/cookie
+    chmod 440 /etc/erlkoenig/cookie
+    chown root:"$SERVICE_USER" /etc/erlkoenig/cookie
+    ok "Operator cookie synced: /etc/erlkoenig/cookie"
+fi
+
 # ── Fix hostname resolution for epmd ────────────────────
 # Debian cloud images set hostname to 127.0.1.1 in /etc/hosts.
 # epmd binds to 127.0.0.1 — the mismatch prevents CLI from

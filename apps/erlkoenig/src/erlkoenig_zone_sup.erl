@@ -20,16 +20,16 @@ Top-level supervisor for all network zones.
 
 Reads zone definitions from erlkoenig_zone and creates a
 rest_for_one child supervisor per zone, each containing
-bridge, ip_pool and dns services.
+ip_pool and dns services. Link creation (IPVLAN slave into
+container netns) is driven on-demand per container via
+erlkoenig_zone_link_ipvlan — no persistent link process.
 
 Architecture:
   erlkoenig_zone_sup (one_for_one)
     +-- zone_default_sup (rest_for_one)
-    |     +-- erlkoenig_bridge (for zone default)
     |     +-- erlkoenig_ip_pool (for zone default)
     |     +-- erlkoenig_dns (for zone default)
     +-- zone_dmz_sup (rest_for_one)
-    |     +-- erlkoenig_bridge (for zone dmz)
     |     +-- erlkoenig_ip_pool (for zone dmz)
     |     +-- erlkoenig_dns (for zone dmz)
     ...

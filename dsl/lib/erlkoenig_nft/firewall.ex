@@ -137,7 +137,7 @@ defmodule ErlkoenigNft.Firewall do
       rule :accept, tcp: 5432, saddr: {10, 0, 0, 0, 24}
       rule :drop, set: "blocklist", counter: :banned
       rule :drop, log: "DROP: ", counter: :dropped
-      rule :masquerade, oif_neq: "bridge0"
+      rule :masquerade, oif_neq: "eth0"
 
   Options:
     ct: :established         — conntrack state match

@@ -39,10 +39,14 @@ main([]) ->
             end
     end,
 
-    %% Load application
+    %% Load application — test_helper discovers project root from script path
+    true = code:add_patha(filename:dirname(escript:script_name())),
+    Root = test_helper:project_root(),
     code:add_pathsz(filelib:wildcard("/opt/erlkoenig/lib/*/ebin")),
-    code:add_pathsz(filelib:wildcard("_build/default/lib/*/ebin")),
-    code:add_pathsz(filelib:wildcard("_build/default/checkouts/*/ebin")),
+    code:add_pathsz(filelib:wildcard(
+        filename:join(Root, "_build/default/lib/*/ebin"))),
+    code:add_pathsz(filelib:wildcard(
+        filename:join(Root, "_build/default/checkouts/*/ebin"))),
     application:load(erlkoenig),
 
     %% === Step 1: Create a dummy parent device ===
@@ -57,7 +61,7 @@ main([]) ->
 
     %% === Step 2: Spawn container ===
     io:format("2. Container spawn...~n"),
-    RtPath = find_rt(),
+    RtPath = test_helper:rt_binary(),
     Port = open_port({spawn_executable, RtPath},
                      [{packet, 4}, binary, exit_status, use_stdio]),
 
@@ -71,7 +75,7 @@ main([]) ->
         halt(1)
     end,
 
-    DemoBin = list_to_binary(find_demo("echo_server")),
+    DemoBin = test_helper:demo("echo_server"),
     Cmd = erlkoenig_proto:encode_cmd_spawn(
             DemoBin, [<<"9999">>], [], 0, 0, 0),
     port_command(Port, Cmd),
@@ -330,34 +334,4 @@ cleanup_parent() ->
     os:cmd("ip route del 10.99.0.10/32 2>/dev/null"),
     ok.
 
-find_rt() ->
-    case os:getenv("ERLKOENIG_RT_PATH") of
-        false -> find_first_existing([
-            "/opt/erlkoenig/rt/erlkoenig_rt",
-            "/home/dev/code/erlkoenig_rt/build/erlkoenig_rt",
-            filename:absname("build/release/erlkoenig_rt"),
-            filename:absname("../erlkoenig_rt/build/erlkoenig_rt")
-        ]);
-        Path -> Path
-    end.
 
-find_demo(Name) ->
-    BinName = "test-erlkoenig-" ++ Name,
-    case os:getenv("ERLKOENIG_DEMO_DIR") of
-        false -> find_first_existing([
-            filename:join("/opt/erlkoenig/rt/demo", BinName),
-            filename:join("/home/dev/code/erlkoenig_rt/build/demo", BinName),
-            filename:absname(filename:join("build/release/demo", BinName)),
-            filename:absname(filename:join("../erlkoenig_rt/build/demo", BinName))
-        ]);
-        Dir -> filename:join(Dir, BinName)
-    end.
-
-find_first_existing([]) ->
-    io:format("ERROR: no binary found~n"),
-    halt(1);
-find_first_existing([Path | Rest]) ->
-    case filelib:is_regular(Path) of
-        true  -> Path;
-        false -> find_first_existing(Rest)
-    end.

@@ -36,10 +36,10 @@ Process lifecycle:
 -export([init/1, callback_mode/0, terminate/3]).
 -export([observing/3, suspicious/3, banned/3, probation/3]).
 
-%% Idle timeout: 5 minutes without events → process dies
--define(IDLE_TIMEOUT_MS, 300_000).
-%% Probation: 2 minutes after unban
--define(PROBATION_MS, 120_000).
+%% Default idle timeout: 5 minutes without events → process dies
+-define(DEFAULT_IDLE_TIMEOUT_MS, 300_000).
+%% Default probation: 2 minutes after unban
+-define(DEFAULT_PROBATION_MS, 120_000).
 
 -record(data, {
     ip :: binary(),
@@ -94,7 +94,7 @@ init({IP, Config}) ->
         last_seen = Now,
         ban_count = 0,
         registry = Registry
-    }, [{state_timeout, ?IDLE_TIMEOUT_MS, idle_expire}]}.
+    }, [{state_timeout, idle_timeout_ms(Config), idle_expire}]}.
 
 terminate(_Reason, _State, #data{ip = IP, registry = Reg}) ->
     try ets:delete(Reg, IP)
@@ -115,10 +115,10 @@ observing(cast, {connection, DstPort}, Data) ->
             broadcast({ct_guard_suspect, #{ip => Data2#data.ip,
                 ports => sets:to_list(Data2#data.ports_seen)}}),
             {next_state, suspicious, Data2,
-             [{state_timeout, ?IDLE_TIMEOUT_MS, idle_expire}]};
+             [{state_timeout, idle_timeout_ms(Data2#data.config), idle_expire}]};
         clear ->
             {keep_state, Data2,
-             [{state_timeout, ?IDLE_TIMEOUT_MS, idle_expire}]}
+             [{state_timeout, idle_timeout_ms(Data2#data.config), idle_expire}]}
     end;
 
 observing(state_timeout, idle_expire, _Data) ->
@@ -135,7 +135,7 @@ suspicious(cast, {connection, DstPort}, Data) ->
             do_ban(Reason, Duration, Data2);
         _ ->
             {keep_state, Data2,
-             [{state_timeout, ?IDLE_TIMEOUT_MS, idle_expire}]}
+             [{state_timeout, idle_timeout_ms(Data2#data.config), idle_expire}]}
     end;
 
 suspicious(state_timeout, idle_expire, _Data) ->
@@ -152,7 +152,7 @@ banned(cast, {connection, _DstPort}, Data) ->
 banned(state_timeout, unban, #data{ip = IP} = Data) ->
     erlkoenig_threat_mesh:local_unban(IP),
     {next_state, probation, Data,
-     [{state_timeout, ?PROBATION_MS, probation_expire}]}.
+     [{state_timeout, probation_ms(Data#data.config), probation_expire}]}.
 
 %% ===================================================================
 %% State: probation (recently unbanned, watching for recidivism)
@@ -167,7 +167,7 @@ probation(cast, {connection, DstPort}, Data) ->
         last_seen = erlang:system_time(second)
     },
     {next_state, observing, Data2,
-     [{state_timeout, ?IDLE_TIMEOUT_MS, idle_expire}]};
+     [{state_timeout, idle_timeout_ms(Data2#data.config), idle_expire}]};
 
 probation(state_timeout, probation_expire, _Data) ->
     {stop, normal}.
@@ -280,3 +280,11 @@ broadcast(Msg) ->
         ok
     catch _:_ -> ok
     end.
+
+%% Config-driven timeouts (DSL values in seconds, we need milliseconds).
+%% Falls back to compiled defaults when the config key is missing.
+idle_timeout_ms(Config) ->
+    maps:get(forget_after, Config, ?DEFAULT_IDLE_TIMEOUT_MS div 1000) * 1000.
+
+probation_ms(Config) ->
+    maps:get(probation, Config, ?DEFAULT_PROBATION_MS div 1000) * 1000.

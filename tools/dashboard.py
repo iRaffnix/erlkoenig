@@ -99,6 +99,10 @@ class ClusterState:
         # Lifecycle
         self.lifecycle_events = []
 
+        # Structured errors (error.<type>.<reason>)
+        self.errors = []            # list of (ts, type, reason, severity, ct, context, data, source)
+        self.error_counts = defaultdict(int)  # key: f"{type}.{reason}"
+
     def handle_event(self, routing_key, body):
         parts = routing_key.split(".")
         if len(parts) < 3:
@@ -125,6 +129,8 @@ class ClusterState:
         elif category == "conntrack":
             self._handle_conntrack(entity, event, payload)
             result = "skip"  # conntrack updates counters, not event log
+        elif category == "error":
+            self._handle_error(entity, event, payload, body)
 
         if result == "skip":
             return routing_key
@@ -138,7 +144,8 @@ class ClusterState:
             ts = str(ts)[:8]
 
         summary = self._summarize(category, entity, event, payload)
-        entry = (ts, routing_key, summary, category)
+        severity = payload.get("severity") if category == "error" else None
+        entry = (ts, routing_key, summary, category, severity)
         self.events.append(entry)
         if len(self.events) > 500:
             self.events = self.events[-500:]
@@ -282,7 +289,42 @@ class ClusterState:
         elapsed = max(1, time.time() - self.flows_new_window[0])
         return len(self.flows_new_window) / elapsed
 
+    def _handle_error(self, err_type, reason, payload, body):
+        """Store structured errors (routing: error.<type>.<reason>).
+
+        Payload shape (from erlkoenig_error:payload/1):
+          type, reason, context, data, severity, source, ts_ms, [container]
+        """
+        ts = body.get("ts", "")
+        if isinstance(ts, (int, float)):
+            ts = datetime.fromtimestamp(ts / 1000).strftime("%H:%M:%S")
+        elif not ts:
+            ts = datetime.now().strftime("%H:%M:%S")
+        else:
+            ts = str(ts)[:8]
+        entry = (
+            ts,
+            payload.get("type", err_type),
+            payload.get("reason", reason),
+            payload.get("severity", "error"),
+            payload.get("container", ""),
+            payload.get("context", ""),
+            payload.get("data", {}),
+            payload.get("source", {}),
+        )
+        self.errors.append(entry)
+        if len(self.errors) > 200:
+            self.errors = self.errors[-200:]
+        self.error_counts[f"{err_type}.{reason}"] += 1
+
     def _summarize(self, cat, entity, event, body):
+        if cat == "error":
+            sev = body.get("severity", "error")
+            ct  = body.get("container", "")
+            ctx = body.get("context", "")
+            ct_str = f" ct={ct}" if ct else ""
+            ctx_str = f": {ctx}" if ctx else ""
+            return f"[{sev}]{ct_str}{ctx_str}"
         if cat == "guard":
             ip = body.get("ip", "")
             reason = body.get("reason", "")
@@ -554,6 +596,7 @@ class ErlkoenigTUI(App):
         Binding("5", "tab_5", "Events"),
         Binding("f", "filter", "Filter"),
         Binding("c", "clear", "Clear"),
+        Binding("m", "toggle_mouse", "Mouse/Copy"),
         Binding("q", "quit", "Quit"),
     ]
 
@@ -566,6 +609,7 @@ class ErlkoenigTUI(App):
         self._filter = ""
         self._amqp = None
         self._last_threat_idx = 0
+        self._mouse_on = True
 
     def compose(self) -> ComposeResult:
         from textual.widgets import TabbedContent, TabPane
@@ -704,12 +748,24 @@ class ErlkoenigTUI(App):
             log = self.query_one("#overview-recent", RichLog)
             with self._lock:
                 events = list(s.events)
-            for ts, key, summary, cat in events[-3:]:
-                if cat in ("guard", "container", "firewall"):
-                    colors = {"guard": "yellow", "container": "green", "firewall": "red"}
+            colors = {
+                "guard": "dark_orange", "container": "green",
+                "firewall": "red", "error": "red",
+            }
+            severity_colors = {
+                "critical": "bold bright_red", "error": "red", "warn": "yellow",
+            }
+            for entry in events[-5:]:
+                ts, key, summary, cat = entry[:4]
+                severity = entry[4] if len(entry) >= 5 else None
+                if cat not in ("guard", "container", "firewall", "error"):
+                    continue
+                if cat == "error" and severity in severity_colors:
+                    color = severity_colors[severity]
+                else:
                     color = colors.get(cat, "white")
-                    detail = f"  {summary}" if summary else ""
-                    log.write(f"[dim]{ts}[/]  [{color}]{key}[/]{detail}")
+                detail = f"  {summary}" if summary else ""
+                log.write(f"[dim]{ts}[/]  [{color}]{key}[/]{detail}")
         except Exception:
             pass
 
@@ -882,15 +938,32 @@ class ErlkoenigTUI(App):
             events = list(self.state.events)
         try:
             log = self.query_one("#event-full", RichLog)
-            for ts, key, summary, cat in events[-len(new_events):]:
+            colors = {
+                "container": "green",
+                "stats":     "blue",
+                "firewall":  "red",
+                "guard":     "dark_orange",
+                "conntrack": "cyan",
+                "error":     "red",
+            }
+            severity_colors = {
+                "critical": "bold bright_red",
+                "error":    "red",
+                "warn":     "yellow",
+            }
+            for entry in events[-len(new_events):]:
+                # tuple is (ts, key, summary, cat[, severity])
+                if len(entry) >= 5:
+                    ts, key, summary, cat, severity = entry
+                else:
+                    ts, key, summary, cat = entry
+                    severity = None
                 if self._filter and self._filter not in key:
                     continue
-                colors = {
-                    "container": "green", "stats": "blue",
-                    "firewall": "red", "guard": "yellow",
-                    "conntrack": "cyan",
-                }
-                color = colors.get(cat, "white")
+                if cat == "error" and severity in severity_colors:
+                    color = severity_colors[severity]
+                else:
+                    color = colors.get(cat, "white")
                 detail = f"  {summary}" if summary else ""
                 log.write(f"[dim]{ts}[/]  [{color}]{key}[/]{detail}")
         except Exception:
@@ -943,6 +1016,25 @@ class ErlkoenigTUI(App):
                 self.query_one(rid, RichLog).clear()
             except Exception:
                 pass
+
+    def action_toggle_mouse(self):
+        """Toggle terminal mouse capture so the user can select text with
+        the mouse and copy it. Textual's mouse handling otherwise eats
+        click-drag events."""
+        import sys
+        if self._mouse_on:
+            # Disable all common xterm mouse tracking modes
+            sys.stdout.write("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l")
+            sys.stdout.flush()
+            self._mouse_on = False
+            self.notify("Mouse OFF — select with mouse to copy. Press m to re-enable.",
+                        timeout=5)
+        else:
+            # Re-enable SGR-encoded mouse (1006) + any-event tracking (1003)
+            sys.stdout.write("\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h")
+            sys.stdout.flush()
+            self._mouse_on = True
+            self.notify("Mouse ON", timeout=3)
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected):
         row = event.data_table.get_row(event.row_key)

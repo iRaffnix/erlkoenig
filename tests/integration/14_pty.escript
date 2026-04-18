@@ -14,10 +14,10 @@
 -define(SPAWN_FLAG_PTY, 16#01).
 
 main(_Args) ->
-    ScriptDir = filename:dirname(escript:script_name()),
-    ProjectDir = filename:dirname(ScriptDir),
-    RtBin = find_rt(ProjectDir),
-    TestBin = find_demo(ProjectDir, "stdin_echo"),
+    true = code:add_patha(filename:dirname(escript:script_name())),
+    ProjectDir = test_helper:project_root(),
+    RtBin = test_helper:rt_binary(),
+    TestBin = binary_to_list(test_helper:demo("stdin_echo")),
 
     io:format("=== PTY / Stdin Test ===~n"),
     io:format("Runtime:     ~s~n", [RtBin]),
@@ -217,41 +217,6 @@ assert_file_exists(Path) ->
         false ->
             io:format("ERROR: file not found: ~s~n", [Path]),
             halt(1)
-    end.
-
-%% Find erlkoenig_rt binary.
-%% Search order: $ERLKOENIG_RT_PATH -> /opt/erlkoenig/rt -> build/release
-find_rt(ProjectDir) ->
-    case os:getenv("ERLKOENIG_RT_PATH") of
-        false -> find_rt_installed(ProjectDir);
-        Path  -> Path
-    end.
-
-find_rt_installed(ProjectDir) ->
-    Installed = "/opt/erlkoenig/rt/erlkoenig_rt",
-    case filelib:is_regular(Installed) of
-        true  -> Installed;
-        false ->
-            filename:absname(
-                filename:join(ProjectDir, "build/release/erlkoenig_rt"))
-    end.
-
-%% Find a demo binary by short name (e.g. "stdin_echo").
-%% Search order: $ERLKOENIG_DEMO_DIR -> /opt/erlkoenig/rt/demo -> build/release/demo
-find_demo(ProjectDir, Name) ->
-    BinName = "test-erlkoenig-" ++ Name,
-    case os:getenv("ERLKOENIG_DEMO_DIR") of
-        false -> find_demo_installed(ProjectDir, BinName);
-        Dir   -> filename:join(Dir, BinName)
-    end.
-
-find_demo_installed(ProjectDir, BinName) ->
-    Installed = filename:join("/opt/erlkoenig/rt/demo", BinName),
-    case filelib:is_regular(Installed) of
-        true  -> Installed;
-        false ->
-            filename:absname(
-                filename:join([ProjectDir, "build/release/demo", BinName]))
     end.
 
 %% Load erlkoenig_proto module.

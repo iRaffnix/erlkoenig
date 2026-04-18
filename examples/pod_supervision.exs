@@ -25,7 +25,7 @@ defmodule PodSupervision do
   #     → nur workers-0-fn restartet (one_for_one)
 
   host do
-    bridge "compute", subnet: {10, 0, 0, 0, 24}
+    ipvlan "compute", parent: {:dummy, "ek_compute"}, subnet: {10, 0, 0, 0, 24}
 
     nft_table :inet, "host" do
       nft_set "ban", :ipv4_addr
@@ -41,11 +41,20 @@ defmodule PodSupervision do
       base_chain "input", hook: :input, type: :filter,
         priority: :filter, policy: :drop do
 
+        # ── Standard-Härtung ──────────────────────────────
         nft_rule :accept, ct_state: [:established, :related]
         nft_rule :accept, iifname: "lo"
         nft_rule :accept, ip_protocol: :icmp
         nft_rule :accept, tcp_dport: 22
         nft_rule :accept, tcp_dport: 9100
+
+        # ── Runtime-Services ──────────────────────────────
+        # erlkoenig DNS-Resolver pro Zone auf der Gateway-IP.
+        # Ohne diese Regel timeoutet jedes getaddrinfo() im
+        # Container. Glasbox: kein Magic-Inject, Operator
+        # schreibt die Regel selbst (Kapitel 6 Service-Catalogue).
+        nft_rule :accept, ip_saddr: {10, 0, 0, 0, 24}, udp_dport: 53
+
         nft_rule :drop, counter: "input_drop", log_prefix: "HOST: "
       end
     end
@@ -61,7 +70,7 @@ defmodule PodSupervision do
       binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
       args: ["8080"],
       limits: %{memory: 268_435_456, pids: 100},
-      restart: :always do
+      zone: "compute", replicas: 1, restart: :permanent do
 
       publish interval: 2000 do
         metric :memory
@@ -78,7 +87,7 @@ defmodule PodSupervision do
       binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
       args: ["6379"],
       limits: %{memory: 134_217_728, pids: 50},
-      restart: :always do
+      zone: "compute", replicas: 1, restart: :permanent do
 
       publish interval: 2000 do
         metric :memory
@@ -103,7 +112,7 @@ defmodule PodSupervision do
       binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
       args: ["9001"],
       limits: %{memory: 268_435_456, pids: 100},
-      restart: :always do
+      zone: "compute", replicas: 1, restart: :permanent do
 
       publish interval: 5000 do
         metric :memory
@@ -124,7 +133,7 @@ defmodule PodSupervision do
       binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
       args: ["9002"],
       limits: %{memory: 536_870_912, pids: 200},
-      restart: :always do
+      zone: "compute", replicas: 1, restart: :permanent do
 
       publish interval: 5000 do
         metric :memory
@@ -140,7 +149,7 @@ defmodule PodSupervision do
       binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
       args: ["9003"],
       limits: %{memory: 268_435_456, pids: 100},
-      restart: :always do
+      zone: "compute", replicas: 1, restart: :permanent do
 
       publish interval: 5000 do
         metric :memory
@@ -163,7 +172,7 @@ defmodule PodSupervision do
       binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
       args: ["7000"],
       limits: %{memory: 134_217_728, pids: 50},
-      restart: {:on_failure, 3} do
+      zone: "compute", replicas: 2, restart: :transient do
 
       publish interval: 2000 do
         metric :memory
@@ -182,8 +191,4 @@ defmodule PodSupervision do
       end
     end
   end
-
-  attach "coupled",  to: "compute", replicas: 1
-  attach "pipeline", to: "compute", replicas: 1
-  attach "workers",  to: "compute", replicas: 2
 end

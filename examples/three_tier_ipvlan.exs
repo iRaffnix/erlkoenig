@@ -2,11 +2,11 @@ defmodule ThreeTierIpvlan do
   @moduledoc """
   Three-Tier Web Architecture — IPVLAN L3S auf Dummy-Parent.
 
-  Gleiche Anwendung wie three_tier_nft.exs, aber:
-  - Ein IPVLAN-Netz statt drei Bridges
-  - IP-basierte Firewall statt VMap-Dispatch
-  - Kein Masquerade (internes Netz)
-  - Kein DNAT (kein externer Zugang — dafür WireGuard oder Reverse-Proxy)
+  Web → App → Database, alle drei in einem gemeinsamen IPVLAN-L3S-Netz
+  auf einem Dummy-Parent. IP-basierte Firewall isoliert die Tiers
+  voneinander; kein Masquerade (rein internes Netz), kein DNAT
+  (für externen Zugang nutzt man WireGuard oder einen Reverse-Proxy
+  davor).
 
   Topologie:
 
@@ -32,13 +32,20 @@ defmodule ThreeTierIpvlan do
   use Erlkoenig.Stack
 
   # ── 1. Container ─────────────────────────────────────
+  #
+  # Jeder Container bekommt eine eigene nft-Tabelle in seiner netns.
+  # input-Chain regelt wer reindarf, output wer raus. IPVLAN-L3S
+  # umgeht den Host-Forward-Hook — Tier-Isolation MUSS deshalb in
+  # den Container-netns passieren, nicht auf dem Host.
 
-  pod "web", strategy: :one_for_one do
+  pod "three_tier", strategy: :one_for_one do
     container "nginx",
       binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
       args: ["8443"],
       limits: %{memory: 268_435_456, pids: 100},
-      restart: :always do
+      zone: "containers",
+      replicas: 3,
+      restart: :permanent do
 
       publish interval: 2000 do
         metric :memory
@@ -50,33 +57,87 @@ defmodule ThreeTierIpvlan do
         channel :stdout
         channel :stderr
       end
-    end
-  end
 
-  pod "app", strategy: :one_for_one do
+      # Web-Tier: offen auf 8443 für jeden; nach außen nur zur API
+      # und zum Gateway (DNS/Health). ICMP erlaubt für Diagnose.
+      nft do
+        input policy: :drop do
+          nft_rule :accept, ct_state: [:established, :related]
+          nft_rule :accept, ip_protocol: :icmp
+          nft_rule :accept, tcp_dport: 8443
+        end
+
+        output policy: :drop do
+          nft_rule :accept, ct_state: [:established, :related]
+          nft_rule :accept, ip_protocol: :icmp
+          nft_rule :accept, ip_daddr: {10, 50, 100, 5}, tcp_dport: 4000
+          nft_rule :accept, ip_daddr: {10, 50, 100, 1}
+        end
+      end
+    end
+
     container "api",
       binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
       args: ["4000"],
       limits: %{memory: 536_870_912, pids: 200},
-      restart: {:on_failure, 5} do
+      zone: "containers",
+      replicas: 1,
+      restart: :transient do
 
       publish interval: 2000 do
         metric :memory
         metric :cpu
       end
-    end
-  end
 
-  pod "data", strategy: :one_for_one do
+      # App-Tier: akzeptiert 4000 nur aus dem Web-Tier
+      # (*.2, *.3, *.4). Spricht selbst nur mit Postgres
+      # und dem Gateway.
+      nft do
+        input policy: :drop do
+          nft_rule :accept, ct_state: [:established, :related]
+          nft_rule :accept, ip_protocol: :icmp
+          nft_rule :accept, ip_saddr: {10, 50, 100, 2}, tcp_dport: 4000
+          nft_rule :accept, ip_saddr: {10, 50, 100, 3}, tcp_dport: 4000
+          nft_rule :accept, ip_saddr: {10, 50, 100, 4}, tcp_dport: 4000
+        end
+
+        output policy: :drop do
+          nft_rule :accept, ct_state: [:established, :related]
+          nft_rule :accept, ip_protocol: :icmp
+          nft_rule :accept, ip_daddr: {10, 50, 100, 6}, tcp_dport: 5432
+          nft_rule :accept, ip_daddr: {10, 50, 100, 1}
+        end
+      end
+    end
+
     container "postgres",
       binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
       args: ["5432"],
       limits: %{memory: 1_073_741_824, pids: 50},
-      restart: :always do
+      zone: "containers",
+      replicas: 1,
+      restart: :permanent do
 
       publish interval: 5000 do
         metric :memory
         metric :pids
+      end
+
+      # Data-Tier: akzeptiert 5432 nur von der API (*.5),
+      # spricht selbst mit niemandem außer dem Gateway
+      # (NTP/DNS/Health).
+      nft do
+        input policy: :drop do
+          nft_rule :accept, ct_state: [:established, :related]
+          nft_rule :accept, ip_protocol: :icmp
+          nft_rule :accept, ip_saddr: {10, 50, 100, 5}, tcp_dport: 5432
+        end
+
+        output policy: :drop do
+          nft_rule :accept, ct_state: [:established, :related]
+          nft_rule :accept, ip_protocol: :icmp
+          nft_rule :accept, ip_daddr: {10, 50, 100, 1}
+        end
       end
     end
   end
@@ -135,19 +196,23 @@ defmodule ThreeTierIpvlan do
         hook: :input, type: :filter,
         priority: :filter, policy: :drop do
 
+        # ── Standard-Härtung ──────────────────────────────
         nft_rule :accept, ct_state: [:established, :related]
         nft_rule :accept, iifname: "lo"
         nft_rule :accept, ip_protocol: :icmp
-        nft_rule :accept, tcp_dport: 22222
-        nft_rule :accept, tcp_dport: 9100
+        nft_rule :accept, tcp_dport: 22222          # SSH
+        nft_rule :accept, tcp_dport: 9100           # Prometheus
+
+        # ── Runtime-Services ──────────────────────────────
+        # erlkoenig betreibt einen DNS-Resolver pro Zone auf der
+        # Gateway-IP. Ohne diese Regel timeoutet jedes getaddrinfo()
+        # in den Containern. Glasbox-Prinzip: kein Magic-Inject,
+        # siehe Kapitel 6 "Runtime services".
+        nft_rule :accept, ip_saddr: {10, 50, 100, 0, 24}, udp_dport: 53
+
         nft_rule :drop, counter: "input_drop", log_prefix: "HOST: "
       end
     end
   end
 
-  # ── 4. Deployment ────────────────────────────────────
-
-  attach "web",  to: "containers", replicas: 3
-  attach "app",  to: "containers", replicas: 1
-  attach "data", to: "containers", replicas: 1
 end

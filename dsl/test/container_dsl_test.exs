@@ -145,9 +145,11 @@ defmodule Erlkoenig.ContainerDslTest do
     container :archive do
       binary "/opt/archive"
       ip {10, 0, 0, 30}
-      volume "/data/db", persist: "archive-db"
+      volume "/data/db", persist: "archive-db", quota: "2G"
       volume "/var/log", persist: "archive-logs"
       volume "/etc/config", persist: "shared-config", read_only: true
+      volume "/srv/ingest", persist: "ingest-data",
+             opts: "ro,nosuid,nodev,noexec"
     end
 
     container :no_volumes do
@@ -391,17 +393,18 @@ defmodule Erlkoenig.ContainerDslTest do
       containers = WithVolumes.containers()
       archive = Enum.find(containers, &(&1.name == "archive"))
       assert Map.has_key?(archive, :volumes)
-      assert length(archive.volumes) == 3
+      assert length(archive.volumes) == 4
     end
 
     test "volume entries have correct fields" do
       containers = WithVolumes.containers()
       archive = Enum.find(containers, &(&1.name == "archive"))
-      [db, logs, config] = archive.volumes
+      [db, logs, config, _ingest] = archive.volumes
 
       assert db.container == "/data/db"
       assert db.persist == "archive-db"
       assert db.read_only == false
+      assert db.quota == "2G"
 
       assert logs.container == "/var/log"
       assert logs.persist == "archive-logs"
@@ -410,6 +413,28 @@ defmodule Erlkoenig.ContainerDslTest do
       assert config.container == "/etc/config"
       assert config.persist == "shared-config"
       assert config.read_only == true
+    end
+
+    test "volume with opts: string preserves it verbatim (parsed later by core)" do
+      containers = WithVolumes.containers()
+      archive = Enum.find(containers, &(&1.name == "archive"))
+      ingest = Enum.find(archive.volumes, &(&1.container == "/srv/ingest"))
+      assert ingest.opts == "ro,nosuid,nodev,noexec"
+      # read_only not set via opts — stays false until core parses opts
+      assert ingest.read_only == false
+    end
+
+    test "volume opts: non-string raises at compile" do
+      assert_raise ArgumentError, ~r/expected a binary string/, fn ->
+        defmodule BadOpts do
+          use Erlkoenig.Container
+
+          container :bad do
+            binary "/opt/x"
+            volume "/x", persist: "p", opts: :atom_not_string
+          end
+        end
+      end
     end
 
     test "volume read_only defaults to false" do
@@ -429,7 +454,7 @@ defmodule Erlkoenig.ContainerDslTest do
       opts_list = WithVolumes.spawn_opts()
       {_, _, opts} = Enum.find(opts_list, fn {n, _, _} -> n == "archive" end)
       assert Map.has_key?(opts, :volumes)
-      assert length(opts.volumes) == 3
+      assert length(opts.volumes) == 4
     end
   end
 end

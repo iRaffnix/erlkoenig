@@ -2,36 +2,55 @@ defmodule Erlkoenig.Stack do
   @moduledoc """
   Unified DSL for the erlkoenig ecosystem.
 
-  Topology and policy in one file, readable by network engineers.
+  Topology and policy in one file, readable by network engineers. One
+  `pod` is the **logical bracket** around all containers that belong
+  together; each container declares its own `zone:` and `replicas:`
+  inline — there is no separate `attach` step.
 
       defmodule MyInfra do
         use Erlkoenig.Stack
 
         host do
-          interface "eth0", zone: :wan
-          bridge "br0", subnet: {10, 0, 0, 0, 24}, uplink: "eth0"
-          chain "input", hook: :input, policy: :drop do ... end
-          chain "forward", hook: :forward, policy: :drop do ... end
-        end
+          ipvlan "dmz", parent: {:device, "eth0"}, subnet: {10, 0, 0, 0, 24}
 
-        pod "web" do
-          container "frontend", binary: "/opt/frontend" do
-            chain "inbound", policy: :drop do ... end
+          nft_table :inet, "host" do
+            base_chain "input", hook: :input, type: :filter,
+              priority: :filter, policy: :drop do
+              nft_rule :accept, ct_state: [:established, :related]
+              nft_rule :drop
+            end
           end
         end
 
-        attach "web", to: "br0", replicas: 3
+        pod "web", strategy: :one_for_one do
+          container "frontend",
+            binary: "/opt/frontend",
+            zone: "dmz",
+            replicas: 3,
+            restart: :permanent do
+            nft do
+              output do
+                nft_rule :accept, ct_state: [:established, :related]
+                nft_rule :drop
+              end
+            end
+          end
+        end
       end
+
+  ## Required options (nothing implicit)
+
+  - `pod`: `strategy:`
+  - `container`: `binary:`, `zone:`, `replicas:`, `restart:`
+
+  Other options have documented defaults.
 
   ## Naming in rules
 
-  Interface names used in `iif:`/`oif:` rules reference:
-  - Host interfaces: `"eth0"`, `"lo"`
-  - Bridges: `"br0"`
-  - Pod containers: `"web.frontend"` (= all replicas of frontend in pod web)
-
-  The compiler resolves pod-qualified names to per-replica IP rules
-  at deploy time.
+  Interface names used in `iifname:`/`oifname:` rules reference host-level
+  interfaces only (`"eth0"`, `"lo"`). Container slaves live inside their
+  own netns and are never visible on the host — match them by **IP**
+  (`ip_saddr:`/`ip_daddr:`) instead.
   """
 
   defmacro __using__(_opts) do
@@ -41,7 +60,6 @@ defmodule Erlkoenig.Stack do
 
       Module.register_attribute(__MODULE__, :stack_host, accumulate: false)
       Module.register_attribute(__MODULE__, :stack_pods, accumulate: true)
-      Module.register_attribute(__MODULE__, :stack_attachments, accumulate: true)
       Module.register_attribute(__MODULE__, :stack_guard, accumulate: false)
       Module.register_attribute(__MODULE__, :stack_watches, accumulate: true)
       Module.register_attribute(__MODULE__, :stack_nft_tables, accumulate: true)
@@ -58,7 +76,6 @@ defmodule Erlkoenig.Stack do
   defmacro __before_compile__(env) do
     host = Module.get_attribute(env.module, :stack_host)
     pods = Module.get_attribute(env.module, :stack_pods) |> Enum.reverse()
-    attachments = Module.get_attribute(env.module, :stack_attachments) |> Enum.reverse()
     guard_config = Module.get_attribute(env.module, :stack_guard)
     watches = Module.get_attribute(env.module, :stack_watches) |> Enum.reverse()
 
@@ -80,32 +97,26 @@ defmodule Erlkoenig.Stack do
       Erlkoenig.Host.Builder.validate!(host, pod_names, all_container_names)
     end
 
-    # Validate attachments reference existing pods and networks (bridges or ipvlans)
-    network_names = if host, do: Enum.map(host.ipvlans, & &1.name), else: []
-    Enum.each(attachments, fn {pod_name, network_name, _replicas} ->
-      unless pod_name in pod_names do
-        raise CompileError,
-          description: "attach references unknown pod #{inspect(pod_name)}. " <>
-            "Known: #{inspect(pod_names)}"
-      end
-      unless network_name in network_names do
-        raise CompileError,
-          description: "attach references unknown network #{inspect(network_name)}. " <>
-            "Known: #{inspect(network_names)}"
-      end
+    # Validate each container's `zone:` references a declared ipvlan zone
+    zone_names = if host, do: Enum.map(host.ipvlans, & &1.name), else: []
+    Enum.each(pods, fn pod ->
+      Enum.each(pod.containers, fn ct ->
+        unless ct.zone in zone_names do
+          raise CompileError,
+            description: "container #{inspect(pod.name)}/#{inspect(ct.name)}: " <>
+              "zone #{inspect(ct.zone)} is not declared by any `ipvlan`. " <>
+              "Known zones: #{inspect(zone_names)}"
+        end
+      end)
     end)
 
-    # Build term — translate host/attach into zones/firewall format
-    # that erlkoenig_config understands.
+    # Build term
     pods_term = Enum.map(pods, &Erlkoenig.Pod.Builder.to_term/1)
 
-    # Each ipvlan becomes a zone, each attach becomes a deployment
+    # Each ipvlan becomes a zone. Zones no longer carry `deployments` —
+    # each container inside a pod carries its own `zone:` + `replicas:`.
     zones_term = if host do
       Enum.map(host.ipvlans, fn ipv ->
-        deps = attachments
-          |> Enum.filter(fn {_pod, net, _r} -> net == ipv.name end)
-          |> Enum.map(fn {pod, _net, replicas} -> %{pod: pod, replicas: replicas} end)
-
         zone = %{
           name: ipv.name,
           subnet: ipv.subnet,
@@ -116,8 +127,7 @@ defmodule Erlkoenig.Stack do
           pool: %{start: put_elem(ipv.subnet, 3, 2),
                   stop: put_elem(ipv.subnet, 3, 254)}
         }
-        zone = if ipv.gateway, do: put_in(zone, [:network, :gateway], ipv.gateway), else: zone
-        if deps != [], do: Map.put(zone, :deployments, deps), else: zone
+        if ipv.gateway, do: put_in(zone, [:network, :gateway], ipv.gateway), else: zone
       end)
     else
       []
@@ -152,23 +162,24 @@ defmodule Erlkoenig.Stack do
   end
 
   # ═══════════════════════════════════════════════════════════
-  # host — the machine, its interfaces, bridges, firewall
+  # host — the machine, its interfaces, IPVLAN zones, firewall
   # ═══════════════════════════════════════════════════════════
 
   @doc """
-  Define the host machine — its interfaces, bridges, and firewall tables.
+  Define the host machine — its interfaces, IPVLAN zones, and firewall tables.
 
   The `host` block is the top-level physical machine configuration.
   Everything inside describes what the host looks like *before* any
   containers are deployed: which network interfaces exist, which
-  bridges to create, and which nft tables to apply.
+  IPVLAN zones to create, and which nft tables to apply.
 
   There can be at most one `host` block per stack.
 
   ## Contains
 
   - `interface` — physical network interfaces
-  - `bridge` — virtual bridges (L2 segments for containers)
+  - `ipvlan` — IPVLAN L3S zones (parent device + subnet — container
+    slaves are placed directly into container netns)
   - `nft_table` — firewall tables (can also be outside `host`)
 
   ## Examples
@@ -176,9 +187,9 @@ defmodule Erlkoenig.Stack do
       host do
         interface "eth0", zone: :wan
         interface "eth1", zone: :lan
-        bridge "dmz",  subnet: {10, 0, 0, 0, 24}, uplink: "eth0"
-        bridge "app",  subnet: {10, 0, 1, 0, 24}
-        bridge "data", subnet: {10, 0, 2, 0, 24}
+        ipvlan "dmz",  parent: {:device, "eth0"},    subnet: {10, 0, 0, 0, 24}
+        ipvlan "app",  parent: {:dummy,  "ek_app"},  subnet: {10, 0, 1, 0, 24}
+        ipvlan "data", parent: {:dummy,  "ek_data"}, subnet: {10, 0, 2, 0, 24}
       end
   """
   defmacro host(do: block) do
@@ -197,7 +208,7 @@ defmodule Erlkoenig.Stack do
 
   Interfaces are informational — they tell the DSL which physical
   NICs exist and what zone they belong to. Zone labels are used in
-  nft rules (e.g. `iifname: "eth0"`) and in bridge uplink configuration.
+  nft rules (e.g. `iifname: "eth0"`) and to pick IPVLAN parent devices.
 
   ## Options
 
@@ -221,24 +232,30 @@ defmodule Erlkoenig.Stack do
   end
 
   @doc """
-  @doc """
   Declare an IPVLAN network segment on the host.
 
-  Creates IPVLAN L3S slaves for containers instead of veth+bridge.
-  Mutually exclusive with `bridge` — a stack must use one mode.
+  Creates IPVLAN L3S slaves for containers. This is the only networking
+  mode since ADR-0020 — there is no bridge/veth path.
 
   ## Options
 
-    * `:parent` — (required) host interface to create slaves on (e.g. "eth0")
-    * `:subnet` — (required) `{a, b, c, d, mask}` or `{a, b, c, d}` (default /24)
-    * `:mode` — `:l3s` (default), `:l3`, or `:l2`
-    * `:gateway` — optional upstream gateway IP
+    * `:parent` — (required) `{:device, "eth0"}` to attach to a physical
+      host interface, or `{:dummy, "ek_<name>"}` to have erlkoenig create
+      and own a kernel `dummy0` parent. Bare strings are rejected at
+      compile time.
+    * `:subnet` — (required) `{a, b, c, d, mask}` (only `/24` supported
+      today) or `{a, b, c, d}` (defaults to `/24`).
+    * `:mode` — `:l3s` (default), `:l3`, or `:l2`.
+    * `:gateway` — optional gateway IP. Only meaningful for `{:dummy, ...}`
+      parents (erlkoenig assigns it onto the dummy so containers can reach
+      DNS etc. locally).
 
   ## Example
 
       host do
         interface "eth0"
-        ipvlan "edge", parent: "eth0", subnet: {10, 20, 0, 0, 24}
+        ipvlan "edge",  parent: {:device, "eth0"},    subnet: {10, 20, 0, 0, 24}
+        ipvlan "inner", parent: {:dummy,  "ek_inner"}, subnet: {10, 40, 0, 0, 24}
       end
   """
   defmacro ipvlan(name, opts) do
@@ -257,41 +274,47 @@ defmodule Erlkoenig.Stack do
 
   A pod is a **template**. It produces no running processes by itself.
   Only when deployed via `attach/2` does the compiler expand it into
-  concrete containers with IPs, veth pairs, and cgroups.
+  concrete containers with IPs, IPVLAN slaves, and cgroups.
 
-  ## Options
+  ## Required Options
 
-  | Option | Type | Default | Description |
-  |--------|------|---------|-------------|
-  | `strategy:` | `:one_for_one` \\| `:one_for_all` \\| `:rest_for_one` | `:one_for_one` | OTP supervisor restart strategy for the pod's containers |
+  | Option | Type | Description |
+  |--------|------|-------------|
+  | `strategy:` | `:one_for_one` \\| `:one_for_all` \\| `:rest_for_one` | OTP supervisor restart strategy for the pod's containers |
 
   ## Strategies
 
-  - `:one_for_one` — each container restarts independently (default)
+  - `:one_for_one` — each container restarts independently
   - `:one_for_all` — if one container crashes, all containers in the pod restart
   - `:rest_for_one` — if a container crashes, it and all containers started after it restart (order matters)
 
   ## Examples
 
-      # Simple single-container pod
-      pod "web" do
-        container "nginx", binary: "/opt/nginx"
+      # Three-tier stack as one logical bracket
+      pod "three_tier", strategy: :one_for_one do
+        container "nginx",
+          binary: "/opt/nginx", args: ["8443"],
+          zone: "containers", replicas: 3,
+          restart: :permanent
+
+        container "api",
+          binary: "/opt/api", args: ["4000"],
+          zone: "containers", replicas: 1,
+          restart: :permanent
+
+        container "postgres",
+          binary: "/opt/postgres",
+          zone: "containers", replicas: 1,
+          restart: :permanent
       end
 
       # Tightly coupled: app + cache restart together
       pod "backend", strategy: :one_for_all do
-        container "app", binary: "/opt/app", restart: :always
-        container "cache", binary: "/opt/redis", restart: :always
-      end
-
-      # Pipeline: crash restarts downstream
-      pod "pipeline", strategy: :rest_for_one do
-        container "ingest", binary: "/opt/ingest", restart: :always
-        container "transform", binary: "/opt/transform", restart: :always
-        container "export", binary: "/opt/export", restart: :always
+        container "app",   binary: "/opt/app",   zone: "net", replicas: 1, restart: :permanent
+        container "cache", binary: "/opt/redis", zone: "net", replicas: 1, restart: :permanent
       end
   """
-  defmacro pod(name, opts \\ [], do: block) do
+  defmacro pod(name, opts, do: block) do
     Module.register_attribute(__CALLER__.module, :__ek_context__, accumulate: false)
     Module.put_attribute(__CALLER__.module, :__ek_context__, :pod)
 
@@ -300,6 +323,13 @@ defmodule Erlkoenig.Stack do
       unquote(block)
       @stack_pods var!(ek_pod_builder)
     end
+  end
+
+  # Helpful error when strategy: is omitted (pod "X" do ... end)
+  defmacro pod(name, do: _block) do
+    raise CompileError,
+      description: "pod #{inspect(name)}: strategy: is required " <>
+        "(one of :one_for_one, :one_for_all, :rest_for_one)"
   end
 
   @doc """
@@ -317,14 +347,16 @@ defmodule Erlkoenig.Stack do
   | Option | Type | Description |
   |--------|------|-------------|
   | `binary:` | `string` | Absolute path to the executable to run |
+  | `zone:` | `string` | IPVLAN zone name (must match an `ipvlan` declared on `host`) |
+  | `replicas:` | `pos_integer` | How many container instances to spawn |
+  | `restart:` | `:permanent` \\| `:transient` \\| `:temporary` | OTP restart policy |
 
-  ## Optional Options
+  ## Optional Options (with sensible defaults)
 
   | Option | Type | Default | Description |
   |--------|------|---------|-------------|
   | `args:` | `[string]` | `[]` | Command-line arguments passed to the binary |
   | `limits:` | `map` | `%{}` | Resource limits: `memory` (bytes), `cpu` (1-100%), `pids` (max processes) |
-  | `restart:` | restart_policy | `:no_restart` | When and how to restart on exit |
   | `seccomp:` | `:default` \\| `:none` | `:default` | Seccomp profile for syscall filtering |
   | `uid:` | `integer` | `65534` | User ID the process runs as (65534 = nobody) |
   | `gid:` | `integer` | `65534` | Group ID the process runs as |
@@ -333,13 +365,11 @@ defmodule Erlkoenig.Stack do
   | `health_check:` | `keyword` | none | Health check config: `port:`, `interval:` (ms), `retries:` |
   | `image:` | `string` | none | Container image path (alternative to binary) |
 
-  ## Restart Policies
+  ## Restart Policies (OTP)
 
-  - `:no_restart` — never restart (default)
-  - `:always` — restart on any exit, unlimited
-  - `:on_failure` — restart on non-zero exit or signal, unlimited
-  - `{:always, n}` — restart on any exit, max `n` attempts
-  - `{:on_failure, n}` — restart on non-zero exit, max `n` attempts
+  - `:permanent` — always restart on any exit
+  - `:transient` — restart only on abnormal exit (non-zero or signalled)
+  - `:temporary` — never restart (one-shot)
 
   Backoff: 1s, 2s, 4s, 8s, 16s, 30s (capped).
 
@@ -347,25 +377,20 @@ defmodule Erlkoenig.Stack do
 
       # 512 MB memory, 50% of one CPU core, max 100 processes
       container "worker",
-        binary: "/opt/worker",
+        binary: "/opt/worker", zone: "work", replicas: 1, restart: :permanent,
         limits: %{memory: 536_870_912, cpu: 50, pids: 100}
 
   ## Examples
 
       # Minimal
-      container "echo", binary: "/opt/echo", args: ["8080"]
-
-      # Production hardened
-      container "api",
-        binary: "/opt/api",
-        args: ["--port", "4000"],
-        limits: %{memory: 1_073_741_824, pids: 200},
-        seccomp: :default,
-        restart: {:on_failure, 5},
-        health_check: [port: 4000, interval: 10_000, retries: 3]
+      container "echo",
+        binary: "/opt/echo", args: ["8080"],
+        zone: "net", replicas: 1, restart: :permanent
 
       # With cgroup metrics publishing
-      container "nginx", binary: "/opt/nginx", args: ["8443"] do
+      container "nginx",
+        binary: "/opt/nginx", args: ["8443"],
+        zone: "dmz", replicas: 3, restart: :permanent do
         publish interval: 2000 do
           metric :memory
           metric :cpu
@@ -392,6 +417,103 @@ defmodule Erlkoenig.Stack do
       unquote(block)
       var!(ek_pod_builder) = Erlkoenig.Pod.Builder.end_container(
         var!(ek_pod_builder))
+    end
+  end
+
+  # ═══════════════════════════════════════════════════════════
+  # volume — persistent bind-mount directories
+  # ═══════════════════════════════════════════════════════════
+
+  @doc """
+  Declare a bind-mount volume for the enclosing container.
+
+  The host-side storage is managed centrally by erlkoenig under a
+  UUID-based path (`/var/lib/erlkoenig/volumes/<uuid>/`); the DSL
+  only picks a logical *persist name* and the container-side mount
+  point. The `<uuid> ↔ (container, persist)` mapping lives in the
+  volume metadata store (`erlkoenig_volume_store`).
+
+  ## Options
+
+    * `:persist` — (required) logical store name, `[a-z0-9][a-z0-9_-]*`.
+      Stable across container restarts: the same `(container, persist)`
+      pair always resolves to the same UUID.
+    * `:read_only` — legacy boolean shortcut for `opts: "ro"`.
+    * `:opts` — mount-options string in `mount(8)` syntax, parsed
+      at config-load time via `erlkoenig_mount_opts:parse/1`. Typos
+      raise at compile time. Takes precedence over `:read_only`.
+    * `:ephemeral` — if `true`, the volume is destroyed when the
+      container enters the `stopped` or `failed` state. Default is
+      `false` (persistent): data survives container destroy and must
+      be removed explicitly. Use `true` for scratch space, per-run
+      caches, and test containers.
+    * `:quota` — hard byte limit, enforced via XFS project quota.
+      Accepts a binary with a size suffix (`"1G"`, `"500M"`, `"2T"`),
+      a plain integer (bytes), or `0`/omitted for no quota. Requires
+      the volumes FS to be mounted with `prjquota`; if `xfs_quota`
+      is missing or the mount doesn't support it the limit is stored
+      in metadata but not enforced (logged as a warning).
+
+  ## Examples
+
+      container "app", binary: "/opt/app", zone: "dmz",
+        replicas: 1, restart: :permanent do
+
+        # Persistent — survives container destroy
+        volume "/data",    persist: "app-data"
+
+        # Read-only config
+        volume "/etc/app", persist: "app-config", read_only: true
+
+        # Hardened persistent volume with a hard disk budget
+        volume "/uploads", persist: "app-uploads",
+                           opts: "rw,nosuid,nodev,noexec,relatime",
+                           quota: "5G"
+
+        # Ephemeral scratch — gone when the container dies
+        volume "/scratch", persist: "scratch",
+                           ephemeral: true
+      end
+  """
+  defmacro volume(container_path, opts) do
+    quote do
+      persist_name = Keyword.fetch!(unquote(opts), :persist)
+      read_only    = Keyword.get(unquote(opts), :read_only, false)
+      mount_opts   = Keyword.get(unquote(opts), :opts)
+      ephemeral    = Keyword.get(unquote(opts), :ephemeral, false)
+      quota        = Keyword.get(unquote(opts), :quota)
+
+      unless is_boolean(ephemeral) do
+        raise ArgumentError,
+          "volume ephemeral: expected a boolean, got #{inspect(ephemeral)}"
+      end
+
+      entry = %{container: unquote(container_path),
+                persist: persist_name,
+                read_only: read_only,
+                ephemeral: ephemeral}
+
+      entry =
+        case mount_opts do
+          nil -> entry
+          s when is_binary(s) -> Map.put(entry, :opts, s)
+          other ->
+            raise ArgumentError,
+              "volume opts: expected a binary string, got #{inspect(other)}"
+        end
+
+      entry =
+        case quota do
+          nil -> entry
+          q when is_binary(q) -> Map.put(entry, :quota, q)
+          q when is_integer(q) and q >= 0 -> Map.put(entry, :quota, q)
+          other ->
+            raise ArgumentError,
+              "volume quota: expected a size string (\"1G\") or non-negative integer, got #{inspect(other)}"
+        end
+
+      var!(ek_pod_builder) = Erlkoenig.Pod.Builder.add_volume(
+        var!(ek_pod_builder), entry)
     end
   end
 
@@ -613,59 +735,6 @@ defmodule Erlkoenig.Stack do
   end
 
   # ═══════════════════════════════════════════════════════════
-  # attach — connect pod to network
-  # ═══════════════════════════════════════════════════════════
-
-  @doc """
-  Deploy a pod to a bridge with a number of replicas.
-
-  `attach` connects a pod template to a network segment. Each replica
-  gets its own IP, veth pair, network namespace, and cgroup. Container
-  names are generated as `<pod>-<index>-<container>`:
-
-  - `attach "web", to: "dmz", replicas: 3` creates:
-    - `web-0-nginx` (IP 10.0.0.2)
-    - `web-1-nginx` (IP 10.0.0.3)
-    - `web-2-nginx` (IP 10.0.0.4)
-
-  ## Options
-
-  | Option | Type | Default | Description |
-  |--------|------|---------|-------------|
-  | `to:` | `string` | (required) | Bridge name to deploy on |
-  | `replicas:` | `integer` | `1` | Number of pod instances |
-
-  ## Validation
-
-  - Pod name must reference a declared `pod` → `CompileError`
-  - Bridge name must reference a declared `bridge` → `CompileError`
-
-  ## Deploy-Time Expansion
-
-  In nft rules, `{:veth_of, "pod", "container"}` and
-  `{:replica_ips, "pod", "container"}` are resolved based on `attach`
-  configuration. With `replicas: 3`, `{:replica_ips, "web", "nginx"}`
-  expands to three IP addresses.
-
-  ## Examples
-
-      attach "web",  to: "dmz",  replicas: 3   # 3 nginx instances
-      attach "app",  to: "app",  replicas: 2   # 2 API instances
-      attach "data", to: "data", replicas: 1   # 1 database
-
-      # Same pod on multiple bridges
-      attach "worker", to: "region_eu", replicas: 5
-      attach "worker", to: "region_us", replicas: 3
-  """
-  defmacro attach(pod_name, opts) do
-    bridge = Keyword.fetch!(opts, :to)
-    replicas = Keyword.get(opts, :replicas, 1)
-    quote do
-      @stack_attachments {unquote(pod_name), unquote(bridge), unquote(replicas)}
-    end
-  end
-
-  # ═══════════════════════════════════════════════════════════
   # OLD SYNTAX REMOVED (ADR-0015: harter Bruch)
   #
   # The following macros were removed:
@@ -677,7 +746,7 @@ defmodule Erlkoenig.Stack do
   # Old field names:
   #   tcp: 8443    → tcp_dport: 8443
   #   iif: "eth0"  → iifname: "eth0"
-  #   oif: "br0"   → oifname: "br0"
+  #   oif: "eth0"  → oifname: "eth0"
   #   ct: :established → ct_state: [:established, :related]
   #   log: "DROP:" → log_prefix: "DROP:"
   # ═══════════════════════════════════════════════════════════
@@ -918,14 +987,15 @@ defmodule Erlkoenig.Stack do
         end
       end
 
-      # Container firewall with counters and egress chains
+      # Container firewall with counters and IP-based dispatch
       nft_table :inet, "erlkoenig" do
         nft_counter "forward_drop"
 
         base_chain "forward", hook: :forward, type: :filter,
           priority: :filter, policy: :drop do
           nft_rule :accept, ct_state: [:established, :related]
-          nft_rule :jump, iifname: {:veth_of, "web", "nginx"}, to: "from-web"
+          nft_rule :jump,
+            ip_saddr: {:replica_ips, "web", "nginx"}, to: "from-web"
           nft_rule :drop, counter: "forward_drop"
         end
 
@@ -1030,14 +1100,15 @@ defmodule Erlkoenig.Stack do
       base_chain "forward", hook: :forward, type: :filter,
         priority: :filter, policy: :drop do
         nft_rule :accept, ct_state: [:established, :related]
-        nft_rule :jump, iifname: {:veth_of, "web", "nginx"}, to: "from-web"
+        nft_rule :jump,
+          ip_saddr: {:replica_ips, "web", "nginx"}, to: "from-web"
         nft_rule :drop, counter: "forward_drop"
       end
 
-      # NAT: masquerade container traffic
+      # NAT: masquerade container traffic leaving the host
       base_chain "postrouting", hook: :postrouting, type: :nat,
         priority: :srcnat, policy: :accept do
-        nft_rule :masquerade, ip_saddr: {10, 0, 0, 0, 24}, oifname_ne: "br0"
+        nft_rule :masquerade, ip_saddr: {10, 0, 0, 0, 24}, oifname_ne: "eth0"
       end
   """
   defmacro base_chain(name, opts, do: block) do
@@ -1073,8 +1144,10 @@ defmodule Erlkoenig.Stack do
         nft_rule :drop, counter: "nginx_drop"
       end
 
-      # Called from forward chain via:
-      #   nft_rule :jump, iifname: {:veth_of, "web", "nginx"}, to: "from-web-nginx"
+      # Called from forward chain via (dispatch by source IP — IPVLAN
+      # slaves are not host-visible, so interface matches don't work):
+      #   nft_rule :jump,
+      #     ip_saddr: {:replica_ips, "web", "nginx"}, to: "from-web-nginx"
   """
   defmacro nft_chain(name, do: block) do
     Module.put_attribute(__CALLER__.module, :ek_container_nft, false)
@@ -1132,9 +1205,9 @@ defmodule Erlkoenig.Stack do
 
   | Field | nft equivalent | Type | Example |
   |-------|---------------|------|---------|
-  | `iifname:` | `iifname` | `string` \\| `{:veth_of, pod, ct}` | `"eth0"` |
-  | `oifname:` | `oifname` | `string` | `"br0"` |
-  | `oifname_ne:` | `oifname !=` | `string` | `"dmz"` |
+  | `iifname:` | `iifname` | `string` | `"eth0"` |
+  | `oifname:` | `oifname` | `string` | `"eth0"` |
+  | `oifname_ne:` | `oifname !=` | `string` | `"eth0"` |
 
   ### Port (what)
 
@@ -1168,11 +1241,15 @@ defmodule Erlkoenig.Stack do
 
   Resolved when the config is loaded, not at compile time:
 
-  - `{:veth_of, "pod", "container"}` — expands to host veth name (e.g. `"vh.web0nginx"`)
-  - `{:replica_ips, "pod", "container"}` — expands to list of container IPs across all replicas
+  - `{:replica_ips, "pod", "container"}` — expands to the list of container
+    IPs across all replicas
 
   With `replicas: 3`, `{:replica_ips, "web", "nginx"}` generates three
   individual nft rules — one per IP.
+
+  (The legacy `{:veth_of, ...}` symbol is still accepted by the compiler
+  for backward compatibility but produces no rules in IPVLAN mode because
+  slaves are not visible on the host — use `ip_saddr:` instead.)
 
   ## IP Tuple Format
 
@@ -1209,8 +1286,10 @@ defmodule Erlkoenig.Stack do
       # Accept TCP on port 443 from eth0
       nft_rule :accept, iifname: "eth0", tcp_dport: 443
 
-      # Jump to egress chain based on container veth
-      nft_rule :jump, iifname: {:veth_of, "web", "nginx"}, to: "from-web-nginx"
+      # Jump to egress chain based on source IP (IPVLAN slaves have no
+      # host-visible interface — dispatch by source IP instead)
+      nft_rule :jump,
+        ip_saddr: {:replica_ips, "web", "nginx"}, to: "from-web-nginx"
 
       # Allow traffic between pods (expanded at deploy time)
       nft_rule :accept,
@@ -1222,7 +1301,7 @@ defmodule Erlkoenig.Stack do
       nft_rule :drop, counter: "forward_drop", log_prefix: "FWD: "
 
       # Masquerade container subnet (NAT)
-      nft_rule :masquerade, ip_saddr: {10, 0, 0, 0, 24}, oifname_ne: "br0"
+      nft_rule :masquerade, ip_saddr: {10, 0, 0, 0, 24}, oifname_ne: "eth0"
 
       # DNAT: forward port 8080 to container
       nft_rule :dnat, tcp_dport: 8080, dnat_to: {10, 0, 0, 2, 8080}
@@ -1323,6 +1402,51 @@ defmodule Erlkoenig.Stack do
     quote do
       var!(ek_nft_table) = Erlkoenig.Nft.TableBuilder.add_set(
         var!(ek_nft_table), unquote(name), unquote(type), unquote(opts))
+    end
+  end
+
+  @doc """
+  Declare a flowtable for hardware/software fast-path offload.
+
+  Flowtables bypass the full nftables evaluation pipeline for
+  established connections. Once a flow is offloaded, subsequent
+  packets are fast-pathed at the ingress hook — skipping all
+  chains. This is nftables' native alternative to eBPF-based
+  packet acceleration.
+
+  ## Arguments
+
+  | Argument | Type | Description |
+  |----------|------|-------------|
+  | `name` | string | Flowtable name (referenced by `nft_rule :flow_offload`) |
+
+  ## Options
+
+  | Option | Type | Default | Description |
+  |--------|------|---------|-------------|
+  | `devices:` | list of strings | required | Network interfaces to attach to |
+  | `priority:` | integer | 0 | Ingress hook priority |
+
+  ## Example
+
+      nft_table :inet, "filter" do
+        nft_flowtable "ft0", devices: ["eth0"]
+
+        base_chain "forward", hook: :forward, type: :filter,
+                   priority: :filter, policy: :accept do
+          nft_rule :flow_offload, flowtable: "ft0"
+          nft_rule :accept, ct_state: [:established, :related]
+        end
+      end
+
+  The first packet of a connection traverses the full chain. Once
+  the connection is established, the kernel offloads it to the
+  flowtable's ingress hook — no more chain evaluation for that flow.
+  """
+  defmacro nft_flowtable(name, opts) do
+    quote do
+      var!(ek_nft_table) = Erlkoenig.Nft.TableBuilder.add_flowtable(
+        var!(ek_nft_table), unquote(name), unquote(opts))
     end
   end
 

@@ -16,46 +16,51 @@
 
 defmodule Erlkoenig.Pod.Builder do
   @moduledoc """
-  Accumulates pod definitions — a group of containers with
-  per-container firewall chains and inter-container forwarding rules.
+  Accumulates a single pod definition — the logical bracket around all
+  containers that belong together.
 
-  A pod is a **template**. It produces no kernel objects by itself.
-  Only when deployed via `deploy "pod", replicas: N` inside a zone
-  does the compiler expand it into concrete containers with IPs,
-  veth pairs, and nft chains.
-
-  ## Container References
-
-  Inside a pod, `@container_name` references are used in `iif:` and
-  `oif:` rule options to specify inter-container traffic paths.
-  These are resolved to concrete veth names at deploy time.
+  A pod has no runtime effect beyond grouping. Each `container` inside
+  declares its own deployment: `zone:` (which IPVLAN zone it runs in)
+  and `replicas:` (how many instances). There is no separate `attach`
+  step — the container tells the compiler where and how many.
 
   ## Structure
 
-      pod "webstack" do
-        container "frontend", binary: "/opt/frontend" do
-          chain "inbound", policy: :drop do
-            rule :accept, ct: :established
-            rule :accept, tcp: 8080
-            rule :drop
+      pod "three_tier", strategy: :one_for_one do
+        container "nginx",
+          binary: "/opt/nginx", args: ["8443"],
+          zone: "containers", replicas: 3,
+          restart: :permanent do
+          nft do
+            output do
+              nft_rule :accept, ct_state: [:established, :related]
+              nft_rule :drop
+            end
           end
         end
 
-        chain "forward", policy: :drop do
-          rule :accept, ct: :established
-          rule :accept, iif: @frontend, oif: @api, tcp: 4000
-          rule :drop
-        end
+        container "api",
+          binary: "/opt/api", args: ["4000"],
+          zone: "containers", replicas: 1,
+          restart: :permanent
       end
+
+  ## Required vs. optional
+
+  - **Required** on `container`: `binary:`, `zone:`, `replicas:`, `restart:`
+  - **Required** on `pod`: `strategy:`
+  - **Optional** (with documented defaults): `args: []`, `limits: %{}`,
+    `uid: 65534`, `gid: 65534`, `seccomp: :default`, `caps: []`
   """
 
   @valid_strategies [:one_for_one, :one_for_all, :rest_for_one]
+  @valid_restart_policies [:permanent, :transient, :temporary]
   @valid_metrics [:memory, :cpu, :pids, :pressure, :oom_events]
   @valid_channels [:stdout, :stderr]
   @min_interval 1000
 
   defstruct name: nil,
-            strategy: :one_for_one,
+            strategy: nil,
             containers: [],
             current_ct: nil,
             current_publish: nil,
@@ -64,8 +69,14 @@ defmodule Erlkoenig.Pod.Builder do
             current_nft_chain: nil,
             nft_rules_acc: []
 
-  def new(name, opts \\ []) when is_binary(name) do
-    strategy = Keyword.get(opts, :strategy, :one_for_one)
+  def new(name, opts) when is_binary(name) do
+    strategy = case Keyword.fetch(opts, :strategy) do
+      {:ok, s} -> s
+      :error ->
+        raise CompileError,
+          description: "pod #{inspect(name)}: strategy: is required " <>
+            "(one of #{inspect(@valid_strategies)})"
+    end
     unless strategy in @valid_strategies do
       raise CompileError,
         description: "pod #{inspect(name)}: invalid strategy #{inspect(strategy)}. " <>
@@ -77,22 +88,61 @@ defmodule Erlkoenig.Pod.Builder do
   # --- Container lifecycle ---
 
   def begin_container(%__MODULE__{} = pod, name, opts) when is_binary(name) do
+    binary  = require_opt!(opts, :binary, name, "path to the binary")
+    zone    = require_opt!(opts, :zone, name, "IPVLAN zone name")
+    replicas = require_opt!(opts, :replicas, name, "positive integer")
+    restart  = require_opt!(opts, :restart, name,
+                            "one of #{inspect(@valid_restart_policies)}")
+
+    unless is_integer(replicas) and replicas > 0 do
+      raise CompileError,
+        description: "container #{inspect(name)}: replicas: must be a positive integer, got #{inspect(replicas)}"
+    end
+    unless restart in @valid_restart_policies do
+      raise CompileError,
+        description: "container #{inspect(name)}: invalid restart #{inspect(restart)}. " <>
+          "Allowed: #{inspect(@valid_restart_policies)}"
+    end
+
     ct = %{
       name: name,
-      binary: opts[:binary] && to_string(opts[:binary]),
+      binary: to_string(binary),
+      zone: to_string(zone),
+      replicas: replicas,
+      restart: restart,
       image: opts[:image] && to_string(opts[:image]),
       ports: opts[:ports] || [],
       limits: opts[:limits] || %{},
-      restart: opts[:restart] || :no_restart,
       seccomp: opts[:seccomp] || :default,
       uid: opts[:uid] || 65534,
       gid: opts[:gid] || 65534,
       args: opts[:args] || [],
       caps: opts[:caps] || [],
+      volumes: [],
       publish: [],
       stream: nil
     }
     %{pod | current_ct: ct}
+  end
+
+  # --- Volume lifecycle (called from Erlkoenig.Stack.volume macro) ---
+
+  def add_volume(%__MODULE__{current_ct: nil}, _entry) do
+    raise CompileError,
+      description: "volume must be declared inside a container block"
+  end
+
+  def add_volume(%__MODULE__{current_ct: ct} = pod, entry) when is_map(entry) do
+    %{pod | current_ct: Map.update(ct, :volumes, [entry], &(&1 ++ [entry]))}
+  end
+
+  defp require_opt!(opts, key, ct_name, hint) do
+    case Keyword.fetch(opts, key) do
+      {:ok, v} -> v
+      :error ->
+        raise CompileError,
+          description: "container #{inspect(ct_name)}: #{inspect(key)} is required (#{hint})"
+    end
   end
 
   def end_container(%__MODULE__{current_ct: ct, containers: cts} = pod) do
@@ -257,15 +307,8 @@ defmodule Erlkoenig.Pod.Builder do
         description: "pod #{inspect(pod.name)}: must have at least one container"
     end
 
-    Erlkoenig.Validation.check_uniqueness(pod.containers, :name, "container names in pod #{inspect(pod.name)}")
-
-    Enum.each(pod.containers, fn ct ->
-      if ct.binary == nil do
-        raise CompileError,
-          description: "pod #{inspect(pod.name)}/#{ct.name}: missing binary"
-      end
-    end)
-
+    Erlkoenig.Validation.check_uniqueness(pod.containers, :name,
+                                          "container names in pod #{inspect(pod.name)}")
     :ok
   end
 
@@ -276,9 +319,11 @@ defmodule Erlkoenig.Pod.Builder do
       ct_term = %{
         name: ct.name,
         binary: ct.binary,
+        zone: ct.zone,
+        replicas: ct.replicas,
+        restart: ct.restart,
         ports: ct.ports,
         limits: ct.limits,
-        restart: ct.restart,
         seccomp: ct.seccomp,
         uid: ct.uid,
         gid: ct.gid,
@@ -307,6 +352,12 @@ defmodule Erlkoenig.Pod.Builder do
 
       ct_term = if ct[:nft] != nil do
         Map.put(ct_term, :nft, ct.nft)
+      else
+        ct_term
+      end
+
+      ct_term = if ct[:volumes] != nil and ct[:volumes] != [] do
+        Map.put(ct_term, :volumes, ct.volumes)
       else
         ct_term
       end

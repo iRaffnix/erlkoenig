@@ -21,15 +21,22 @@ dsl/erlkoenig-dsl
 dist/*.tar.gz
 dist/erlkoenig-dsl
 
-# Generated docs
-doc/
+# Generated book (ExDoc HTML output). The Markdown source lives in
+# doc/book/ and is versioned.
+doc/html/
+apps/*/doc/
 
 # Internal docs (not for GitHub)
 docs-intern/
 idoc/
 
-# Claude Code
+# Claude Code (local agent instructions — not public)
 .claude/
+CLAUDE.md
+
+# Python caches (dashboard + event consumer)
+__pycache__/
+*.pyc
 
 # Editor
 *.swp

@@ -26,7 +26,7 @@ defmodule Erlkoenig.Nft.ChainBuilder do
   @valid_policies [:accept, :drop]
   @valid_actions [:accept, :drop, :return, :jump, :masquerade, :reject,
                   :notrack, :ct_mark_set, :ct_mark_match, :snat, :dnat,
-                  :dnat_lb, :dnat_jhash,
+                  :dnat_lb, :dnat_jhash, :flow_offload,
                   :fib_rpf, :connlimit_drop, :vmap_dispatch, :vmap_lookup]
 
   def new_base(name, opts) do

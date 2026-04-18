@@ -49,10 +49,17 @@ start_link() ->
 
 -spec init([]) -> {ok, {supervisor:sup_flags(), [supervisor:child_spec()]}}.
 init([]) ->
+    %% `auto_shutdown => any_significant` makes this supervisor
+    %% terminate cleanly as soon as a child marked `significant => true`
+    %% terminates. The firewall worker below carries that flag, so
+    %% repeated crashes of the firewall propagate up as a deliberate
+    %% shutdown rather than a supervisor crash — the outer supervisor
+    %% (erlkoenig_sup) then takes the app down fail-closed.
     SupFlags = #{
         strategy => rest_for_one,
         intensity => 5,
-        period => 60
+        period => 60,
+        auto_shutdown => any_significant
     },
     Children = [
         %% 1. pg scope — must be first, others broadcast via pg
@@ -137,11 +144,17 @@ init([]) ->
             type => worker,
             modules => [erlkoenig_nft_audit]
         },
-        %% 8. Firewall config owner — last, depends on all above
+        %% 8. Firewall config owner — last, depends on all above.
+        %% Marked `significant` + `restart => transient` so that a
+        %% terminal failure (e.g. restart intensity exceeded) doesn't
+        %% leave the kernel with stale rules silently running: the
+        %% whole nft_sup auto-shuts-down, which cascades to the root
+        %% supervisor and takes the runtime offline. Fail-closed.
         #{
             id => erlkoenig_nft_firewall,
             start => {erlkoenig_nft_firewall, start_link, []},
-            restart => permanent,
+            restart => transient,
+            significant => true,
             shutdown => 10000,
             type => worker,
             modules => [erlkoenig_nft_firewall]

@@ -181,7 +181,7 @@ decode_payload(_) ->
 %%% File I/O
 %%%===================================================================
 
--spec hash_file(file:filename()) -> {ok, binary()} | {error, term()}.
+-spec hash_file(file:filename_all()) -> {ok, binary()} | {error, term()}.
 hash_file(Path) ->
     case file:read_file(Path) of
         {ok, Bin} ->

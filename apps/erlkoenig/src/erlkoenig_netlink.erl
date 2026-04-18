@@ -47,11 +47,8 @@ Reference: man 7 netlink, man 7 rtnetlink
          request/2]).
 
 %% Message builders
--export([msg_create_bridge/2,
-         msg_create_veth/3,
-         msg_create_ipvlan/5,
+-export([msg_create_ipvlan/5,
          msg_set_netns_by_pid/3,
-         msg_set_master/3,
          msg_set_up/2,
          msg_add_addr/4,
          msg_add_default_route/2,
@@ -108,9 +105,6 @@ Reference: man 7 netlink, man 7 rtnetlink
 %% IFLA_LINKINFO nested attributes
 -define(IFLA_INFO_KIND,    1).
 -define(IFLA_INFO_DATA,    2).
-
-%% veth-specific (from linux/veth.h)
--define(VETH_INFO_PEER,    1).
 
 %% ipvlan-specific (from linux/if_link.h, IFLA_IPVLAN_* offsets inside INFO_DATA)
 -define(IFLA_IPVLAN_MODE,  1).
@@ -186,54 +180,6 @@ request(Sock, Msg) ->
 %%%===================================================================
 
 -doc """
-Create a bridge interface.
-
-  RTM_NEWLINK + IFLA_IFNAME + IFLA_LINKINFO{KIND="bridge"}
-
-Example:
-  Msg = msg_create_bridge(1, BridgeName),
-  request(Sock, Msg).
-""".
--spec msg_create_bridge(integer(), binary()) -> binary().
-msg_create_bridge(Seq, Name) ->
-    Attrs = [
-        nla(?IFLA_IFNAME, nul_terminate(Name)),
-        nla(?IFLA_LINKINFO, [
-            nla(?IFLA_INFO_KIND, <<"bridge">>)
-        ])
-    ],
-    build_link_msg(?RTM_NEWLINK, create_flags(), Seq, _Ifindex = 0,
-                   _IfFlags = 0, _IfChange = 0, Attrs).
-
--doc """
-Create a veth pair: HostName on this side, PeerName on the other.
-
-  RTM_NEWLINK + IFLA_IFNAME(host)
-              + IFLA_LINKINFO{KIND="veth", DATA{PEER{ifinfomsg + IFLA_IFNAME}}}
-
-The peer shows up as a separate interface. It can be moved
-into a container's network namespace with msg_set_netns_by_pid/3.
-""".
--spec msg_create_veth(integer(), binary(), binary()) -> binary().
-msg_create_veth(Seq, HostName, PeerName) ->
-    %% The peer is described as a nested ifinfomsg + attributes
-    %% inside VETH_INFO_PEER, inside IFLA_INFO_DATA.
-    PeerIfinfo = ifinfomsg(0, 0, 0),
-    PeerAttrs = nla(?IFLA_IFNAME, nul_terminate(PeerName)),
-
-    Attrs = [
-        nla(?IFLA_IFNAME, nul_terminate(HostName)),
-        nla(?IFLA_LINKINFO, [
-            nla(?IFLA_INFO_KIND, <<"veth">>),
-            nla(?IFLA_INFO_DATA, [
-                nla(?VETH_INFO_PEER, [PeerIfinfo, PeerAttrs])
-            ])
-        ])
-    ],
-    build_link_msg(?RTM_NEWLINK, create_flags(), Seq, _Ifindex = 0,
-                   _IfFlags = 0, _IfChange = 0, Attrs).
-
--doc """
 Create an IPVLAN slave attached to a parent device.
 
   RTM_NEWLINK + IFLA_IFNAME + IFLA_LINK(parent)
@@ -286,22 +232,6 @@ Pid: OS PID of the target process (not Erlang pid).
 msg_set_netns_by_pid(Seq, IfIndex, Pid) ->
     Attrs = [
         nla(?IFLA_NET_NS_PID, <<Pid:32/native>>)
-    ],
-    build_link_msg(?RTM_NEWLINK, ack_flags(), Seq, IfIndex,
-                   _IfFlags = 0, _IfChange = 0, Attrs).
-
--doc """
-Attach an interface to a bridge (set master device).
-
-  RTM_NEWLINK + IFLA_MASTER
-
-IfIndex: the interface to attach.
-MasterIndex: the bridge's interface index.
-""".
--spec msg_set_master(integer(), integer(), integer()) -> binary().
-msg_set_master(Seq, IfIndex, MasterIndex) ->
-    Attrs = [
-        nla(?IFLA_MASTER, <<MasterIndex:32/native>>)
     ],
     build_link_msg(?RTM_NEWLINK, ack_flags(), Seq, IfIndex,
                    _IfFlags = 0, _IfChange = 0, Attrs).
@@ -373,8 +303,6 @@ msg_add_default_route(Seq, {A, B, C, D}) ->
 Delete a network interface.
 
   RTM_DELLINK
-
-Deleting one end of a veth pair automatically deletes the other.
 """.
 -spec msg_delete_link(integer(), integer()) -> binary().
 msg_delete_link(Seq, IfIndex) ->

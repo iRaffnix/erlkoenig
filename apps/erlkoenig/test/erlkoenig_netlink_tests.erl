@@ -38,51 +38,6 @@
 %% Len must equal the actual binary size.
 %% =================================================================
 
-msg_create_bridge_header_test() ->
-    Msg = erlkoenig_netlink:msg_create_bridge(1, <<"br0">>),
-    <<Len:32/native, Type:16/native, Flags:16/native,
-      Seq:32/native, _Pid:32/native, _Rest/binary>> = Msg,
-    ?assertEqual(byte_size(Msg), Len),
-    ?assertEqual(?RTM_NEWLINK, Type),
-    ?assertEqual(1, Seq),
-    %% Must have REQUEST + ACK + CREATE + EXCL
-    ?assertNotEqual(0, Flags band ?NLM_F_REQUEST),
-    ?assertNotEqual(0, Flags band ?NLM_F_ACK),
-    ?assertNotEqual(0, Flags band ?NLM_F_CREATE),
-    ?assertNotEqual(0, Flags band ?NLM_F_EXCL).
-
-msg_create_bridge_length_correct_test() ->
-    Msg = erlkoenig_netlink:msg_create_bridge(1, <<"my_bridge">>),
-    <<Len:32/native, _:12/binary, _Rest/binary>> = Msg,
-    ?assertEqual(byte_size(Msg), Len).
-
-msg_create_bridge_contains_name_test() ->
-    Msg = erlkoenig_netlink:msg_create_bridge(1, <<"erlkoenig_br0">>),
-    %% The NUL-terminated name must appear in the binary
-    ?assertNotEqual(nomatch, binary:match(Msg, <<"erlkoenig_br0", 0>>)).
-
-msg_create_bridge_contains_kind_test() ->
-    Msg = erlkoenig_netlink:msg_create_bridge(1, <<"br0">>),
-    ?assertNotEqual(nomatch, binary:match(Msg, <<"bridge">>)).
-
-%% =================================================================
-%% veth creation
-%% =================================================================
-
-msg_create_veth_contains_both_names_test() ->
-    Msg = erlkoenig_netlink:msg_create_veth(1, <<"vh_abc">>, <<"vp_abc">>),
-    ?assertNotEqual(nomatch, binary:match(Msg, <<"vh_abc", 0>>)),
-    ?assertNotEqual(nomatch, binary:match(Msg, <<"vp_abc", 0>>)).
-
-msg_create_veth_contains_kind_test() ->
-    Msg = erlkoenig_netlink:msg_create_veth(1, <<"vh">>, <<"vp">>),
-    ?assertNotEqual(nomatch, binary:match(Msg, <<"veth">>)).
-
-msg_create_veth_length_correct_test() ->
-    Msg = erlkoenig_netlink:msg_create_veth(1, <<"vh_test">>, <<"vp_test">>),
-    <<Len:32/native, _/binary>> = Msg,
-    ?assertEqual(byte_size(Msg), Len).
-
 %% =================================================================
 %% ipvlan creation
 %% =================================================================
@@ -162,13 +117,6 @@ msg_set_netns_by_pid_test() ->
     ?assertEqual(byte_size(Msg), Len),
     %% The OS PID (12345) should be in the payload as 32-bit native
     ?assertNotEqual(nomatch, binary:match(Msg, <<12345:32/native>>)).
-
-msg_set_master_test() ->
-    Msg = erlkoenig_netlink:msg_set_master(1, 3, 7),
-    <<Len:32/native, _/binary>> = Msg,
-    ?assertEqual(byte_size(Msg), Len),
-    %% Master index should be in the payload
-    ?assertNotEqual(nomatch, binary:match(Msg, <<7:32/native>>)).
 
 msg_delete_link_type_test() ->
     Msg = erlkoenig_netlink:msg_delete_link(1, 10),

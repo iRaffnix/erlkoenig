@@ -5,40 +5,42 @@ defmodule SimpleEcho do
   # Minimal Example — ein einzelner Container
   # ══════════════════════════════════════════════════════════
   #
-  # Zeigt: Bridge, Pod, Container, Metrics, Log Streaming.
-  # Keine Firewall, keine PKI, keine Multi-Tier-Topologie.
+  # Zeigt: IPVLAN-Zone, Pod, Container, Host-Firewall,
+  # Cgroup-Metriken (publish), Log-Streaming (stream).
+  # Keine PKI, keine Multi-Tier-Topologie, keine Volumes.
   #
-  # Starten:
-  #   mix run -e '
-  #     [{mod, _}] = Code.compile_file("examples/simple_echo.exs")
-  #     mod.write!("/tmp/simple_echo.term")
-  #   '
-  #   erlkoenig eval 'erlkoenig_config:load(<<"/tmp/simple_echo.term">>).'
+  # Starten (alles auf der Box):
+  #   ek dsl compile examples/simple_echo.exs
+  #   ek config load examples/simple_echo.term
   #
   # Beobachten:
+  #   ek ct list
+  #   ek ct inspect echo-0-echo
+  #
+  # AMQP-Streams (von einem Konsumer-Host):
   #   python3 tools/event_consumer.py <rabbitmq-host> "#"
   #   python3 tools/stream_consumer.py erlkoenig.log.echo-0-echo
 
   # ── Topologie ────────────────────────────────────────────
   #
-  # Eine Bridge = ein Layer-2 Segment.
-  # subnet: IPv4 CIDR — Gateway wird .1, IP-Pool .2-.254.
+  # Eine IPVLAN-Zone mit dummy-Parent (kein physisches Interface).
+  # subnet: IPv4 CIDR — Gateway wird .1 (auf dem Dummy), IP-Pool .2-.254.
 
   host do
-    bridge "echo", subnet: {10, 0, 0, 0, 24}
+    ipvlan "echo", parent: {:dummy, "ek_echo"}, subnet: {10, 0, 0, 0, 24}
 
-    # ── Host-Firewall (Referenz) ─────────────────────────────
+    # ── Host-Firewall ────────────────────────────────────────
     #
-    # Schützt den Host selbst — nicht die Container (die haben
-    # eigene Forward-Regeln im "erlkoenig" Table).
+    # Schützt den Host selbst (Pakete zum Host-Netz-Stack).
+    # Container haben ihre eigenen output/input Chains in ihrer
+    # eigenen netns — die werden im container-Block deklariert.
+    # Hier sehen wir nur den Host.
     #
     # hook: :input — Pakete die AN den Host adressiert sind
-    #                (nicht forwarded, nicht an Container)
     # policy: :drop — alles was keine Regel matcht → verworfen
     # priority: :filter — Standard-Priorität (0)
     #
-    # Reihenfolge ist entscheidend: nft evaluiert top-to-bottom,
-    # erste matchende Regel gewinnt.
+    # nft evaluiert top-to-bottom; die erste matchende Regel gewinnt.
 
     nft_table :inet, "host" do
 
@@ -120,7 +122,18 @@ defmodule SimpleEcho do
         nft_rule :accept, tcp_dport: 9100
 
         # ┌─────────────────────────────────────────────────┐
-        # │ 7. DEFAULT DROP                                 │
+        # │ 7. RUNTIME-SERVICES                             │
+        # │                                                 │
+        # │ erlkoenig betreibt einen DNS-Resolver pro Zone  │
+        # │ auf der Gateway-IP (10.0.0.1). Ohne diese Regel │
+        # │ timeoutet jedes getaddrinfo() im Container.     │
+        # │ Magic-Inject gibt's nicht — explizit hinschreiben│
+        # │ ist Pflicht (siehe Kapitel 6 Service-Catalogue).│
+        # └─────────────────────────────────────────────────┘
+        nft_rule :accept, ip_saddr: {10, 0, 0, 0, 24}, udp_dport: 53
+
+        # ┌─────────────────────────────────────────────────┐
+        # │ 8. DEFAULT DROP                                 │
         # │                                                 │
         # │ Alles was bis hier nicht gematcht hat.           │
         # │ Counter zählt Drops (sichtbar über AMQP).       │
@@ -141,25 +154,24 @@ defmodule SimpleEcho do
   #             :rest_for_one — crash restartet alle nachfolgenden
   #
   # container: ein Linux-Prozess in eigenem Namespace.
-  #   binary: Pfad zum statischen Binary (absolute)
-  #   args: Kommandozeilen-Argumente
-  #   restart: Wann neustarten bei Exit
-  #     :no_restart — nie (default)
-  #     :always — bei jedem Exit
-  #     :on_failure — bei non-zero Exit
-  #     {:on_failure, N} — max N Versuche
+  #   binary:   Pfad zum statischen Binary (absolute)
+  #   zone:     IPVLAN-Zonenname (muss oben mit `ipvlan` deklariert sein)
+  #   replicas: Anzahl Instanzen — bei 3 → echo-0-echo, echo-1-echo, echo-2-echo
+  #   restart:  :permanent | :transient | :temporary (OTP)
+  #   args:     Kommandozeilen-Argumente
 
   pod "echo", strategy: :one_for_one do
     container "echo",
       binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
       args: ["7777"],
-      restart: :on_failure do
+      zone: "echo",
+      replicas: 1,
+      restart: :transient do
 
       # ── cgroup Metrics ─────────────────────────────────
       #
       # publish: periodische cgroup-Metriken über AMQP.
       # interval: Polling-Intervall in Millisekunden (min: 1000).
-      # metric: welche cgroup-Dateien gelesen werden.
       #
       # AMQP Routing Keys:
       #   stats.echo-0-echo.memory  (current, peak, max, pct, swap)
@@ -180,30 +192,10 @@ defmodule SimpleEcho do
       end
 
       # ── Log Streaming ──────────────────────────────────
-      #
-      # stream: stdout/stderr in RabbitMQ Stream (append-only).
-      # retention: wie lange Daten im Stream bleiben.
-      # channel: welche File-Deskriptoren gestreamt werden.
-      #   :stdout — Container stdout
-      #   :stderr — Container stderr
-      # Beide landen im selben Stream (erlkoenig.log.<name>),
-      # unterschieden durch headers.fd.
-
       stream retention: {7, :days} do
         channel :stdout
         channel :stderr
       end
     end
   end
-
-  # ── Deployment ───────────────────────────────────────────
-  #
-  # attach: verbindet Pod mit Bridge.
-  #   to: Bridge-Name
-  #   replicas: Anzahl Instanzen
-  #
-  # Erzeugt: echo-0-echo (IP 10.0.0.2)
-  # Bei replicas: 3 → echo-0-echo, echo-1-echo, echo-2-echo
-
-  attach "echo", to: "echo", replicas: 1
 end

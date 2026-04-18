@@ -3,7 +3,8 @@
 # Usage: sudo -E ./tests/integration/run_all.sh
 set -e
 
-cd "$(dirname "$0")/.."
+# Go to project root (two levels up from this script)
+cd "$(dirname "$0")/../.."
 
 # Compile test helper
 erlc -o tests/integration tests/integration/test_helper.erl
@@ -15,8 +16,6 @@ RESET='\033[0m'
 
 TESTS=(
     "01_lifecycle.escript        Spawn, Inspect, Stop, Exit"
-    "02_networking.escript       Container-to-Container TCP"
-    "03_port_forwarding.escript  DNAT Port-Forwarding"
     "04_memory_limit.escript     OOM-Kill bei Memory-Limit"
     "05_pid_limit.escript        PID-Limit (Fork-Schutz)"
     "06_restart.escript          Auto-Restart mit Backoff"
@@ -26,7 +25,6 @@ TESTS=(
     "10_firewall.escript         Firewall Isolation"
     "11_output.escript           Output Capture"
     "12_protocol.escript         Low-Level Protokoll (SPAWN/GO/EXITED)"
-    "13_net_setup.escript        Netzwerk-Stack (Bridge, veth, Netlink)"
     "14_pty.escript              PTY + Stdin Integration"
     "15_dsl_config.escript       DSL Config Pipeline (escript → term → load)"
     "16_proc_masking.escript     Process Masking"
@@ -34,6 +32,13 @@ TESTS=(
     "18_bind_mount_volume.escript Persistent Volumes (Bind Mount)"
     "19_cgroup_topology.escript  cgroup Topology (beam/ + containers/)"
     "20_beam_survives_oom.escript BEAM überlebt Container OOM-Kill"
+    "21_e2e_full_stack.escript   E2E: Full Stack Compile/Load/Verify"
+    "22_pki_container.escript    PKI: Signed Container Startup"
+    "23_ipvlan.escript           IPVLAN L3S Networking"
+    "24_container_nft.escript    Per-Container nft Firewall (CMD_NFT_SETUP)"
+    "25_volume_mount_opts.escript Volume Mount Options (ro, nosuid, opts: string)"
+    "26_dsl_volume_opts.escript  DSL → .term → load → verify kernel mount flags"
+    "27_ephemeral_volume_cleanup.escript Ephemeral volumes + UUID store + cleanup"
 )
 
 echo ""

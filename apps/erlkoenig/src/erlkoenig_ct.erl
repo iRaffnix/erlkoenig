@@ -37,6 +37,8 @@ States:
 
 -behaviour(gen_statem).
 
+-include("erlkoenig_error.hrl").
+
 %% API
 -export([start_link/2,
          start_recovering/2,
@@ -44,9 +46,11 @@ States:
          stop_container/1,
          kill/2,
          get_info/1,
+         list/0,
          attach/2,
          send_input/2,
-         resize/3]).
+         resize/3,
+         forget_restart_count/1]).
 
 %% gen_statem callbacks
 -export([callback_mode/0, init/1, terminate/3]).
@@ -115,7 +119,8 @@ States:
     stats_timers  = []         :: [reference()],
     last_cpu_usec = undefined  :: non_neg_integer() | undefined,
     stream        = undefined  :: map() | undefined,
-    log_publisher = undefined  :: {pid(), atomics:atomics_ref()} | undefined
+    log_publisher = undefined  :: {pid(), atomics:atomics_ref()} | undefined,
+    admission_token = undefined :: reference() | undefined
 }).
 
 -define(SPAWN_TIMEOUT, application:get_env(erlkoenig, spawn_timeout, 30_000)).
@@ -153,6 +158,53 @@ kill(Pid, Signal) ->
 get_info(Pid) ->
     gen_statem:call(Pid, get_info).
 
+%% Return info maps for every container currently in the erlkoenig_cts
+%% process group. Mirrors erlkoenig:list/0 but is exported directly so
+%% operator tooling doesn't have to know about the pg layer.
+-spec list() -> [map()].
+list() ->
+    Pids = try pg:get_members(erlkoenig_pg, erlkoenig_cts)
+           catch _:_ -> []
+           end,
+    lists:filtermap(fun(Pid) ->
+        try {true, get_info(Pid)}
+        catch _:_ -> false
+        end
+    end, Pids).
+
+%% Drop the persistent restart counter for a container name. Called from
+%% erlkoenig_config when a name leaves the declared set — after that,
+%% the next spawn with the same name starts counting from zero again.
+-spec forget_restart_count(binary() | undefined) -> ok.
+forget_restart_count(undefined) -> ok;
+forget_restart_count(Name) when is_binary(Name) ->
+    _ = persistent_term:erase({?MODULE, restart_count, Name}),
+    ok.
+
+%% Internal: read-and-bump the persistent restart counter for this name.
+%% First spawn of a name → 0 (stored). Every later spawn under the same
+%% name → previous + 1 (stored and returned). A nameless container (for
+%% ad-hoc spawns from the REPL) bypasses persistence entirely.
+-spec initial_restart_count(binary() | undefined) -> non_neg_integer().
+initial_restart_count(undefined) -> 0;
+initial_restart_count(Name) when is_binary(Name) ->
+    Key = {?MODULE, restart_count, Name},
+    case persistent_term:get(Key, undefined) of
+        undefined ->
+            ok = persistent_term:put(Key, 0),
+            0;
+        Prior ->
+            Next = Prior + 1,
+            ok = persistent_term:put(Key, Next),
+            Next
+    end.
+
+-spec persist_restart_count(binary() | undefined, non_neg_integer()) -> ok.
+persist_restart_count(undefined, _) -> ok;
+persist_restart_count(Name, Count) when is_binary(Name) ->
+    ok = persistent_term:put({?MODULE, restart_count, Name}, Count),
+    ok.
+
 -spec attach(pid(), pid()) -> ok | {error, term()}.
 attach(Pid, OutputPid) ->
     gen_statem:call(Pid, {attach, OutputPid}).
@@ -175,6 +227,13 @@ init({normal, BinaryPath, Opts}) ->
     Id = make_id(),
     proc_lib:set_label({erlkoenig_ct, Id}),
     Restart = validate_restart(maps:get(restart, Opts, no_restart)),
+    Name = maps:get(name, Opts, undefined),
+    %% Restart counter survives gen_statem reincarnations (pod-supervisor
+    %% respawn, drift-reconcile teardown/re-spawn) by living in
+    %% persistent_term keyed by container name. A brand-new name starts
+    %% at 0; every later init/1 under the same name bumps the stored
+    %% count by one.
+    InitRestartCount = initial_restart_count(Name),
     Data = #ct_data{
         id          = Id,
         binary_path = BinaryPath,
@@ -185,11 +244,12 @@ init({normal, BinaryPath, Opts}) ->
         ip          = maps:get(ip, Opts, undefined),
         zone        = maps:get(zone, Opts, default),
         restart     = Restart,
+        restart_count = InitRestartCount,
         limits      = maps:get(limits, Opts, #{}),
         seccomp     = seccomp_profile_id(maps:get(seccomp, Opts, none)),
         caps_keep   = caps_to_mask(maps:get(caps, Opts, [])),
         output      = maps:get(output, Opts, undefined),
-        name        = maps:get(name, Opts, undefined),
+        name        = Name,
         files       = maps:get(files, Opts, #{}),
         pty         = maps:get(pty, Opts, false),
         firewall    = maps:get(firewall, Opts, #{}),
@@ -267,9 +327,41 @@ creating(state_timeout, spawn_timeout, Data) ->
     {next_state, failed, Data#ct_data{error_reason = spawn_timeout}};
 
 creating({call, _From}, _, _Data) ->
-    {keep_state_and_data, [postpone]}.
+    {keep_state_and_data, [postpone]};
 
-creating_do_spawn(#ct_data{id = ContainerId} = Data) ->
+creating(info, {poll_stats, _, _}, _Data) -> keep_state_and_data;
+creating(info, check_restart, _Data) -> keep_state_and_data.
+
+creating_do_spawn(#ct_data{id = ContainerId,
+                            binary_path = BinaryPath,
+                            zone = Zone} = Data) ->
+    %% Pre-spawn gates — both must pass before any expensive work
+    %% (socket creation, namespace setup, nft installation).
+    case admission_then_quarantine(Zone, BinaryPath) of
+        {ok, AdmissionToken} ->
+            creating_do_spawn_gated(Data#ct_data{admission_token = AdmissionToken});
+        {error, admission_timeout} ->
+            logger:warning("container ~s: admission gate timed out", [ContainerId]),
+            {next_state, failed,
+             Data#ct_data{error_reason = admission_timeout}};
+        {error, admission_queue_full} ->
+            logger:warning("container ~s: admission queue full", [ContainerId]),
+            {next_state, failed,
+             Data#ct_data{error_reason = admission_queue_full}};
+        {error, {quarantined, Hash, Since}} ->
+            logger:warning("container ~s: binary quarantined (~s since ~p)",
+                           [ContainerId, format_hash_prefix(Hash), Since]),
+            erlkoenig_error:emit(
+              ?EK_ERROR(runtime, binary_quarantined,
+                        "spawn refused by quarantine",
+                        #{hash_prefix => format_hash_prefix(Hash),
+                          since_ms => Since}),
+              ContainerId),
+            {next_state, failed,
+             Data#ct_data{error_reason = {quarantined, Hash}}}
+    end.
+
+creating_do_spawn_gated(#ct_data{id = ContainerId} = Data) ->
     SocketPath = make_socket_path(ContainerId),
     ok = filelib:ensure_dir(binary_to_list(SocketPath)),
     %% Pre-create the container cgroup so the C runtime starts in it
@@ -304,6 +396,12 @@ creating_do_spawn(#ct_data{id = ContainerId} = Data) ->
                 socket_path = SocketPath
             }, [{state_timeout, ?SPAWN_TIMEOUT, spawn_timeout}]};
         {error, Reason} ->
+            erlkoenig_error:emit(
+              ?EK_ERROR(runtime, socket_connect_failed,
+                        "wait_and_connect to erlkoenig_rt socket",
+                        #{socket_path => SocketPath, reason => Reason,
+                          timeout_ms  => 10000}),
+              Data#ct_data.id),
             {next_state, failed,
              Data#ct_data{error_reason = {socket_connect_failed, Reason}}}
     end.
@@ -315,9 +413,10 @@ creating_send_spawn(Data) ->
                  true  -> erlkoenig_proto:spawn_flag_pty();
                  false -> 0
              end,
-    WireVolumes = [#{host => H, container => C,
-                     opts => erlkoenig_proto:volume_opts(V)}
-                   || #{host := H, container := C} = V <- Data#ct_data.volumes],
+    %% Pass volumes through with their full DSL fields intact —
+    %% erlkoenig_proto:encode_volume_tlv/1 runs resolve_volume/1 on
+    %% each to pick up `opts:` strings and `read_only:` booleans.
+    WireVolumes = Data#ct_data.volumes,
     ExtraOpts = Data#ct_data.extra_opts,
     SpawnOpts = #{
         path       => Data#ct_data.binary_path,
@@ -359,9 +458,20 @@ creating_handle_rt_data(Reply, true = _Handshake, Data) ->
             {next_state, namespace_ready,
              Data#ct_data{os_pid = Pid, netns_path = Ns}};
         {ok, reply_error, #{code := Code, message := ErrMsg}} ->
+            erlkoenig_error:emit(
+              ?EK_ERROR(runtime, spawn_failed,
+                        "erlkoenig_rt rejected CMD_SPAWN",
+                        #{code => Code, message => ErrMsg,
+                          binary => Data#ct_data.binary_path}),
+              Data#ct_data.id),
             {next_state, failed,
              Data#ct_data{error_reason = {spawn_failed, Code, ErrMsg}}};
         Other ->
+            erlkoenig_error:emit(
+              ?EK_ERROR(runtime, unexpected_spawn_reply,
+                        "unknown reply to CMD_SPAWN",
+                        #{reply => Other}),
+              Data#ct_data.id),
             {next_state, failed,
              Data#ct_data{error_reason = {unexpected_reply, Other}}}
     end.
@@ -399,7 +509,10 @@ namespace_ready(info, {tcp_closed, Sock}, #ct_data{sock = Sock} = Data) ->
 
 namespace_ready(info, {tcp_error, Sock, Reason}, #ct_data{sock = Sock} = Data) ->
     {next_state, failed,
-     Data#ct_data{sock = undefined, error_reason = {socket_error, Reason}}}.
+     Data#ct_data{sock = undefined, error_reason = {socket_error, Reason}}};
+
+namespace_ready(info, {poll_stats, _, _}, _Data) -> keep_state_and_data;
+namespace_ready(info, check_restart, _Data) -> keep_state_and_data.
 
 namespace_ready_handle_data(Reply, Data) ->
     case erlkoenig_proto:decode(Reply) of
@@ -434,7 +547,12 @@ starting(state_timeout, go_timeout, Data) ->
     {next_state, failed, Data2#ct_data{error_reason = go_timeout}};
 
 starting({call, _From}, _, _Data) ->
-    {keep_state_and_data, [postpone]}.
+    {keep_state_and_data, [postpone]};
+
+%% Stale timer messages from the previous gen_statem incarnation may
+%% arrive while we're bringing a fresh container up. Discard.
+starting(info, {poll_stats, _, _}, _Data) -> keep_state_and_data;
+starting(info, check_restart, _Data) -> keep_state_and_data.
 
 %% =================================================================
 %% running - Container executing
@@ -447,11 +565,17 @@ running(enter, _OldState, Data) ->
     dns_register(Data),
     dets_register(Data),
     audit_volumes_mounted(Data),
+    %% The spawn is complete — release the admission token so another
+    %% waiter can proceed. The container is now using its long-lived
+    %% resources (cgroup, netns, firewall) which don't count against
+    %% the bounded-concurrency spawn gate.
+    release_admission_token(Data),
     Timers = start_stats_timers(Data#ct_data.publish),
     LogPub = maybe_start_log_publisher(Data),
     {keep_state, Data#ct_data{started_at = erlang:monotonic_time(millisecond),
                               stats_timers = Timers,
-                              log_publisher = LogPub}};
+                              log_publisher = LogPub,
+                              admission_token = undefined}};
 
 running(info, {tcp, Sock, Reply}, #ct_data{sock = Sock} = Data) ->
     running_handle_data(Reply, Data);
@@ -609,6 +733,11 @@ stopped(enter, _OldState, Data) ->
     dns_unregister(Data),
     dets_unregister(Data),
     audit_volumes_released(Data),
+    cleanup_ephemeral_volumes(Data),
+    %% Release the admission token if we're stopping before `running`
+    %% fired (early failure path). No-op if the token was already
+    %% returned.
+    release_admission_token(Data),
     notify_stopped(Data),
     Data2 = Data#ct_data{sock = undefined, fuse_mount = undefined,
                          stats_timers = [], log_publisher = undefined},
@@ -628,7 +757,27 @@ stopped(enter, _OldState, Data) ->
     end;
 
 stopped(info, check_restart, Data) ->
-    handle_check_restart(Data);
+    case handle_check_restart(Data) of
+        {keep_state, Data2} ->
+            %% Terminal state for a standalone container that will not
+            %% restart (user stop or exhausted retries). Shut down the
+            %% gen_statem so the process doesn't linger as a zombie in
+            %% supervisor:which_children/1.
+            {stop, normal, Data2};
+        Other ->
+            Other
+    end;
+%% Stats poll / TCP events may already be in the mailbox when we enter
+%% this state — cancel_timer/1 removes the scheduled send but cannot
+%% pull back messages that already made it through. Ignore them.
+stopped(info, {poll_stats, _, _}, _Data) ->
+    keep_state_and_data;
+stopped(info, {tcp_closed, _}, _Data) ->
+    keep_state_and_data;
+stopped(info, {tcp_error, _, _}, _Data) ->
+    keep_state_and_data;
+stopped(info, {tcp, _, _}, _Data) ->
+    keep_state_and_data;
 
 stopped({call, From}, get_info, Data) ->
     {keep_state_and_data, [{reply, From, build_info(stopped, Data)}]};
@@ -680,7 +829,20 @@ restarting({call, From}, get_info, Data) ->
     {keep_state_and_data, [{reply, From, build_info(restarting, Data)}]};
 
 restarting({call, From}, _, _Data) ->
-    {keep_state_and_data, [{reply, From, {error, restarting}}]}.
+    {keep_state_and_data, [{reply, From, {error, restarting}}]};
+
+%% Stale messages from previous instance may still be in mailbox during
+%% the restart backoff — discard.
+restarting(info, {poll_stats, _, _}, _Data) ->
+    keep_state_and_data;
+restarting(info, {tcp_closed, _}, _Data) ->
+    keep_state_and_data;
+restarting(info, {tcp_error, _, _}, _Data) ->
+    keep_state_and_data;
+restarting(info, {tcp, _, _}, _Data) ->
+    keep_state_and_data;
+restarting(info, check_restart, _Data) ->
+    keep_state_and_data.
 
 %% =================================================================
 %% failed - Error state, process stays alive for inspection
@@ -696,6 +858,17 @@ failed(enter, _OldState, Data) ->
     cleanup_socket_file(Data#ct_data.socket_path),
     dns_unregister(Data),
     dets_unregister(Data),
+    cleanup_ephemeral_volumes(Data),
+    release_admission_token(Data),
+    %% Record the crash against the binary's hash so the quarantine
+    %% circuit breaker can spot crashloops. Quarantine failures caused
+    %% by quarantine itself (error_reason = {quarantined, _}) don't
+    %% feed back into the counter — otherwise a quarantined binary
+    %% would keep driving its own quarantine deeper.
+    case Data#ct_data.error_reason of
+        {quarantined, _} -> ok;
+        _ -> _ = safe_record_crash(Data#ct_data.binary_path)
+    end,
     erlkoenig_events:notify({container_failed, Data#ct_data.id,
                              Data#ct_data.name,
                              Data#ct_data.error_reason}),
@@ -802,7 +975,10 @@ recovering({call, From}, stop_container, Data) ->
      Data#ct_data{user_stopped = true}, [{reply, From, ok}]};
 
 recovering({call, _From}, _, _Data) ->
-    {keep_state_and_data, [postpone]}.
+    {keep_state_and_data, [postpone]};
+
+recovering(info, {poll_stats, _, _}, _Data) -> keep_state_and_data;
+recovering(info, check_restart, _Data) -> keep_state_and_data.
 
 %% =================================================================
 %% disconnected - Socket lost while running, attempting reconnect
@@ -838,7 +1014,10 @@ disconnected({call, From}, get_info, Data) ->
     {keep_state_and_data, [{reply, From, build_info(disconnected, Data)}]};
 
 disconnected({call, From}, _, _Data) ->
-    {keep_state_and_data, [{reply, From, {error, disconnected}}]}.
+    {keep_state_and_data, [{reply, From, {error, disconnected}}]};
+
+disconnected(info, {poll_stats, _, _}, _Data) -> keep_state_and_data;
+disconnected(info, check_restart, _Data) -> keep_state_and_data.
 
 %% =================================================================
 %% Internal
@@ -1066,6 +1245,12 @@ do_container_net_setup(#ct_data{id = Id, ip = Ip,
             {next_state, starting, Data2};
         {error, Reason} ->
             _ = erlkoenig_cgroup:destroy(Id),
+            erlkoenig_error:emit(
+              ?EK_ERROR(network, net_setup_failed,
+                        "erlkoenig_net:setup_container_net failed",
+                        #{zone  => Data#ct_data.zone,
+                          reason => Reason}),
+              Id),
             {next_state, failed,
              Data#ct_data{error_reason = {net_setup_failed, Reason}}}
     end.
@@ -1080,8 +1265,10 @@ handle_check_restart(Data) ->
     Data2 = Data#ct_data{net_info = undefined},
     case should_restart(Data2) of
         true ->
+            NewCount = Data2#ct_data.restart_count + 1,
+            persist_restart_count(Data2#ct_data.name, NewCount),
             {next_state, restarting,
-             Data2#ct_data{restart_count = Data2#ct_data.restart_count + 1}};
+             Data2#ct_data{restart_count = NewCount}};
         false ->
             Data3 = release_ip(Data2),
             {keep_state, Data3}
@@ -1136,6 +1323,11 @@ pod_exit_reason(Data) ->
     end.
 
 -spec validate_restart(term()) -> erlkoenig:restart_policy().
+%% OTP-style aliases (preferred by the DSL, normalized to legacy internal).
+validate_restart(permanent)                             -> always;
+validate_restart(transient)                             -> on_failure;
+validate_restart(temporary)                             -> no_restart;
+%% Legacy names (still used internally throughout the runtime).
 validate_restart(no_restart)                            -> no_restart;
 validate_restart(always)                                -> always;
 validate_restart(on_failure)                            -> on_failure;
@@ -1788,26 +1980,130 @@ audit_volumes_released(#ct_data{id = Id, name = Name, volumes = Volumes}) ->
 -spec resolve_volumes(#ct_data{}) -> #ct_data{}.
 resolve_volumes(#ct_data{volumes = []} = Data) ->
     Data;
-resolve_volumes(#ct_data{volumes = DslVolumes, name = Name, id = Id} = Data) ->
+resolve_volumes(#ct_data{volumes = DslVolumes, name = Name, id = Id,
+                         uid = Uid, gid = Gid} = Data) ->
     ContainerName = case Name of
         undefined -> Id;
         N -> N
     end,
-    case erlkoenig_volume:resolve(ContainerName, DslVolumes) of
+    %% erlkoenig_volume_store:ensure/1 (called from resolve/4) handles
+    %% directory creation + chown under the volumes root. We don't
+    %% need the separate ensure_volume_dir step any more.
+    case erlkoenig_volume:resolve(ContainerName, DslVolumes, Uid, Gid) of
         {ok, Resolved} ->
-            lists:foreach(fun(#{host := HostPath}) ->
-                case erlkoenig_volume:ensure_volume_dir(HostPath) of
-                    ok -> ok;
-                    {error, Reason} ->
-                        logger:warning("container ~s: failed to create volume dir ~s: ~p",
-                                       [Id, HostPath, Reason])
-                end
-            end, Resolved),
             Data#ct_data{volumes = Resolved};
         {error, Reason} ->
-            logger:error("container ~s: volume resolution failed: ~p", [Id, Reason]),
+            logger:error("container ~s: volume resolution failed: ~p",
+                         [Id, Reason]),
             Data
     end.
+
+%% Destroy ephemeral volumes belonging to this container. Called from
+%% the stopped/failed state entry actions. Persistent volumes are left
+%% alone — they outlive their container by design.
+-spec cleanup_ephemeral_volumes(#ct_data{}) -> ok.
+cleanup_ephemeral_volumes(#ct_data{name = Name, id = Id}) ->
+    ContainerName = case Name of
+        undefined -> Id;
+        N -> N
+    end,
+    %% This runs during the `stopped`/`failed` state-entry callback,
+    %% which also fires in unit-test contexts where the volume store
+    %% hasn't been started. Treat a missing store as "nothing to do"
+    %% instead of propagating a noproc exit that would take the
+    %% gen_statem (and any linked test fixtures) down with it.
+    try erlkoenig_volume_store:cleanup_ephemeral(ContainerName) of
+        {ok, []} -> ok;
+        {ok, Destroyed} ->
+            logger:info("container ~s: cleaned up ~p ephemeral volume(s): ~p",
+                        [Id, length(Destroyed), Destroyed]),
+            ok;
+        {error, Reason} ->
+            logger:warning("container ~s: ephemeral cleanup failed: ~p",
+                           [Id, Reason]),
+            ok
+    catch
+        exit:{noproc, _} ->
+            %% volume_store not up (bare test VM) — no volumes to clean.
+            ok;
+        exit:{timeout, _} ->
+            logger:warning("container ~s: volume_store timeout on cleanup",
+                           [Id]),
+            ok
+    end.
+
+%% -- Pre-spawn gates ---------------------------------------------
+
+-spec admission_then_quarantine(atom() | binary(), binary()) ->
+    {ok, reference()}
+  | {error, admission_timeout | admission_queue_full}
+  | {error, {quarantined, binary(), integer()}}.
+admission_then_quarantine(Zone, BinaryPath) ->
+    %% Quarantine check first — it's cheap, a hashmap lookup plus a
+    %% hash-file call, and rejecting a quarantined binary early means
+    %% we don't hold an admission token we'll just release anyway.
+    case safe_quarantine_check(BinaryPath) of
+        ok ->
+            Scope = admission_scope(Zone),
+            case safe_admission_acquire(Scope) of
+                {ok, Token}  -> {ok, Token};
+                {error, _} = E -> E
+            end;
+        {error, {quarantined, _, _}} = E -> E;
+        {error, _} = E -> E
+    end.
+
+safe_quarantine_check(BinaryPath) ->
+    try erlkoenig_quarantine:check(BinaryPath)
+    catch
+        %% Quarantine gen_server not running (isolated eunit contexts
+        %% that don't need it). Fail-open: if the gate itself is
+        %% missing, don't block spawns. The operational deployment
+        %% always has it; this branch is just for tests.
+        exit:{noproc, _} -> ok;
+        exit:{timeout, _} -> ok
+    end.
+
+safe_admission_acquire(Scope) ->
+    try erlkoenig_admission:acquire(Scope, admission_acquire_timeout_ms()) of
+        {ok, Token} -> {ok, Token};
+        {error, timeout}    -> {error, admission_timeout};
+        {error, queue_full} -> {error, admission_queue_full}
+    catch
+        %% Same rationale as quarantine: the admission gate is
+        %% supposed to be there, but tests don't always start it.
+        exit:{noproc, _}  -> {ok, undefined};
+        exit:{timeout, _} -> {error, admission_timeout}
+    end.
+
+admission_acquire_timeout_ms() ->
+    application:get_env(erlkoenig, admission_acquire_timeout_ms, 30_000).
+
+admission_scope(undefined) -> host;
+admission_scope(default)   -> host;
+admission_scope(Zone) when is_atom(Zone) -> atom_to_binary(Zone, utf8);
+admission_scope(Zone) when is_binary(Zone) -> Zone;
+admission_scope(_) -> host.
+
+-spec release_admission_token(#ct_data{}) -> ok.
+release_admission_token(#ct_data{admission_token = undefined}) -> ok;
+release_admission_token(#ct_data{admission_token = Token}) ->
+    try erlkoenig_admission:release(Token)
+    catch _:_ -> ok
+    end.
+
+-spec safe_record_crash(binary() | undefined) -> ok.
+safe_record_crash(undefined) -> ok;
+safe_record_crash(BinaryPath) ->
+    try erlkoenig_quarantine:record_crash(BinaryPath)
+    catch _:_ -> ok
+    end.
+
+-spec format_hash_prefix(binary()) -> binary().
+format_hash_prefix(Hash) when is_binary(Hash), byte_size(Hash) >= 8 ->
+    <<Prefix:8/binary, _/binary>> = Hash,
+    Prefix;
+format_hash_prefix(Hash) -> Hash.
 
 -spec build_info(atom(), #ct_data{}) -> erlkoenig:container_info().
 build_info(State, Data) ->

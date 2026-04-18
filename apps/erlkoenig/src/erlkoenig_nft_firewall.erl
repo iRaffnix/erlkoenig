@@ -478,24 +478,26 @@ apply_config_unsafe(Config) ->
     Quotas = maps:get(quotas, Config, []),
     Chains = maps:get(chains, Config, []),
 
-    %% Clean slate via Netlink (no os:cmd) — may fail if table doesn't exist yet
-    case
-        nfnl_server:apply_msgs(erlkoenig_nft_srv, [
-            fun(S) -> nft_delete:table(?INET, Table, S) end
-        ])
-    of
-        ok ->
-            ok;
-        {error, DelErr} ->
-            logger:debug(
-                "[erlkoenig_nft] clean-slate delete of ~s: ~p (may be first run)",
-                [Table, DelErr]
-            )
-    end,
-
-    %% Build all messages
+    %% Atomic replace in a single Netlink batch: ensure-exists, delete, recreate.
+    %%
+    %% The leading `add table` makes the subsequent `delete table` succeed even
+    %% if no previous table existed (NLM_F_CREATE without NLM_F_EXCL = idempotent
+    %% upsert in nftables). The `delete` then drops the table together with all
+    %% its children, and the second `add` plus children installs the new state.
+    %%
+    %% Kernel commits the whole batch as one transaction: between old state and
+    %% new state, no hook ever sees a half-installed ruleset and no policy gap
+    %% exists. This matters because reload is the path used to push/remove ban-
+    %% list entries during active traffic — a gap would mean dropped packets
+    %% slip through.
     Msgs = lists:flatten([
-        %% Table
+        %% 0. Idempotent upsert so the next DELETE always finds something.
+        [fun(S) -> nft_table:add(?INET, Table, S) end],
+
+        %% 1. Drop the (now guaranteed) table and everything inside it.
+        [fun(S) -> nft_delete:table(?INET, Table, S) end],
+
+        %% 2. Re-create it, fresh.
         [fun(S) -> nft_table:add(?INET, Table, S) end],
 
         %% Named counters
@@ -859,7 +861,7 @@ build_rule(Table, Chain, {log_drop_nflog, Prefix, Group, Counter}, _Config) ->
 %% Log drop without counter
 build_rule(Table, Chain, {log_drop, Prefix}, _Config) ->
     encode_rule(Table, Chain, nft_rules:log_drop(Prefix));
-%% Accept on named interface (e.g. <<"wg0">>, <<"br0">>)
+%% Accept on named interface (e.g. <<"wg0">>, <<"eth0">>)
 build_rule(Table, Chain, {iifname_accept, Name}, _Config) ->
     encode_rule(Table, Chain, nft_rules:iifname_accept(Name));
 %% TCP reject with RST

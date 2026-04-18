@@ -38,7 +38,7 @@ defmodule LoggedEcho do
   #   3. At-most-once — Container-I/O wird nie blockiert
 
   host do
-    bridge "net", subnet: {10, 0, 0, 0, 24}
+    ipvlan "net", parent: {:dummy, "ek_net"}, subnet: {10, 0, 0, 0, 24}
 
     nft_table :inet, "host" do
       nft_set "ban", :ipv4_addr
@@ -54,11 +54,20 @@ defmodule LoggedEcho do
       base_chain "input", hook: :input, type: :filter,
         priority: :filter, policy: :drop do
 
+        # ── Standard-Härtung ──────────────────────────────
         nft_rule :accept, ct_state: [:established, :related]
         nft_rule :accept, iifname: "lo"
         nft_rule :accept, ip_protocol: :icmp
         nft_rule :accept, tcp_dport: 22
         nft_rule :accept, tcp_dport: 9100
+
+        # ── Runtime-Services ──────────────────────────────
+        # erlkoenig DNS-Resolver pro Zone auf der Gateway-IP.
+        # Ohne diese Regel timeoutet jedes getaddrinfo() im
+        # Container. Glasbox: explizit, kein Magic-Inject
+        # (Kapitel 6 Service-Catalogue).
+        nft_rule :accept, ip_saddr: {10, 0, 0, 0, 24}, udp_dport: 53
+
         nft_rule :drop, counter: "input_drop", log_prefix: "HOST: "
       end
     end
@@ -69,7 +78,9 @@ defmodule LoggedEcho do
       binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
       args: ["7777"],
       limits: %{memory: 134_217_728, pids: 50},
-      restart: :on_failure do
+      zone: "net",
+      replicas: 1,
+      restart: :transient do
 
       publish interval: 2000 do
         metric :memory
@@ -100,6 +111,4 @@ defmodule LoggedEcho do
       end
     end
   end
-
-  attach "echo", to: "net", replicas: 1
 end

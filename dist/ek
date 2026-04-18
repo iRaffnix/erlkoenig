@@ -1,0 +1,41 @@
+#!/bin/sh
+#
+# ek — operator CLI for an erlkoenig runtime.
+#
+# Locates the escript runtime (preferring the bundled one in the
+# release's erts directory, falling back to whatever's on PATH) and
+# delegates to ek.escript with the original arguments.
+#
+set -eu
+
+SCRIPT="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+SCRIPT_DIR="$(dirname "$SCRIPT")"
+
+# Two layouts to support:
+#   1. Installed: /opt/erlkoenig/bin/ek + erts-*/bin/escript
+#   2. Source tree: dist/ek + escript on $PATH
+RELEASE_ROOT="$(dirname "$SCRIPT_DIR")"
+BUNDLED_ESCRIPT="$(ls "$RELEASE_ROOT"/erts-*/bin/escript 2>/dev/null | head -n 1)"
+
+if [ -n "${BUNDLED_ESCRIPT:-}" ] && [ -x "$BUNDLED_ESCRIPT" ]; then
+    ESCRIPT="$BUNDLED_ESCRIPT"
+elif command -v escript >/dev/null 2>&1; then
+    ESCRIPT="$(command -v escript)"
+else
+    echo "error: cannot find escript (neither in $RELEASE_ROOT/erts-*/bin/ nor on PATH)" >&2
+    exit 1
+fi
+
+# The escript file ships next to this wrapper. Two install layouts:
+#   1. Installed: bin/ek  + share/ek.escript
+#   2. Source:    dist/ek + dist/ek.escript
+if [ -f "$SCRIPT_DIR/ek.escript" ]; then
+    SCRIPT_FILE="$SCRIPT_DIR/ek.escript"
+elif [ -f "$RELEASE_ROOT/share/ek.escript" ]; then
+    SCRIPT_FILE="$RELEASE_ROOT/share/ek.escript"
+else
+    echo "error: cannot find ek.escript" >&2
+    exit 1
+fi
+
+exec "$ESCRIPT" "$SCRIPT_FILE" "$@"

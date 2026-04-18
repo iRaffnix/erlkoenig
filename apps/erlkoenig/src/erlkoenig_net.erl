@@ -19,30 +19,24 @@
 Container network orchestration.
 
 Thin dispatcher that delegates link creation to the zone_link
-behaviour (bridge or ipvlan), then sends CMD_NET_SETUP to the
-C runtime for in-netns IP/route configuration.
+behaviour (IPVLAN L3S), then sends CMD_NET_SETUP to the C
+runtime for in-netns IP/route configuration.
 
-Two networking modes (selected per zone via `network.mode`):
+IPVLAN L3S mode (the only mode since ADR-0020):
 
-  Bridge mode (default):
     Host namespace                Container namespace
     +-----------+                 +-----------+
-    | ek_br_X   |---vh.name------| vp.name   |
-    | 10.0.0.1  |  (veth pair)   | 10.0.0.X  |
-    +-----------+                 +-----------+
-    Link created by: erlkoenig_zone_link_bridge
-
-  IPVLAN L3S mode:
-    Host namespace                Container namespace
-    +-----------+                 +-----------+
-    | eth0/     |     (no host    | ipv.name  |
+    | eth0/     |     (no host    | i.name    |
     | ek_ct0    |      side)      | 10.X.X.X  |
     +-----------+                 +-----------+
-    Slave created directly in container netns by:
-    erlkoenig_zone_link_ipvlan (via IFLA_NET_NS_PID)
 
-In both modes, CMD_NET_SETUP configures IP/route/UP inside the
-container's netns. The C runtime is link-agnostic.
+Slave created directly in the container netns by
+erlkoenig_zone_link_ipvlan (via IFLA_NET_NS_PID). Parent is
+either a physical device (`{:device, "eth0"}`) or a dummy
+owned by erlkoenig (`{:dummy, "ek_ct0"}`).
+
+CMD_NET_SETUP configures IP/route/UP inside the container's
+netns. The C runtime is link-agnostic.
 """.
 
 -export([setup_container_net/3,
@@ -65,16 +59,15 @@ container's netns. The C runtime is link-agnostic.
 Set up networking for a container.
 
 Port:        Erlang port to the erlkoenig_rt process (for CMD_NET_SETUP)
-ContainerId: UUID binary (used to derive veth name)
+ContainerId: UUID binary (used to derive the slave's interface name)
 OsPid:       Linux PID of the container process (in host pidns)
 
 Steps:
-  1. Allocate an IP from the pool
-  2. Create veth pair (host: veth_XXXX, container: eth0)
-  3. Move eth0 into the container's network namespace
-  4. Attach veth_XXXX to the bridge
-  5. Bring veth_XXXX up (host side)
-  6. Send CMD_NET_SETUP to erlkoenig_rt (configures eth0 inside netns)
+  1. Allocate an IP from the zone's pool
+  2. Ask erlkoenig_zone_link_ipvlan to create an IPVLAN L3S slave
+     directly in the container's netns (IFLA_NET_NS_PID)
+  3. Send CMD_NET_SETUP to erlkoenig_rt (configures address, route
+     and UP inside the netns)
 
 Returns a NetInfo map needed for teardown.
 """.
@@ -209,15 +202,12 @@ do_netns_setup(Port, IfName, Ip, Gateway, Prefixlen) when is_port(Port) ->
 %%%===================================================================
 
 
-%% Generate interface name based on network mode.
-%% Bridge: peer gets "vp_"/"vp." prefix (host side: "vh_"/"vh.")
-%% IPVLAN: slave gets "ipv." prefix (no host-side interface)
+%% IPVLAN slave names: "i." (2 bytes) + ≤13 byte short name = ≤15 (IFNAMSIZ-1).
 -spec container_iface_name(binary(), binary() | undefined,
                            erlkoenig_zone_link:link_ref()) -> binary().
 container_iface_name(ContainerId, Name, _LinkRef) ->
     ipvlan_name(ContainerId, Name).
 
-%% IPVLAN slave names: "i." prefix (2 bytes) + name = max 15 (IFNAMSIZ-1)
 -spec ipvlan_name(binary(), binary() | undefined) -> binary().
 ipvlan_name(ContainerId, undefined) ->
     make_ifname(short_id(ContainerId));
@@ -232,10 +222,7 @@ make_ifname(Short) ->
         N -> error({interface_name_too_long, IfName, N, max_15})
     end.
 
-%% Generate veth names from container ID or name.
-%% IFNAMSIZ is 16 (including NUL), so max 15 chars.
-%% Host:  "vh_" (3) + 12 chars = 15
-%% Peer:  "vp_" (3) + 12 chars = 15
+%% Short container identifier — at most 12 bytes to fit inside IFNAMSIZ.
 short_id(Id) ->
     binary:part(Id, 0, min(12, byte_size(Id))).
 

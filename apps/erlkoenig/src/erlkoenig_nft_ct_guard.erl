@@ -75,11 +75,15 @@ Usage:
 %% 30 seconds
 -define(DEFAULT_CLEANUP_INTERVAL, 30000).
 -define(DEFAULT_WHITELIST, []).
-%% Ports that no legitimate user would connect to.
-%% Any single connection = instant ban.
--define(DEFAULT_HONEYPOT_PORTS, [
-    21, 22, 23, 445, 1433, 1521, 3306, 3389, 5900, 6379, 8080, 8888, 9200, 27017
-]).
+%% Honeypot ports. ALWAYS empty by default. Honeypot is an
+%% instant-ban trigger on any single connection, so a non-empty
+%% default list would ban operators who SSH to port 22 the moment
+%% they touch a vanilla erlkoenig host (ask us how we know).
+%% Operators opt in explicitly via `guard do honeypot [21, 23, 445]
+%% end` in the DSL. Glasbox: no magic injection, nothing fires
+%% without a line in the stack file. A typical production list is
+%% documented in doc/book/07-threat-detection.md.
+-define(DEFAULT_HONEYPOT_PORTS, []).
 %% Repeat offender: escalation multipliers per ban count
 -define(ESCALATION, [1, 6, 24, 168]).
 

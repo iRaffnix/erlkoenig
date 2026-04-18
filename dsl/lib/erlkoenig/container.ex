@@ -145,19 +145,65 @@ defmodule Erlkoenig.Container do
 
   ## Example
 
-      volume "/data/db", persist: "archive-db"
-      volume "/var/log", persist: "archive-logs"
-      volume "/etc/config", persist: "shared-config", read_only: true
+      volume "/data/db",     persist: "archive-db"
+      volume "/var/log",     persist: "archive-logs"
+      volume "/etc/config",  persist: "shared-config", read_only: true
+
+      # Full mount-option string (parsed by erlkoenig_mount_opts):
+      volume "/srv/in",  persist: "ingest",
+                         opts: "ro,nosuid,nodev,noexec,relatime"
 
   The `persist` key is required and must match `[a-z0-9][a-z0-9_-]*`.
   The host path is resolved centrally by the core:
   `/var/lib/erlkoenig/volumes/<container>/<persist>/`
+
+  ## Options
+
+    * `:persist`    — (required) host-side persistent store name
+    * `:read_only`  — convenience boolean; sets `ro` on the mount.
+      Equivalent to `opts: "ro"`.
+    * `:opts`       — full mount-option string in `mount(8)` syntax.
+      Takes precedence over `:read_only` when both are given.
+      Parsed at config-load time by `erlkoenig_mount_opts:parse/1`;
+      typos (`nosudi`) fail loud with a clear error.
   """
   defmacro volume(container_path, opts) do
     quote do
       persist_name = Keyword.fetch!(unquote(opts), :persist)
-      read_only = Keyword.get(unquote(opts), :read_only, false)
-      entry = %{container: unquote(container_path), persist: persist_name, read_only: read_only}
+      read_only   = Keyword.get(unquote(opts), :read_only, false)
+      mount_opts  = Keyword.get(unquote(opts), :opts)
+      ephemeral   = Keyword.get(unquote(opts), :ephemeral, false)
+      quota       = Keyword.get(unquote(opts), :quota)
+
+      unless is_boolean(ephemeral) do
+        raise ArgumentError,
+          "volume ephemeral: expected a boolean, got #{inspect(ephemeral)}"
+      end
+
+      entry = %{container: unquote(container_path),
+                persist: persist_name,
+                read_only: read_only,
+                ephemeral: ephemeral}
+
+      entry =
+        case mount_opts do
+          nil -> entry
+          s when is_binary(s) -> Map.put(entry, :opts, s)
+          other ->
+            raise ArgumentError,
+              "volume opts: expected a binary string, got #{inspect(other)}"
+        end
+
+      entry =
+        case quota do
+          nil -> entry
+          q when is_binary(q) -> Map.put(entry, :quota, q)
+          q when is_integer(q) and q >= 0 -> Map.put(entry, :quota, q)
+          other ->
+            raise ArgumentError,
+              "volume quota: expected a size string (\"1G\") or non-negative integer, got #{inspect(other)}"
+        end
+
       @ct_current Builder.add_volume(@ct_current, entry)
     end
   end

@@ -2049,6 +2049,7 @@ admission_then_quarantine(Zone, BinaryPath) ->
                 {ok, Token}  -> {ok, Token};
                 {error, _} = E -> E
             end;
+        {error, {quarantined, _, _}} = E -> E;
         {error, _} = E -> E
     end.
 

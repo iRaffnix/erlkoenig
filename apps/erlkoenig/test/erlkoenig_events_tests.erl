@@ -93,10 +93,10 @@ collector_counts_events_test_() ->
             erlkoenig_events:notify({container_started, <<"a">>, self()}),
             erlkoenig_events:notify({container_stopped, <<"b">>, #{}}),
             erlkoenig_events:notify({container_oom, <<"c">>}),
-            timer:sleep(10),
-            %% gen_event:call returns the handler's reply directly (not {ok, _})
-            Count = gen_event:call(
-                erlkoenig_events, erlkoenig_event_collector, get_count),
+            %% Poll for delivery — notify is async; on slow runners
+            %% (emulated ARM, loaded CI) a fixed sleep races.
+            %% gen_event:call returns the handler's reply directly (not {ok, _}).
+            Count = wait_for_count(3, 2000),
             ?assertEqual(3, Count)
         end
      ] end}.
@@ -185,3 +185,23 @@ cleanup_pid(Pid) ->
     after 1000 -> ok
     end,
     try unregister(erlkoenig_events) catch _:_ -> ok end.
+
+%% Poll the collector's count until it reaches Expected or we hit
+%% TimeoutMs. Returns the final count.
+wait_for_count(Expected, TimeoutMs) ->
+    wait_for_count(Expected, TimeoutMs, erlang:monotonic_time(millisecond)).
+
+wait_for_count(Expected, TimeoutMs, Start) ->
+    Count = gen_event:call(
+        erlkoenig_events, erlkoenig_event_collector, get_count),
+    case Count >= Expected of
+        true  -> Count;
+        false ->
+            Now = erlang:monotonic_time(millisecond),
+            case Now - Start >= TimeoutMs of
+                true  -> Count;
+                false ->
+                    timer:sleep(10),
+                    wait_for_count(Expected, TimeoutMs, Start)
+            end
+    end.

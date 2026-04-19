@@ -305,7 +305,148 @@ malformed input handling, read
 
 ---
 
-## Step 5 — All four integration tests in a row
+## Step 5 — One-shot DSL → daemons → workload → verify
+
+Until now you've spoken to the daemon directly. In a real
+deployment the workload sits in a container that declares its
+dependency in a DSL stack file:
+
+```elixir
+container :web do
+  binary "/opt/bin/web"
+  requires :"journal.local"
+end
+```
+
+`requires :"journal.local"` does three things at term-generation
+time:
+
+1. Adds `:"journal.local"` to the container's `:requires` field
+   (informational — operators see what each container depends on).
+2. Bind-mounts the host socket
+   `/run/erlkoenig/journal.sock` into the container at
+   `/run/journal.sock`.
+3. Sets the env var `JOURNAL_LOCAL_SOCK=/run/journal.sock` so the
+   workload code finds the socket without hard-coding a path.
+
+The workload's only job is to open `JOURNAL_LOCAL_SOCK` and write
+JSON lines.
+
+The repository ships `examples/journal_demo.exs` which ties the
+whole flow together in one file — DSL stack, daemon startup,
+simulated workload, chain verification. Run it:
+
+```bash
+cd dsl
+mix run ../examples/journal_demo.exs
+```
+
+Expected output:
+
+```
+=== DSL output ===
+requires      : [:"journal.local"]
+env injected  : JOURNAL_LOCAL_SOCK = /run/journal.sock
+socket_mount  : %{host: "/run/erlkoenig/journal.sock", read_only: false,
+                  container: "/run/journal.sock"}
+
+=== daemons up ===
+audit_path : /tmp/ek-journal-demo-.../audit.jsonl
+socket     : /tmp/ek-journal-demo-.../journal.sock
+
+=== verify_chain ===
+{:ok, 3}
+
+=== chain content (3 events) ===
+seq=1  type=journal  subject=web  msg=starting
+seq=2  type=journal  subject=web  msg=ready
+seq=3  type=journal  subject=web  msg=slow request
+
+=== demo passed ===
+```
+
+What just happened, top to bottom:
+
+| Phase                | What the demo did                                                                |
+|----------------------|----------------------------------------------------------------------------------|
+| DSL output           | Compiled the one-container stack and dumped `:requires`, env, socket mount.      |
+| daemons up           | Started `:erlkoenig_audit` and `:erlkoenig_journal_local` on a `/tmp` sandbox.   |
+| workload             | Opened the env-var path the DSL set, sent three JSON-line entries, closed.       |
+| verify_chain         | Re-walked the audit log byte-by-byte; `{:ok, 3}` means "3 events, links intact". |
+| chain content        | Pretty-printed the journal-typed events the workload produced.                   |
+
+Unknown capability names fail at compile-time:
+
+```elixir
+container :bad do
+  binary "/opt/bin/bad"
+  requires :"nonsense.local"
+end
+# ** (ArgumentError) unknown capability :"nonsense.local"; known: [:"journal.local"]
+```
+
+> **Honesty.** The demo runs without containers, so the workload
+> uses the host socket path directly (the DSL env var is overridden
+> in-process). In production, the runtime sets up the bind mount
+> the DSL describes (`socket_mounts`) and the env var inside the
+> container points at the in-namespace path. The DSL term is the
+> same either way; only the path resolution differs. Wiring the
+> runtime to consume `:socket_mounts` is the next piece of work
+> tracked in the roadmap.
+
+## Step 6 — Run it on a real host (release tarball)
+
+The previous step ran in your dev checkout. To prove the same
+pipeline works against an installed release on a real node, ship
+two files: the release tarball and one escript.
+
+```bash
+# 1. Build the release.
+make release           # produces dist/erlkoenig-X.Y.Z.tar.gz
+
+# 2. Push to the target.
+scp dist/erlkoenig-*.tar.gz \
+    examples/journal_demo_release.escript \
+    root@my-node:/opt/erlkoenig/
+
+# 3. On the node — extract once, run.
+ssh root@my-node bash -s <<'EOF'
+cd /opt/erlkoenig
+tar xzf erlkoenig-*.tar.gz                   # gives lib/ + erts-*/
+PATH="$PWD/erts-*/bin:$PATH" \
+  ERLKOENIG_LIB=$PWD/lib \
+  ./journal_demo_release.escript
+EOF
+```
+
+Expected (on the remote host):
+
+```
+=== daemons up ===
+audit_path : /tmp/ek-journal-demo-.../audit.jsonl
+socket     : /tmp/ek-journal-demo-.../journal.sock
+
+=== verify_chain ===
+{ok,3}
+
+=== chain content (3 events) ===
+seq=1  type=journal  subject=web  msg=starting
+seq=2  type=journal  subject=web  msg=ready
+seq=3  type=journal  subject=web  msg=slow request
+
+=== demo passed ===
+```
+
+The release tarball ships its own ERTS, so the target node needs
+nothing pre-installed beyond a vanilla Linux + glibc. No Erlang
+package, no Elixir, no language toolchain. The escript loads the
+release's BEAMs via `ERLKOENIG_LIB`, does a full daemon
+boot, runs a workload, verifies the chain, and exits 0.
+
+This is the same pipeline you ran locally in steps 1-5 — just on a
+host that knows nothing about your dev environment.
+
+## Step 7 — All four integration tests in a row
 
 ```bash
 for t in 38 39 40 41; do

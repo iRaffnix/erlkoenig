@@ -138,6 +138,32 @@ defmodule Erlkoenig.Container do
     quote do: @ct_current Builder.set_env(@ct_current, unquote(env_map))
   end
 
+  @doc """
+  Declare a node-local service capability the container depends on.
+
+  ## Example
+
+      container :web do
+        binary "/opt/bin/web"
+        requires :"journal.local"
+      end
+
+  Effect at term-generation time:
+    * `:requires` field surfaces the capability name (informational).
+    * The capability's socket is bind-mounted into the container at
+      its conventional path (e.g. `/run/journal.sock`).
+    * The capability's env var is injected (e.g.
+      `JOURNAL_LOCAL_SOCK=/run/journal.sock`).
+
+  Unknown capability names raise at compile-time with a list of the
+  valid names.
+  """
+  defmacro requires(capability) do
+    quote do
+      @ct_current Builder.add_requires(@ct_current, unquote(capability))
+    end
+  end
+
   # --- Volumes (persistent bind-mount directories) ---
 
   @doc """

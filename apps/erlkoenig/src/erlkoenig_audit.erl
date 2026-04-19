@@ -132,7 +132,21 @@ verify_chain(Path, PubKey) ->
         {ok, Bin} ->
             Lines = [L || L <- binary:split(Bin, <<"\n">>, [global]),
                           L =/= <<>>],
-            verify_lines(Lines, ?GENESIS_HASH, PubKey, 1, 0);
+            Result = verify_lines(Lines, ?GENESIS_HASH, PubKey, 1, 0),
+            case Result of
+                {error, {What, Line, Reason}}
+                  when What =:= chain_break;
+                       What =:= signature_invalid ->
+                    %% Surface to AMQP — security-relevant: external
+                    %% verifier (or future periodic self-check) just
+                    %% found tampering. Page-on-this material.
+                    catch erlkoenig_events:notify(
+                            {audit_chain_break,
+                             #{path => Path, line => Line,
+                               reason => {What, Reason}}});
+                _ -> ok
+            end,
+            Result;
         {error, _} = Err -> Err
     end.
 
@@ -552,6 +566,12 @@ do_seal_day(#state{fd = Fd, path = Path, seq = Seq,
                                       "(events=~p, bytes=~p, anchor=~s)",
                                       [SealedPath, EventCount, ByteCount,
                                        binary:part(SealHash, 0, 16)]),
+                                    %% Surface to AMQP for compliance
+                                    %% dashboards: "did the seal job
+                                    %% run today, and what's the
+                                    %% next-day anchor?"
+                                    catch erlkoenig_events:notify(
+                                            {audit_sealed, Info}),
                                     {ok, Info, State#state{fd = NewFd,
                                                            seq = SealSeq,
                                                            prev_hash = SealHash}};

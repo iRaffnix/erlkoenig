@@ -114,6 +114,7 @@ States:
     fuse_mount    = undefined  :: binary() | undefined,
     tmpfs_mounts  = []         :: [map()],
     volumes       = []         :: [map()],
+    requires      = []         :: [atom()],
     pod_supervised = false     :: boolean(),
     publish       = []         :: [map()],
     stats_timers  = []         :: [reference()],
@@ -256,6 +257,7 @@ init({normal, BinaryPath, Opts}) ->
         sig_path    = maps:get(sig_path, Opts, undefined),
         volumes     = merge_socket_mounts(maps:get(volumes, Opts, []),
                                           maps:get(socket_mounts, Opts, [])),
+        requires    = maps:get(requires, Opts, []),
         pod_supervised = maps:get(pod_supervised, Opts, false),
         publish     = maps:get(publish, Opts, []),
         stream      = maps:get(stream, Opts, undefined),
@@ -410,7 +412,7 @@ creating_do_spawn_gated(#ct_data{id = ContainerId} = Data) ->
 
 creating_send_spawn(Data) ->
     DiskMB = disk_limit_mb(Data#ct_data.limits),
-    DnsIp  = zone_dns_ip(Data#ct_data.zone),
+    DnsIp  = effective_dns_ip(Data),
     Flags  = case Data#ct_data.pty of
                  true  -> erlkoenig_proto:spawn_flag_pty();
                  false -> 0
@@ -1715,6 +1717,45 @@ zone_dns_ip(ZoneName) ->
 ip4_to_u32({A, B, C, D}) ->
     (A bsl 24) bor (B bsl 16) bor (C bsl 8) bor D.
 
+%% Resolve the DNS resolver IP for this container.
+%%
+%% Strict capability mode (`strict_capabilities = true`):
+%%   * Container declared `requires :"dns.local"` → resolver IP from zone.
+%%   * Container did NOT declare it → resolver IP `0`. The C runtime
+%%     skips the `/etc/resolv.conf` write entirely, so the workload
+%%     cannot resolve names. Forces the operator to be explicit
+%%     about which workloads need DNS.
+%%
+%% Loose mode (default `false`): zone-derived IP regardless. Same
+%% behaviour as before the capability framework landed; existing
+%% deployments need no migration.
+-spec effective_dns_ip(#ct_data{}) -> non_neg_integer().
+effective_dns_ip(#ct_data{zone = Zone, requires = Requires,
+                          id = Id, name = Name}) ->
+    case application:get_env(erlkoenig, strict_capabilities, false) of
+        false ->
+            zone_dns_ip(Zone);
+        true ->
+            case lists:member('dns.local', Requires) of
+                true  ->
+                    zone_dns_ip(Zone);
+                false ->
+                    %% Strict opt-out — surface so operators can spot
+                    %% missing `requires :"dns.local"` declarations
+                    %% during the migration. Container will boot
+                    %% without /etc/resolv.conf; the action tag tells
+                    %% the dashboard exactly what was withheld.
+                    DisplayName = case Name of
+                        undefined -> Id;
+                        N -> N
+                    end,
+                    catch erlkoenig_events:notify(
+                            {capability_unmet, Id, DisplayName,
+                             'dns.local', no_resolv_conf}),
+                    0
+            end
+    end.
+
 %% Merge DSL-emitted `socket_mounts` (raw host-dir bind specs) into
 %% the regular volumes list as PRE-RESOLVED entries. The capability
 %% framework hands us absolute host paths that need no `persist:`
@@ -1966,33 +2007,51 @@ check_build_dir() ->
 audit_volumes_mounted(#ct_data{volumes = []}) -> ok;
 audit_volumes_mounted(#ct_data{id = Id, name = Name, volumes = Volumes}) ->
     ContainerName = case Name of undefined -> Id; N -> N end,
-    lists:foreach(fun(#{host := Host, container := ContPath,
-                        persist := Persist, read_only := RO}) ->
-        erlkoenig_audit:log(#{
-            type => volume_mounted,
-            subject => ContainerName,
-            result => ok,
-            details => #{
-                persist => Persist,
-                host => Host,
-                container_path => ContPath,
-                read_only => RO
-            }
-        })
-    end, Volumes),
+    lists:foreach(fun(V) -> audit_one_volume(ContainerName, V) end, Volumes),
     ok.
+
+audit_one_volume(ContainerName, #{kind := socket_mount, host := Host,
+                                   container := ContPath,
+                                   read_only := RO}) ->
+    erlkoenig_audit:log(#{
+        type => socket_mount_bound,
+        subject => ContainerName,
+        result => ok,
+        details => #{kind => socket_mount,
+                     host => Host,
+                     container_path => ContPath,
+                     read_only => RO}
+    });
+audit_one_volume(ContainerName, #{host := Host, container := ContPath,
+                                   persist := Persist, read_only := RO}) ->
+    erlkoenig_audit:log(#{
+        type => volume_mounted,
+        subject => ContainerName,
+        result => ok,
+        details => #{
+            persist => Persist,
+            host => Host,
+            container_path => ContPath,
+            read_only => RO
+        }
+    }).
 
 -spec audit_volumes_released(#ct_data{}) -> ok.
 audit_volumes_released(#ct_data{volumes = []}) -> ok;
 audit_volumes_released(#ct_data{id = Id, name = Name, volumes = Volumes}) ->
     ContainerName = case Name of undefined -> Id; N -> N end,
-    lists:foreach(fun(#{persist := Persist}) ->
-        erlkoenig_audit:log(#{
-            type => volume_released,
-            subject => ContainerName,
-            result => ok,
-            details => #{persist => Persist}
-        })
+    lists:foreach(fun
+        (#{kind := socket_mount}) ->
+            %% Socket bind-mounts have no persistent state to release;
+            %% they live and die with the container's mount namespace.
+            ok;
+        (#{persist := Persist}) ->
+            erlkoenig_audit:log(#{
+                type => volume_released,
+                subject => ContainerName,
+                result => ok,
+                details => #{persist => Persist}
+            })
     end, Volumes),
     ok.
 

@@ -394,7 +394,59 @@ end
 > runtime to consume `:socket_mounts` is the next piece of work
 > tracked in the roadmap.
 
-## Step 6 — All four integration tests in a row
+## Step 6 — Run it on a real host (release tarball)
+
+The previous step ran in your dev checkout. To prove the same
+pipeline works against an installed release on a real node, ship
+two files: the release tarball and one escript.
+
+```bash
+# 1. Build the release.
+make release           # produces dist/erlkoenig-X.Y.Z.tar.gz
+
+# 2. Push to the target.
+scp dist/erlkoenig-*.tar.gz \
+    examples/journal_demo_release.escript \
+    root@my-node:/opt/erlkoenig/
+
+# 3. On the node — extract once, run.
+ssh root@my-node bash -s <<'EOF'
+cd /opt/erlkoenig
+tar xzf erlkoenig-*.tar.gz                   # gives lib/ + erts-*/
+PATH="$PWD/erts-*/bin:$PATH" \
+  ERLKOENIG_LIB=$PWD/lib \
+  ./journal_demo_release.escript
+EOF
+```
+
+Expected (on the remote host):
+
+```
+=== daemons up ===
+audit_path : /tmp/ek-journal-demo-.../audit.jsonl
+socket     : /tmp/ek-journal-demo-.../journal.sock
+
+=== verify_chain ===
+{ok,3}
+
+=== chain content (3 events) ===
+seq=1  type=journal  subject=web  msg=starting
+seq=2  type=journal  subject=web  msg=ready
+seq=3  type=journal  subject=web  msg=slow request
+
+=== demo passed ===
+```
+
+The release tarball ships its own ERTS, so the target node needs
+nothing pre-installed beyond a vanilla Linux + glibc. No Erlang
+package, no Elixir, no language toolchain. The escript loads the
+release's BEAMs via `ERLKOENIG_LIB`, does a full daemon
+boot, runs a workload, verifies the chain, and exits 0.
+
+This is the same pipeline you ran locally in steps 1-5 — just on a
+host that knows nothing about your dev environment.
+
+## Step 7 — All four integration tests in a row
 
 ```bash
 for t in 38 39 40 41; do

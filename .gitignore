@@ -51,3 +51,4 @@ __pycache__/
 # Logs
 *.log
 dsl/deps/
+dist/audit-verifier

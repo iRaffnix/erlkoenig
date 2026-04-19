@@ -25,13 +25,24 @@ defmodule Erlkoenig.Capabilities do
           env_var: String.t()
         }
 
+  @doc """
+  Directory the capability sockets live in (host AND container side).
+
+  All capabilities share `/run/erlkoenig/` by convention: one
+  directory bind-mount in the container and every socket appears at
+  the same absolute path in both namespaces. The C runtime can only
+  bind directories today, so binding the parent dir lets us avoid
+  per-file binds while keeping the socket paths predictable.
+  """
+  def socket_dir, do: "/run/erlkoenig/"
+
   @doc "Map of all known capabilities to their injection spec."
   @spec all() :: %{atom() => spec()}
   def all do
     %{
       :"journal.local" => %{
         host_socket: "/run/erlkoenig/journal.sock",
-        container_socket: "/run/journal.sock",
+        container_socket: "/run/erlkoenig/journal.sock",
         env_var: "JOURNAL_LOCAL_SOCK"
       }
     }

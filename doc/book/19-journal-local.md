@@ -323,14 +323,25 @@ time:
 
 1. Adds `:"journal.local"` to the container's `:requires` field
    (informational — operators see what each container depends on).
-2. Bind-mounts the host socket
-   `/run/erlkoenig/journal.sock` into the container at
-   `/run/journal.sock`.
-3. Sets the env var `JOURNAL_LOCAL_SOCK=/run/journal.sock` so the
-   workload code finds the socket without hard-coding a path.
+2. Bind-mounts the directory `/run/erlkoenig/` from the host into
+   the container at the same path. All capability sockets live here
+   by convention; one mount serves every `requires` declaration on
+   the container — multiple capabilities collapse to a single
+   dir-bind.
+3. Sets the env var `JOURNAL_LOCAL_SOCK=/run/erlkoenig/journal.sock`
+   so the workload code finds the socket without hard-coding a
+   path.
 
 The workload's only job is to open `JOURNAL_LOCAL_SOCK` and write
 JSON lines.
+
+> **Why a directory bind, not a file bind?** The C runtime today
+> only bind-mounts directories (the source must pass `S_ISDIR`).
+> Mounting the parent dir at the same absolute path on both sides
+> gives every capability socket a stable, predictable path inside
+> the container without per-file mount logic. Adding file-bind
+> support to the C runtime is a planned refinement; the DSL surface
+> stays the same when it lands.
 
 The repository ships `examples/journal_demo.exs` which ties the
 whole flow together in one file — DSL stack, daemon startup,
@@ -346,9 +357,9 @@ Expected output:
 ```
 === DSL output ===
 requires      : [:"journal.local"]
-env injected  : JOURNAL_LOCAL_SOCK = /run/journal.sock
-socket_mount  : %{host: "/run/erlkoenig/journal.sock", read_only: false,
-                  container: "/run/journal.sock"}
+env injected  : JOURNAL_LOCAL_SOCK = /run/erlkoenig/journal.sock
+socket_mount  : %{host: "/run/erlkoenig/", read_only: false,
+                  container: "/run/erlkoenig/"}
 
 === daemons up ===
 audit_path : /tmp/ek-journal-demo-.../audit.jsonl
@@ -386,13 +397,14 @@ end
 ```
 
 > **Honesty.** The demo runs without containers, so the workload
-> uses the host socket path directly (the DSL env var is overridden
-> in-process). In production, the runtime sets up the bind mount
-> the DSL describes (`socket_mounts`) and the env var inside the
-> container points at the in-namespace path. The DSL term is the
-> same either way; only the path resolution differs. Wiring the
-> runtime to consume `:socket_mounts` is the next piece of work
-> tracked in the roadmap.
+> uses a `/tmp` sandbox path (the DSL env var is overridden
+> in-process). In production, the runtime sets up the dir bind
+> mount the DSL describes (`socket_mounts`), and the env var the
+> workload reads points at the same absolute path on host and
+> container. The DSL term you see is exactly what the runtime
+> consumes — `erlkoenig_ct` folds `socket_mounts` into pre-resolved
+> volume entries (kind `socket_mount`) before the spawn opts hit
+> the C runtime.
 
 ## Step 6 — Run it on a real host (release tarball)
 

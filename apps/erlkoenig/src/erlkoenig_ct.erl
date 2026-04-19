@@ -254,14 +254,16 @@ init({normal, BinaryPath, Opts}) ->
         pty         = maps:get(pty, Opts, false),
         firewall    = maps:get(firewall, Opts, #{}),
         sig_path    = maps:get(sig_path, Opts, undefined),
-        volumes     = maps:get(volumes, Opts, []),
+        volumes     = merge_socket_mounts(maps:get(volumes, Opts, []),
+                                          maps:get(socket_mounts, Opts, [])),
         pod_supervised = maps:get(pod_supervised, Opts, false),
         publish     = maps:get(publish, Opts, []),
         stream      = maps:get(stream, Opts, undefined),
         extra_opts  = maps:without([args, env, uid, gid, ip, restart,
                                     limits, seccomp, caps, output, name,
                                     files, zone, pty, firewall, sig_path,
-                                    signature_required, volumes,
+                                    signature_required, volumes, socket_mounts,
+                                    requires,
                                     pod_supervised, publish, stream], Opts)
     },
     {ok, creating, Data};
@@ -1712,6 +1714,25 @@ zone_dns_ip(ZoneName) ->
 -spec ip4_to_u32(inet:ip4_address()) -> non_neg_integer().
 ip4_to_u32({A, B, C, D}) ->
     (A bsl 24) bor (B bsl 16) bor (C bsl 8) bor D.
+
+%% Merge DSL-emitted `socket_mounts` (raw host-dir bind specs) into
+%% the regular volumes list as PRE-RESOLVED entries. The capability
+%% framework hands us absolute host paths that need no `persist:`
+%% lookup; the `kind => socket_mount` marker tells the volume
+%% resolver to pass them through untouched.
+-spec merge_socket_mounts([map()], [map()]) -> [map()].
+merge_socket_mounts(Volumes, []) ->
+    Volumes;
+merge_socket_mounts(Volumes, SocketMounts) ->
+    Extra = [#{host      => to_bin(H),
+               container => to_bin(C),
+               read_only => maps:get(read_only, M, false),
+               kind      => socket_mount}
+             || #{host := H, container := C} = M <- SocketMounts],
+    Volumes ++ Extra.
+
+to_bin(B) when is_binary(B) -> B;
+to_bin(L) when is_list(L)   -> list_to_binary(L).
 
 -spec seccomp_profile_id(erlkoenig:seccomp_profile() | non_neg_integer()) -> non_neg_integer().
 seccomp_profile_id(none)    -> 0;

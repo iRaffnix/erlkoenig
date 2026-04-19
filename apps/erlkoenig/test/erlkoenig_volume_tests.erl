@@ -60,7 +60,11 @@ resolve_test_() ->
           {"invalid persist name rejected", ?_test(t_invalid_name())},
           {"same (container,persist) resolves to same uuid (idempotent)",
            ?_test(t_idempotent())},
-          {"multiple volumes resolve in order", ?_test(t_multiple())}]
+          {"multiple volumes resolve in order", ?_test(t_multiple())},
+          {"socket_mount entries pass through pre-resolved",
+           ?_test(t_socket_mount_passthrough())},
+          {"persist + socket_mount mix preserves order",
+           ?_test(t_socket_mount_mixed())}]
      end}.
 
 setup() ->
@@ -152,6 +156,31 @@ t_multiple() ->
     [First, Second | _] = Resolved,
     ?assertEqual(<<"/data/db">>, maps:get(container, First)),
     ?assertEqual(<<"/var/log">>, maps:get(container, Second)).
+
+%% Capability socket_mounts arrive pre-resolved (absolute host path,
+%% kind => socket_mount). resolve_loop must pass them through without
+%% touching the volume store (the store doesn't know these paths).
+t_socket_mount_passthrough() ->
+    SocketVols = [#{host      => <<"/run/erlkoenig/">>,
+                    container => <<"/run/erlkoenig/">>,
+                    read_only => false,
+                    kind      => socket_mount}],
+    {ok, [R]} = erlkoenig_volume:resolve(<<"app-sock">>, SocketVols,
+                                         1000, 1000),
+    ?assertEqual(<<"/run/erlkoenig/">>, maps:get(host, R)),
+    ?assertEqual(<<"/run/erlkoenig/">>, maps:get(container, R)),
+    ?assertEqual(socket_mount, maps:get(kind, R)).
+
+t_socket_mount_mixed() ->
+    DslVols = [#{container => <<"/data">>, persist => <<"mxd">>},
+               #{host      => <<"/run/erlkoenig/">>,
+                 container => <<"/run/erlkoenig/">>,
+                 read_only => false,
+                 kind      => socket_mount}],
+    {ok, [Persistent, Socket]} =
+        erlkoenig_volume:resolve(<<"app-mixed">>, DslVols, 1000, 1000),
+    ?assertEqual(<<"mxd">>, maps:get(persist, Persistent)),
+    ?assertEqual(socket_mount, maps:get(kind, Socket)).
 
 resolve_quota_test_() ->
     {setup, fun setup/0, fun cleanup/1,

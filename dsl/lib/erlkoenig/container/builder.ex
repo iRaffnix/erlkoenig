@@ -176,21 +176,33 @@ defmodule Erlkoenig.Container.Builder do
   Looks up the spec via `Erlkoenig.Capabilities.fetch!/1`, appends
   the capability name to `state.requires` (informational; surfaces
   in the term so operators can see what a container depends on),
-  injects the env var, and records the host→container socket mount
-  in `state.socket_mounts`. Idempotent — declaring the same
-  capability twice is a no-op.
+  injects the env var, and ensures a directory bind-mount of
+  `Erlkoenig.Capabilities.socket_dir/0` exists in
+  `state.socket_mounts`. The C runtime can only bind directories;
+  one shared dir-bind makes every capability socket visible at the
+  same absolute path in both namespaces. Multiple `requires` calls
+  collapse to one mount entry.
+
+  Idempotent — declaring the same capability twice is a no-op.
   """
   def add_requires(state, capability) when is_atom(capability) do
     if capability in state.requires do
       state
     else
       spec = Erlkoenig.Capabilities.fetch!(capability)
-      mount = %{host: spec.host_socket,
-                container: spec.container_socket,
-                read_only: false}
+      dir = Erlkoenig.Capabilities.socket_dir()
+      dir_mount = %{host: dir, container: dir, read_only: false}
+
+      socket_mounts =
+        if Enum.any?(state.socket_mounts, &(&1.host == dir)) do
+          state.socket_mounts
+        else
+          state.socket_mounts ++ [dir_mount]
+        end
+
       state
       |> Map.put(:requires, state.requires ++ [capability])
-      |> Map.put(:socket_mounts, state.socket_mounts ++ [mount])
+      |> Map.put(:socket_mounts, socket_mounts)
       |> put_env(spec.env_var, spec.container_socket)
     end
   end

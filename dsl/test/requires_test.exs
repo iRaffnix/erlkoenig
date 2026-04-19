@@ -8,16 +8,28 @@ defmodule Erlkoenig.RequiresTest do
   # ============================================================
 
   describe "Capabilities registry" do
-    test "knows :journal.local" do
+    test "knows :journal.local as :socket kind" do
       assert {:ok, spec} = Capabilities.fetch(:"journal.local")
+      assert spec.kind == :socket
       assert spec.host_socket == "/run/erlkoenig/journal.sock"
       assert spec.container_socket == "/run/erlkoenig/journal.sock"
       assert spec.env_var == "JOURNAL_LOCAL_SOCK"
     end
 
-    test "all sockets share socket_dir/0" do
+    test "knows :dns.local as :network kind" do
+      assert {:ok, spec} = Capabilities.fetch(:"dns.local")
+      assert spec.kind == :network
+      assert is_binary(spec.description)
+      refute Map.has_key?(spec, :host_socket)
+      refute Map.has_key?(spec, :env_var)
+    end
+
+    test "all :socket-kind sockets share socket_dir/0" do
       dir = Capabilities.socket_dir()
-      Enum.each(Capabilities.all(), fn {_name, spec} ->
+
+      Capabilities.all()
+      |> Enum.filter(fn {_, s} -> s.kind == :socket end)
+      |> Enum.each(fn {_name, spec} ->
         assert String.starts_with?(spec.host_socket, dir),
                "host_socket #{spec.host_socket} not under #{dir}"
         assert String.starts_with?(spec.container_socket, dir),
@@ -145,6 +157,64 @@ defmodule Erlkoenig.RequiresTest do
     [ct] = TwoRequiresCollapseDir.containers()
     assert length(ct.socket_mounts) == 1
     assert hd(ct.socket_mounts).host == "/run/erlkoenig/"
+  end
+
+  # ============================================================
+  # DSL: :network-kind capability (dns.local) — declarative-only
+  # ============================================================
+
+  defmodule WithDns do
+    use Erlkoenig.Container
+
+    container :web do
+      binary "/opt/bin/web"
+      requires :"dns.local"
+    end
+  end
+
+  describe "container with :network-kind requires" do
+    setup do
+      [ct] = WithDns.containers()
+      {:ok, ct: ct}
+    end
+
+    test "records the capability in :requires", %{ct: ct} do
+      assert ct.requires == [:"dns.local"]
+    end
+
+    test "does NOT add a socket mount", %{ct: ct} do
+      # to_spawn_opts strips empty fields, so :socket_mounts may be absent.
+      assert Map.get(ct, :socket_mounts, []) == []
+    end
+
+    test "does NOT inject any env var", %{ct: ct} do
+      assert Map.get(ct, :env, %{}) == %{}
+    end
+  end
+
+  # ============================================================
+  # DSL: mixing kinds — both surface in :requires, only :socket
+  #      affects mounts/env
+  # ============================================================
+
+  defmodule MixedKinds do
+    use Erlkoenig.Container
+
+    container :app do
+      binary "/opt/bin/app"
+      requires :"journal.local"
+      requires :"dns.local"
+    end
+  end
+
+  test "mixed-kind requires: socket cap injects, network cap declarative-only" do
+    [ct] = MixedKinds.containers()
+    assert ct.requires == [:"journal.local", :"dns.local"]
+    # journal.local pulled in the dir-bind + env
+    assert length(ct.socket_mounts) == 1
+    assert hd(ct.socket_mounts).host == "/run/erlkoenig/"
+    assert ct.env["JOURNAL_LOCAL_SOCK"] == "/run/erlkoenig/journal.sock"
+    # dns.local added nothing beyond the :requires entry
   end
 
   # ============================================================

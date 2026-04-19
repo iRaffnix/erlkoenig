@@ -8,31 +8,48 @@ defmodule Erlkoenig.Capabilities do
   @moduledoc """
   Registry of node-local service capabilities a container can `requires`.
 
-  Each entry describes the contract — host socket path, in-container
-  socket path, env var to set — that the DSL injects when a container
-  declares it. A walking-skeleton view of the broader capability
-  framework outlined in the strategy memo
-  `2026-04-19-node-sovereign-architecture` (currently one entry,
-  `:journal.local`, with more landing as the catalog ships).
+  Each entry has a **kind** that determines what the DSL injects:
 
-  Adding a capability is a one-tuple change here plus a runtime
-  service that binds the named socket. The DSL needs no changes.
+    * `:socket` — Unix-domain socket service. The DSL bind-mounts the
+      shared socket directory into the container and sets an env var
+      pointing at the socket path. Example: `:"journal.local"`.
+
+    * `:network` — Network-resident service the container reaches via
+      its existing IP routing (e.g. zone gateway). The DSL records the
+      dependency in `:requires` but injects no mount or env — the
+      runtime already configures the network path (e.g. `/etc/resolv.conf`
+      via the C runtime's `EK_ATTR_DNS_IP`). The declaration matters
+      because it surfaces the dependency in the container term so
+      operators can see what each container relies on, and is the
+      future hook for opt-out enforcement.
+
+  Adding a capability is a one-tuple change here. The DSL needs no
+  changes per capability; the kind dispatches the right injection.
   """
 
-  @type spec :: %{
+  @type kind :: :socket | :network
+
+  @type socket_spec :: %{
+          kind: :socket,
           host_socket: String.t(),
           container_socket: String.t(),
           env_var: String.t()
         }
 
-  @doc """
-  Directory the capability sockets live in (host AND container side).
+  @type network_spec :: %{
+          kind: :network,
+          description: String.t()
+        }
 
-  All capabilities share `/run/erlkoenig/` by convention: one
-  directory bind-mount in the container and every socket appears at
-  the same absolute path in both namespaces. The C runtime can only
-  bind directories today, so binding the parent dir lets us avoid
-  per-file binds while keeping the socket paths predictable.
+  @type spec :: socket_spec() | network_spec()
+
+  @doc """
+  Directory the socket-kind capability sockets live in
+  (host AND container side).
+
+  All `:socket`-kind capabilities share `/run/erlkoenig/` by
+  convention: one directory bind-mount in the container and every
+  socket appears at the same absolute path in both namespaces.
   """
   def socket_dir, do: "/run/erlkoenig/"
 
@@ -41,9 +58,18 @@ defmodule Erlkoenig.Capabilities do
   def all do
     %{
       :"journal.local" => %{
+        kind: :socket,
         host_socket: "/run/erlkoenig/journal.sock",
         container_socket: "/run/erlkoenig/journal.sock",
         env_var: "JOURNAL_LOCAL_SOCK"
+      },
+      :"dns.local" => %{
+        kind: :network,
+        description:
+          "Per-zone DNS resolver (UDP/53 on the zone gateway IP). " <>
+            "The container's /etc/resolv.conf is configured by the C " <>
+            "runtime via the EK_ATTR_DNS_IP TLV; declaring this capability " <>
+            "surfaces the dependency in the container term."
       }
     }
   end
@@ -59,9 +85,11 @@ defmodule Erlkoenig.Capabilities do
   @spec fetch(atom()) :: {:ok, spec()} | {:error, {:unknown_capability, atom(), [atom()]}}
   def fetch(name) when is_atom(name) do
     case Map.fetch(all(), name) do
-      {:ok, spec} -> {:ok, spec}
-      :error      -> {:error, {:unknown_capability, name,
-                                 all() |> Map.keys() |> Enum.sort()}}
+      {:ok, spec} ->
+        {:ok, spec}
+
+      :error ->
+        {:error, {:unknown_capability, name, all() |> Map.keys() |> Enum.sort()}}
     end
   end
 
@@ -71,10 +99,12 @@ defmodule Erlkoenig.Capabilities do
   @spec fetch!(atom()) :: spec()
   def fetch!(name) do
     case fetch(name) do
-      {:ok, spec} -> spec
+      {:ok, spec} ->
+        spec
+
       {:error, {:unknown_capability, n, known}} ->
         raise ArgumentError,
-          "unknown capability #{inspect(n)}; known: #{inspect(known)}"
+              "unknown capability #{inspect(n)}; known: #{inspect(known)}"
     end
   end
 end

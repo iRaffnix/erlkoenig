@@ -420,6 +420,41 @@ defmodule Erlkoenig.Stack do
     end
   end
 
+  @doc """
+  Declare a service-capability requirement for the enclosing container.
+
+  ## Example
+
+      container "api", binary: "/opt/bin/api", zone: "containers", ... do
+        requires :"dns.local"          # network capability — declarative
+        requires :"journal.local"      # socket capability — auto-mount + env
+
+        nft do
+          # ...
+        end
+      end
+
+  Behaviour follows `Erlkoenig.Capabilities.fetch!/1`:
+
+    * `:socket`-kind capabilities pull in a directory bind-mount of
+      `/run/erlkoenig/` and inject the per-capability env var
+      pointing at the in-container socket path.
+    * `:network`-kind capabilities are recorded in `:requires` only;
+      the runtime configures the network path (e.g. `/etc/resolv.conf`
+      for DNS) regardless of declaration.
+
+  Operators reading the stack file see at a glance which workloads
+  depend on which node-local services. Unknown capability names
+  raise at compile time.
+  """
+  defmacro requires(capability) do
+    quote do
+      var!(ek_pod_builder) =
+        Erlkoenig.Pod.Builder.add_requires(var!(ek_pod_builder),
+                                           unquote(capability))
+    end
+  end
+
   # ═══════════════════════════════════════════════════════════
   # volume — persistent bind-mount directories
   # ═══════════════════════════════════════════════════════════

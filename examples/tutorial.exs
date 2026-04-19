@@ -40,6 +40,9 @@ defmodule Tutorial do
       restart: :permanent,
       limits: %{memory: 128_000_000, pids: 64} do
 
+      # Container resolves names → declare DNS dependency.
+      requires :"dns.local"
+
       # cgroup-Metriken alle 2s auf erlkoenig_events
       publish interval: 2000 do
         metric :memory
@@ -77,6 +80,8 @@ defmodule Tutorial do
       replicas: 1,
       restart: :transient,
       limits: %{memory: 256_000_000, pids: 128} do
+
+      requires :"dns.local"
 
       publish interval: 2000 do
         metric :memory

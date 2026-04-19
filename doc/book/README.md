@@ -42,7 +42,8 @@ integration, operator procedures.
 
 ### Part IV — Service Capabilities
 
-19. [`:journal.local`](19-journal-local.md) — Tamper-evident structured log forwarder on the audit hash chain
+19. [Service Capabilities — `:journal.local` & `:dns.local`](19-journal-local.md) — Tamper-evident structured log forwarder on the audit hash chain + per-zone DNS resolver, with the `requires` macro that wires both
+20. [Customer-side Audit Verification](20-audit-verifier.md) — A 2.4 MB statically-linked Go binary the customer hands to their auditor; recomputes hash chain, Ed25519 signatures, and HMAC seal offline
 
 ## How to read
 

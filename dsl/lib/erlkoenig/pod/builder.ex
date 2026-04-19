@@ -118,7 +118,10 @@ defmodule Erlkoenig.Pod.Builder do
       gid: opts[:gid] || 65534,
       args: opts[:args] || [],
       caps: opts[:caps] || [],
+      env: opts[:env] || %{},
       volumes: [],
+      socket_mounts: [],
+      requires: [],
       publish: [],
       stream: nil
     }
@@ -134,6 +137,44 @@ defmodule Erlkoenig.Pod.Builder do
 
   def add_volume(%__MODULE__{current_ct: ct} = pod, entry) when is_map(entry) do
     %{pod | current_ct: Map.update(ct, :volumes, [entry], &(&1 ++ [entry]))}
+  end
+
+  # --- Capability requirements (called from Erlkoenig.Stack.requires macro) ---
+
+  def add_requires(%__MODULE__{current_ct: nil}, _capability) do
+    raise CompileError,
+      description: "requires must be declared inside a container block"
+  end
+
+  def add_requires(%__MODULE__{current_ct: ct} = pod, capability)
+      when is_atom(capability) do
+    if capability in ct.requires do
+      pod
+    else
+      spec = Erlkoenig.Capabilities.fetch!(capability)
+      %{pod | current_ct: apply_capability(ct, capability, spec)}
+    end
+  end
+
+  defp apply_capability(ct, capability, %{kind: :network}) do
+    %{ct | requires: ct.requires ++ [capability]}
+  end
+
+  defp apply_capability(ct, capability, %{kind: :socket} = spec) do
+    dir = Erlkoenig.Capabilities.socket_dir()
+    dir_mount = %{host: dir, container: dir, read_only: false}
+
+    socket_mounts =
+      if Enum.any?(ct.socket_mounts, &(&1.host == dir)) do
+        ct.socket_mounts
+      else
+        ct.socket_mounts ++ [dir_mount]
+      end
+
+    %{ct |
+       requires: ct.requires ++ [capability],
+       socket_mounts: socket_mounts,
+       env: Map.put(ct.env, spec.env_var, spec.container_socket)}
   end
 
   defp require_opt!(opts, key, ct_name, hint) do
@@ -358,6 +399,25 @@ defmodule Erlkoenig.Pod.Builder do
 
       ct_term = if ct[:volumes] != nil and ct[:volumes] != [] do
         Map.put(ct_term, :volumes, ct.volumes)
+      else
+        ct_term
+      end
+
+      # Capability declarations and their injections.
+      ct_term = if ct[:requires] != nil and ct[:requires] != [] do
+        Map.put(ct_term, :requires, ct.requires)
+      else
+        ct_term
+      end
+
+      ct_term = if ct[:socket_mounts] != nil and ct[:socket_mounts] != [] do
+        Map.put(ct_term, :socket_mounts, ct.socket_mounts)
+      else
+        ct_term
+      end
+
+      ct_term = if ct[:env] != nil and ct[:env] != %{} do
+        Map.put(ct_term, :env, ct.env)
       else
         ct_term
       end

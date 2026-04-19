@@ -115,16 +115,24 @@ Container → gateway DNS lookups arrive on the host's `input` hook,
 not on `forward`, because the host-side IPVLAN slave terminates
 them in the host netns. erlkoenig does not silently inject allow
 rules for its own services — the host nft table you write is the
-single source of truth. The standard pattern for exposing the DNS
-resolver to its zone is one explicit rule:
+single source of truth.
 
-```elixir
-nft_rule :accept, ip_saddr: {10, 99, 0, 0, 24}, udp_dport: 53
-```
+Two parallel declarations cover this:
 
-Every example DSL in `examples/` carries this rule under a clearly
-labelled "Runtime services" section. The pattern, the rationale,
-and the full service catalogue are covered in → Chapter 6.
+  * **Container side:** `requires :"dns.local"` inside the container
+    block — the capability framework records the dependency in the
+    container term so an operator can see who consumes the resolver
+    (→ Chapter 19).
+  * **Host side:** an explicit allow rule in the host nft table:
+
+    ```elixir
+    nft_rule :accept, ip_saddr: {10, 99, 0, 0, 24}, udp_dport: 53
+    ```
+
+The pattern, the rationale, and the full service catalogue are
+covered in → Chapter 6. Every example DSL in `examples/` carries
+both pieces today; the strict-mode runtime hook will eventually
+drive both off the same `requires` declaration.
 
 Names follow the replica scheme: container `auth` in pod `web` is
 registered as `web-0-auth`, `web-1-auth`, and so on.

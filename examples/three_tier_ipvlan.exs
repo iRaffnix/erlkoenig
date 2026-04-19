@@ -47,6 +47,9 @@ defmodule ThreeTierIpvlan do
       replicas: 3,
       restart: :permanent do
 
+      # Web tier resolves upstream names → declare the DNS dep.
+      requires :"dns.local"
+
       publish interval: 2000 do
         metric :memory
         metric :cpu
@@ -84,6 +87,9 @@ defmodule ThreeTierIpvlan do
       replicas: 1,
       restart: :transient do
 
+      # App tier resolves DB and external service names.
+      requires :"dns.local"
+
       publish interval: 2000 do
         metric :memory
         metric :cpu
@@ -117,6 +123,9 @@ defmodule ThreeTierIpvlan do
       zone: "containers",
       replicas: 1,
       restart: :permanent do
+
+      # Data tier resolves replication/health endpoints.
+      requires :"dns.local"
 
       publish interval: 5000 do
         metric :memory

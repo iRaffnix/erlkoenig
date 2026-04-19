@@ -43,6 +43,8 @@ defmodule ThreeTierIpvlanFw do
       replicas: 3,
       restart: :permanent do
 
+      requires :"dns.local"
+
       publish interval: 2000 do
         metric :memory
         metric :cpu
@@ -77,6 +79,8 @@ defmodule ThreeTierIpvlanFw do
       replicas: 1,
       restart: :transient do
 
+      requires :"dns.local"
+
       publish interval: 2000 do
         metric :memory
         metric :cpu
@@ -106,6 +110,8 @@ defmodule ThreeTierIpvlanFw do
       zone: "containers",
       replicas: 1,
       restart: :permanent do
+
+      requires :"dns.local"
 
       publish interval: 5000 do
         metric :memory

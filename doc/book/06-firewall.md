@@ -132,21 +132,27 @@ absence of a hole in it.
 
 ## Runtime services and the operator's responsibility
 
-erlkoenig itself runs services on the host that containers can use —
-today that is one service, the per-zone DNS resolver, but the list
-will grow as node-resident capabilities land. Every such service
-binds on the zone's gateway IP (`.1` of the subnet) on the host
-side, and every packet a container sends to it crosses the host's
-`input` hook before reaching the BEAM-side socket.
+erlkoenig itself runs services on the host that containers can use.
+The current set:
+
+  * **Per-zone DNS resolver** (UDP/53 on the zone gateway, network-side).
+  * **`:journal.local`** (Unix socket at `/run/erlkoenig/journal.sock`,
+    socket-side; → Chapter 19).
+
+Every container that uses one of these declares it in the DSL via
+the **capability framework**: `requires :"dns.local"` or
+`requires :"journal.local"` (→ Chapter 19). The declaration surfaces
+the dependency in the container term so an operator can grep their
+stack and see at a glance which workloads consume which capability.
 
 The runtime does **not** silently inject allow rules for its own
 services. The operator's `nft_table :inet, "host"` block is the
 single source of truth for what reaches the host's input chain. If
-that table has `policy: :drop` (which is the recommended hardening
-default) and the operator does not explicitly allow the runtime
-service's port, that service is unreachable from inside the
-container — the container's app will see `getaddrinfo` failures or
-connect timeouts, and nothing in `journalctl` will explain why.
+that table has `policy: :drop` (the recommended hardening default)
+and the operator does not explicitly allow the runtime service's
+port, that service is unreachable from inside the container — the
+container's app will see `getaddrinfo` failures or connect timeouts,
+and nothing in `journalctl` will explain why.
 
 This is intentional. The DSL is the contract; magic injection would
 make the kernel state diverge from the DSL and turn the system into
@@ -167,10 +173,11 @@ nft_table :inet, "host" do
     nft_rule :accept, tcp_dport: 9100              # node_exporter
 
     # ── Runtime services ────────────────────────────────────
-    # erlkoenig runs a DNS resolver on each zone's gateway IP.
-    # Without this rule, /etc/resolv.conf inside containers
-    # points at an unreachable address and every getaddrinfo()
-    # call times out.
+    # Mirrors the capability declarations in the container blocks.
+    # `requires :"dns.local"` declares the dependency at workload
+    # level; this rule opens the kernel-side path. The strict-mode
+    # runtime hook will eventually drive both off the same DSL
+    # declaration in a single place.
     nft_rule :accept, ip_saddr: {10, 0, 0, 0, 24}, udp_dport: 53
   end
 end
@@ -182,15 +189,17 @@ resolver are still dropped by the chain policy.
 
 ### Service catalogue
 
-| Service        | Bind address       | Port    | Operator rule template                                              |
-|----------------|--------------------|---------|----------------------------------------------------------------------|
-| Zone DNS       | zone gateway IP    | UDP/53  | `:accept, ip_saddr: <zone-subnet-cidr>, udp_dport: 53`             |
+| Capability         | Kind       | Operator rule (network side)                                  | Declared as            |
+|--------------------|------------|---------------------------------------------------------------|------------------------|
+| `:dns.local`       | `:network` | `:accept, ip_saddr: <zone-cidr>, udp_dport: 53`               | `requires :"dns.local"`|
+| `:journal.local`   | `:socket`  | none — Unix socket, no host firewall hop                      | `requires :"journal.local"`|
 
-Future capabilities (postgres.local, journal.local, blob.local —
-see the strategy memo in `doc/strategy/`) will extend this table
-with their own ports. The pattern stays the same: one row per
-service, rule template uses the zone subnet as `ip_saddr` to
-restrict access, the operator copies the row into the host table.
+Future capabilities (postgres.local, blob.local, inference.local —
+see the strategy memo in `erlkoenigin/strategy/`) will extend this
+table with their own ports / mount paths. The pattern stays the
+same: one row per capability, rule template uses the zone subnet as
+`ip_saddr` to restrict access, the operator copies the row into the
+host table; the workload writes one `requires :"<cap>"` line.
 
 ## erlkoenig as a standalone host firewall
 

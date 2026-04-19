@@ -32,16 +32,20 @@ defmodule Erlkoenig.DSL.MixProject do
           "../doc/book/15-volume-backing-ops.md":    [title: "15. Volume Backing Ops"],
           "../doc/book/16-supervision-and-admission.md": [title: "16. Supervision & Admission"],
           "../doc/book/17-property-based-testing.md": [title: "17. Property-Based Testing"],
-          "../doc/book/18-operator-cli.md": [title: "18. Operator CLI"]
+          "../doc/book/18-operator-cli.md": [title: "18. Operator CLI"],
+          "../doc/book/19-journal-local.md": [title: "19. Service Capabilities"],
+          "../doc/book/20-audit-verifier.md": [title: "20. Audit Verifier"]
         ],
         groups_for_extras: [
           "Getting Started":  Path.wildcard("../doc/book/0[1-3]-*.md"),
           "DSL Reference":    Path.wildcard("../doc/book/0[4-9]-*.md") ++
                               Path.wildcard("../doc/book/1[0-1]-*.md"),
-          "Internals & Ops":  Path.wildcard("../doc/book/1[2-8]-*.md")
+          "Internals & Ops":  Path.wildcard("../doc/book/1[2-8]-*.md"),
+          "Service Capabilities": Path.wildcard("../doc/book/19-*.md") ++
+                                  Path.wildcard("../doc/book/20-*.md")
         ],
         groups_for_modules: [
-          "DSL":      [Erlkoenig.Stack],
+          "DSL":      [Erlkoenig.Stack, Erlkoenig.Capabilities],
           "Builders": [Erlkoenig.Pod.Builder,
                        Erlkoenig.Nft.TableBuilder,
                        Erlkoenig.Nft.ChainBuilder]

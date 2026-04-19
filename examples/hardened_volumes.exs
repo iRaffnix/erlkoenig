@@ -65,6 +65,8 @@ defmodule HardenedVolumes do
       replicas: 2,
       restart: :permanent do
 
+      requires :"dns.local"
+
       # ── /data — rw persistent ────────────────────────────
       #
       # Default-Konfiguration: kein `opts:`, kein `read_only:`.

@@ -26,29 +26,47 @@ defmodule PodStrategies do
 
   pod "ofo", strategy: :one_for_one do
     container "a", binary: @bin, args: ["9000"],
-      zone: "strategies", replicas: 1, restart: :transient
+      zone: "strategies", replicas: 1, restart: :transient do
+      requires :"dns.local"
+    end
     container "b", binary: @bin, args: ["9000"],
-      zone: "strategies", replicas: 1, restart: :transient
+      zone: "strategies", replicas: 1, restart: :transient do
+      requires :"dns.local"
+    end
     container "c", binary: @bin, args: ["9000"],
-      zone: "strategies", replicas: 1, restart: :transient
+      zone: "strategies", replicas: 1, restart: :transient do
+      requires :"dns.local"
+    end
   end
 
   pod "ofa", strategy: :one_for_all do
     container "a", binary: @bin, args: ["9000"],
-      zone: "strategies", replicas: 1, restart: :transient
+      zone: "strategies", replicas: 1, restart: :transient do
+      requires :"dns.local"
+    end
     container "b", binary: @bin, args: ["9000"],
-      zone: "strategies", replicas: 1, restart: :transient
+      zone: "strategies", replicas: 1, restart: :transient do
+      requires :"dns.local"
+    end
     container "c", binary: @bin, args: ["9000"],
-      zone: "strategies", replicas: 1, restart: :transient
+      zone: "strategies", replicas: 1, restart: :transient do
+      requires :"dns.local"
+    end
   end
 
   pod "rfo", strategy: :rest_for_one do
     container "a", binary: @bin, args: ["9000"],
-      zone: "strategies", replicas: 1, restart: :transient
+      zone: "strategies", replicas: 1, restart: :transient do
+      requires :"dns.local"
+    end
     container "b", binary: @bin, args: ["9000"],
-      zone: "strategies", replicas: 1, restart: :transient
+      zone: "strategies", replicas: 1, restart: :transient do
+      requires :"dns.local"
+    end
     container "c", binary: @bin, args: ["9000"],
-      zone: "strategies", replicas: 1, restart: :transient
+      zone: "strategies", replicas: 1, restart: :transient do
+      requires :"dns.local"
+    end
   end
 
   host do

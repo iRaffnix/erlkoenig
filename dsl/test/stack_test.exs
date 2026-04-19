@@ -89,6 +89,172 @@ defmodule StackTest do
   # pod + container — new inline form
   # ═══════════════════════════════════════════════════════════
 
+  # ═══════════════════════════════════════════════════════════
+  # requires — service-capability declarations
+  # ═══════════════════════════════════════════════════════════
+
+  test "container requires :dns.local — network kind, declarative only" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestStack.Dns do
+      use Erlkoenig.Stack
+
+      host do
+        ipvlan "net0", parent: {:dummy, "ek0"}, subnet: {10, 0, 0, 0, 24}
+      end
+
+      pod "web", strategy: :one_for_one do
+        container "api",
+          binary: "/opt/api",
+          zone: "net0",
+          replicas: 1,
+          restart: :permanent do
+          requires :"dns.local"
+        end
+      end
+    end
+    """)
+
+    [pod] = mod.config().pods
+    [ct] = pod.containers
+    assert ct.requires == [:"dns.local"]
+    # network-kind: empty/missing socket_mounts and env are stripped
+    # by to_term — Map.get returns the canonical empty.
+    assert Map.get(ct, :socket_mounts, []) == []
+    assert Map.get(ct, :env, %{}) == %{}
+  end
+
+  test "container requires :journal.local — socket kind, mount + env injected" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestStack.Journal do
+      use Erlkoenig.Stack
+
+      host do
+        ipvlan "net0", parent: {:dummy, "ek0"}, subnet: {10, 0, 0, 0, 24}
+      end
+
+      pod "web", strategy: :one_for_one do
+        container "api",
+          binary: "/opt/api",
+          zone: "net0",
+          replicas: 1,
+          restart: :permanent do
+          requires :"journal.local"
+        end
+      end
+    end
+    """)
+
+    [pod] = mod.config().pods
+    [ct] = pod.containers
+    assert ct.requires == [:"journal.local"]
+    assert ct.socket_mounts == [
+             %{host: "/run/erlkoenig/",
+               container: "/run/erlkoenig/", read_only: false}
+           ]
+    assert ct.env["JOURNAL_LOCAL_SOCK"] == "/run/erlkoenig/journal.sock"
+  end
+
+  test "mixed requires: dns.local + journal.local" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestStack.Mixed do
+      use Erlkoenig.Stack
+
+      host do
+        ipvlan "net0", parent: {:dummy, "ek0"}, subnet: {10, 0, 0, 0, 24}
+      end
+
+      pod "web", strategy: :one_for_one do
+        container "api",
+          binary: "/opt/api",
+          zone: "net0",
+          replicas: 1,
+          restart: :permanent do
+          requires :"dns.local"
+          requires :"journal.local"
+        end
+      end
+    end
+    """)
+
+    [pod] = mod.config().pods
+    [ct] = pod.containers
+    assert ct.requires == [:"dns.local", :"journal.local"]
+    assert length(ct.socket_mounts) == 1
+  end
+
+  test "duplicate requires is idempotent" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestStack.Dup do
+      use Erlkoenig.Stack
+
+      host do
+        ipvlan "net0", parent: {:dummy, "ek0"}, subnet: {10, 0, 0, 0, 24}
+      end
+
+      pod "web", strategy: :one_for_one do
+        container "api",
+          binary: "/opt/api",
+          zone: "net0",
+          replicas: 1,
+          restart: :permanent do
+          requires :"dns.local"
+          requires :"dns.local"
+        end
+      end
+    end
+    """)
+
+    [pod] = mod.config().pods
+    [ct] = pod.containers
+    assert ct.requires == [:"dns.local"]
+  end
+
+  test "unknown capability raises at compile time" do
+    assert_raise ArgumentError, ~r/unknown capability/, fn ->
+      Code.compile_string(~S"""
+      defmodule TestStack.Unknown do
+        use Erlkoenig.Stack
+
+        host do
+          ipvlan "net0", parent: {:dummy, "ek0"}, subnet: {10, 0, 0, 0, 24}
+        end
+
+        pod "web", strategy: :one_for_one do
+          container "bad",
+            binary: "/opt/bad",
+            zone: "net0",
+            replicas: 1,
+            restart: :permanent do
+            requires :"nonsense.local"
+          end
+        end
+      end
+      """)
+    end
+  end
+
+  test "requires outside container raises CompileError" do
+    assert_raise CompileError, fn ->
+      Code.compile_string(~S"""
+      defmodule TestStack.OutsideCt do
+        use Erlkoenig.Stack
+
+        host do
+          ipvlan "net0", parent: {:dummy, "ek0"}, subnet: {10, 0, 0, 0, 24}
+        end
+
+        pod "web", strategy: :one_for_one do
+          requires :"dns.local"
+        end
+      end
+      """)
+    end
+  end
+
+  # ═══════════════════════════════════════════════════════════
+  # pod + container — original inline form
+  # ═══════════════════════════════════════════════════════════
+
   test "container carries zone and replicas inline" do
     [{mod, _}] = Code.compile_string(~S"""
     defmodule TestStack.Inline do

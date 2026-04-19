@@ -171,17 +171,20 @@ defmodule Erlkoenig.Container.Builder do
   end
 
   @doc """
-  Add a service-capability requirement (e.g. `:"journal.local"`).
+  Add a service-capability requirement (e.g. `:"journal.local"` or
+  `:"dns.local"`).
 
-  Looks up the spec via `Erlkoenig.Capabilities.fetch!/1`, appends
-  the capability name to `state.requires` (informational; surfaces
-  in the term so operators can see what a container depends on),
-  injects the env var, and ensures a directory bind-mount of
-  `Erlkoenig.Capabilities.socket_dir/0` exists in
-  `state.socket_mounts`. The C runtime can only bind directories;
-  one shared dir-bind makes every capability socket visible at the
-  same absolute path in both namespaces. Multiple `requires` calls
-  collapse to one mount entry.
+  Looks up the spec via `Erlkoenig.Capabilities.fetch!/1` and
+  dispatches on the capability's `:kind`:
+
+    * `:socket` — bind-mount the shared socket directory and inject
+      the env var pointing at the socket. Multiple `:socket`
+      capabilities collapse to one dir-bind via host-path dedup.
+    * `:network` — informational only; record the dependency so
+      operators can see it. The runtime configures the network path
+      (e.g. `/etc/resolv.conf` for DNS) regardless of declaration.
+
+  In both cases the capability name is appended to `state.requires`.
 
   Idempotent — declaring the same capability twice is a no-op.
   """
@@ -190,21 +193,31 @@ defmodule Erlkoenig.Container.Builder do
       state
     else
       spec = Erlkoenig.Capabilities.fetch!(capability)
-      dir = Erlkoenig.Capabilities.socket_dir()
-      dir_mount = %{host: dir, container: dir, read_only: false}
-
-      socket_mounts =
-        if Enum.any?(state.socket_mounts, &(&1.host == dir)) do
-          state.socket_mounts
-        else
-          state.socket_mounts ++ [dir_mount]
-        end
 
       state
       |> Map.put(:requires, state.requires ++ [capability])
-      |> Map.put(:socket_mounts, socket_mounts)
-      |> put_env(spec.env_var, spec.container_socket)
+      |> apply_capability(spec)
     end
+  end
+
+  defp apply_capability(state, %{kind: :socket} = spec) do
+    dir = Erlkoenig.Capabilities.socket_dir()
+    dir_mount = %{host: dir, container: dir, read_only: false}
+
+    socket_mounts =
+      if Enum.any?(state.socket_mounts, &(&1.host == dir)) do
+        state.socket_mounts
+      else
+        state.socket_mounts ++ [dir_mount]
+      end
+
+    state
+    |> Map.put(:socket_mounts, socket_mounts)
+    |> put_env(spec.env_var, spec.container_socket)
+  end
+
+  defp apply_capability(state, %{kind: :network}) do
+    state
   end
 
   def to_spawn_opts(state) do

@@ -502,20 +502,79 @@ sudo install -d -o $(id -u) -g $(id -g) -m 0755 /run/erlkoenig
 rm -rf /tmp/ek-ch19
 ```
 
+## A second capability — `:dns.local`
+
+The capability framework supports two **kinds** of capability,
+which determines what the DSL injects:
+
+| Kind       | What the DSL does                                              | Example          |
+|------------|----------------------------------------------------------------|------------------|
+| `:socket`  | Bind-mounts the shared socket dir + sets a path env var.       | `:journal.local` |
+| `:network` | Records the dependency only — runtime serves it network-side.  | `:dns.local`     |
+
+`:dns.local` is the first `:network`-kind capability. The per-zone
+Erlang DNS server (`erlkoenig_dns`) is already always-on: it
+listens on UDP/53 of the zone gateway, serves A and PTR records
+for the `*.erlkoenig` domain, and forwards everything else
+upstream. The C runtime writes `/etc/resolv.conf` inside every
+container pointing at the gateway. So a container resolves names
+without any setup beyond the runtime defaults.
+
+What `requires :"dns.local"` adds today: **visibility**. The
+container's term carries `:requires => [:"dns.local"]` so an
+operator can grep their stack and see exactly which workloads
+depend on resolution. Tomorrow's strict-mode hook is the same
+declaration: containers WITHOUT `:"dns.local"` get `/etc/resolv.conf`
+left empty, which is the right default for static binaries that
+talk to known IPs only.
+
+Try it:
+
+```elixir
+container :web do
+  binary "/opt/bin/web"
+  requires :"journal.local"   # :socket — gets dir bind + env var
+  requires :"dns.local"       # :network — declarative only
+end
+```
+
+Compile and inspect:
+
+```
+iex> [ct] = MyStack.containers()
+iex> ct.requires
+[:"journal.local", :"dns.local"]
+iex> ct.socket_mounts        # only journal.local pulled this in
+[%{host: "/run/erlkoenig/", container: "/run/erlkoenig/", read_only: false}]
+iex> ct.env["JOURNAL_LOCAL_SOCK"]
+"/run/erlkoenig/journal.sock"
+```
+
+Unknown capability names still fail at compile-time:
+
+```
+container :bad do
+  requires :"nonsense.local"
+end
+# ** (ArgumentError) unknown capability :"nonsense.local";
+#    known: [:"dns.local", :"journal.local"]
+```
+
 ## What's next
 
-`:journal.local` is the first capability of eleven planned (see the
-strategy memo `2026-04-19-node-sovereign-architecture` in
-`erlkoenigin/strategy/`). The next ones to land follow the same
-pattern: a Unix-socket service, a documented JSON-line protocol,
-and audit-chained side effects.
+`:journal.local` and `:dns.local` are the first two of eleven
+capabilities planned (see the strategy memo
+`2026-04-19-node-sovereign-architecture` in `erlkoenigin/strategy/`).
+The next ones to land follow the same pattern: pick a kind, register
+in `Erlkoenig.Capabilities`, declare in the DSL.
 
-| Capability         | Purpose                                  | Status   |
-|--------------------|------------------------------------------|----------|
-| `:journal.local`   | Structured log forwarder                 | live     |
-| `:dns.local`       | Resolver with policy (planned promotion) | partial  |
-| `:postgres.local`  | Tenant-isolated Postgres entry point     | planned  |
-| ...                | (see strategy memo for full catalog)     |          |
+| Capability         | Purpose                                  | Kind        | Status   |
+|--------------------|------------------------------------------|-------------|----------|
+| `:journal.local`   | Structured log forwarder                 | `:socket`   | live     |
+| `:dns.local`       | Per-zone DNS resolver                    | `:network`  | live     |
+| `:postgres.local`  | Tenant-isolated Postgres entry point     | `:socket`   | planned  |
+| `:inference.local` | OpenAI-compatible LLM API                | `:socket`   | planned  |
+| ...                | (see strategy memo for full catalog)     |             |          |
 
 Spec for the audit foundation: `erlkoenigin/specs/ai-sandbox/SPEC-AS-005-audit-trail.md`.
 Stage 4 (offline Go verifier, customer-deliverable): planned.

@@ -48,7 +48,9 @@ defmodule Erlkoenig.Container.Builder do
       health_check: nil,
       zone: nil,
       signature: nil,
-      rootfs: nil
+      rootfs: nil,
+      requires: [],
+      socket_mounts: []
     }
   end
 
@@ -168,6 +170,31 @@ defmodule Erlkoenig.Container.Builder do
     %{state | rootfs: rootfs}
   end
 
+  @doc """
+  Add a service-capability requirement (e.g. `:"journal.local"`).
+
+  Looks up the spec via `Erlkoenig.Capabilities.fetch!/1`, appends
+  the capability name to `state.requires` (informational; surfaces
+  in the term so operators can see what a container depends on),
+  injects the env var, and records the host→container socket mount
+  in `state.socket_mounts`. Idempotent — declaring the same
+  capability twice is a no-op.
+  """
+  def add_requires(state, capability) when is_atom(capability) do
+    if capability in state.requires do
+      state
+    else
+      spec = Erlkoenig.Capabilities.fetch!(capability)
+      mount = %{host: spec.host_socket,
+                container: spec.container_socket,
+                read_only: false}
+      state
+      |> Map.put(:requires, state.requires ++ [capability])
+      |> Map.put(:socket_mounts, state.socket_mounts ++ [mount])
+      |> put_env(spec.env_var, spec.container_socket)
+    end
+  end
+
   def to_spawn_opts(state) do
     opts = %{}
     opts = if state.ip, do: Map.put(opts, :ip, state.ip), else: opts
@@ -204,6 +231,10 @@ defmodule Erlkoenig.Container.Builder do
     opts = if state.health_check, do: Map.put(opts, :health_check, state.health_check), else: opts
     opts = if state.zone, do: Map.put(opts, :zone, state.zone), else: opts
     opts = if state.rootfs, do: Map.put(opts, :rootfs, state.rootfs), else: opts
+    opts = if state.requires != [], do: Map.put(opts, :requires, state.requires), else: opts
+    opts = if state.socket_mounts != [],
+              do: Map.put(opts, :socket_mounts, state.socket_mounts),
+              else: opts
 
     opts = case state.signature do
       nil       -> opts

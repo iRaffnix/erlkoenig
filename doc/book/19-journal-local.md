@@ -305,7 +305,86 @@ malformed input handling, read
 
 ---
 
-## Step 5 — All four integration tests in a row
+## Step 5 — Hook a container up via the DSL
+
+Until now you've spoken to the daemon directly. In a real
+deployment the workload sits in a container; a one-line DSL
+declaration wires it up:
+
+```elixir
+defmodule MyStack do
+  use Erlkoenig.Container
+
+  container :web do
+    binary "/opt/bin/web"
+    ip {10, 0, 0, 10}
+    requires :"journal.local"
+  end
+end
+```
+
+`requires :"journal.local"` does three things at term-generation
+time:
+
+1. Adds `:"journal.local"` to the container's `:requires` field
+   (informational — operators see what each container depends on).
+2. Bind-mounts the host socket
+   `/run/erlkoenig/journal.sock` into the container at
+   `/run/journal.sock`.
+3. Sets the env var `JOURNAL_LOCAL_SOCK=/run/journal.sock` so the
+   workload code finds the socket without hard-coding a path.
+
+The workload's only job is to open `os.environ["JOURNAL_LOCAL_SOCK"]`
+and write JSON lines.
+
+Verify the term shape from a Mix shell:
+
+```bash
+cd dsl
+mix compile
+iex -S mix
+```
+
+```elixir
+iex> defmodule MyStack do
+...>   use Erlkoenig.Container
+...>   container :web do
+...>     binary "/opt/bin/web"
+...>     requires :"journal.local"
+...>   end
+...> end
+
+iex> [ct] = MyStack.containers()
+iex> ct.requires
+[:"journal.local"]
+
+iex> ct.env["JOURNAL_LOCAL_SOCK"]
+"/run/journal.sock"
+
+iex> ct.socket_mounts
+[%{host: "/run/erlkoenig/journal.sock",
+   container: "/run/journal.sock", read_only: false}]
+```
+
+Unknown capability names are caught at compile-time:
+
+```elixir
+iex> defmodule WillFail do
+...>   use Erlkoenig.Container
+...>   container :bad do
+...>     binary "/opt/bin/bad"
+...>     requires :"nonsense.local"
+...>   end
+...> end
+** (ArgumentError) unknown capability :"nonsense.local"; known: [:"journal.local"]
+```
+
+The runtime side that *consumes* `:socket_mounts` and binds them
+into the container's mount namespace is the next piece on the
+roadmap; until it lands, the term shape is correct but the bind
+mount has to be done manually (or via an explicit `volume` block).
+
+## Step 6 — All four integration tests in a row
 
 ```bash
 for t in 38 39 40 41; do

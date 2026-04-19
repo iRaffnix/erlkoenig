@@ -103,6 +103,11 @@ class ClusterState:
         self.errors = []            # list of (ts, type, reason, severity, ct, context, data, source)
         self.error_counts = defaultdict(int)  # key: f"{type}.{reason}"
 
+        # Audit chain (SPEC-AS-005) + capability framework (book ch19/20)
+        self.last_seal = None       # dict with sealed_path/event_count/byte_count/anchor/ts
+        self.chain_breaks = []      # list of (ts, path, line, reason)
+        self.unmet_caps = defaultdict(set)  # container_name -> set of unmet capability names
+
     def handle_event(self, routing_key, body):
         parts = routing_key.split(".")
         if len(parts) < 3:
@@ -131,6 +136,10 @@ class ClusterState:
             result = "skip"  # conntrack updates counters, not event log
         elif category == "error":
             self._handle_error(entity, event, payload, body)
+        elif category == "audit":
+            self._handle_audit(entity, event, payload)
+        elif category == "capability":
+            self._handle_capability(entity, event, payload)
 
         if result == "skip":
             return routing_key
@@ -317,7 +326,56 @@ class ClusterState:
             self.errors = self.errors[-200:]
         self.error_counts[f"{err_type}.{reason}"] += 1
 
+    def _handle_audit(self, entity, event, payload):
+        """Audit chain events (SPEC-AS-005).
+
+        Routing keys:
+          audit.chain.sealed  — daily seal completed
+          audit.chain.broken  — verify_chain found tampering
+        """
+        ts = datetime.now().strftime("%H:%M:%S")
+        if entity == "chain" and event == "sealed":
+            self.last_seal = {
+                "ts": ts,
+                "sealed_path": payload.get("sealed_path", ""),
+                "event_count": payload.get("event_count", 0),
+                "byte_count": payload.get("byte_count", 0),
+                "anchor": payload.get("anchor", "")[:16],
+            }
+        elif entity == "chain" and event == "broken":
+            self.chain_breaks.append((
+                ts,
+                payload.get("path", ""),
+                payload.get("line", 0),
+                payload.get("reason", ""),
+            ))
+            if len(self.chain_breaks) > 50:
+                self.chain_breaks = self.chain_breaks[-50:]
+
+    def _handle_capability(self, entity, event, payload):
+        """Capability framework events (book ch19/20).
+
+        Routing key: capability.unmet.<cap_name>  e.g. capability.unmet.dns.local
+          - entity = 'unmet'
+          - event  = the capability name (may contain dots)
+        """
+        if entity == "unmet":
+            ct_name = payload.get("name") or payload.get("id", "?")
+            cap = payload.get("capability") or event
+            self.unmet_caps[ct_name].add(cap)
+
     def _summarize(self, cat, entity, event, body):
+        if cat == "audit":
+            if entity == "chain" and event == "sealed":
+                return (f"events={body.get('event_count', 0)} "
+                        f"anchor={body.get('anchor', '')[:16]}")
+            elif entity == "chain" and event == "broken":
+                return f"line={body.get('line', '?')} reason={body.get('reason', '')}"
+        if cat == "capability":
+            if entity == "unmet":
+                return (f"{body.get('name', '?')} missing "
+                        f"requires :\"{body.get('capability', '?')}\" "
+                        f"({body.get('action', '?')})")
         if cat == "error":
             sev = body.get("severity", "error")
             ct  = body.get("container", "")
@@ -709,6 +767,14 @@ class ErlkoenigTUI(App):
         ct_color = "green" if cts > 0 else "red"
         ban_color = "red bold" if bans > 0 else "dim"
         hp_color = "yellow" if s.honeypots > 0 else "dim"
+        # audit + capability — surface what we built last week
+        breaks = len(s.chain_breaks)
+        unmet_count = sum(len(caps) for caps in s.unmet_caps.values())
+        seal_str = (
+            f"[cyan]{s.last_seal['ts']}[/]" if s.last_seal else "[dim]—[/]"
+        )
+        breaks_color = "bold bright_red" if breaks > 0 else "dim"
+        unmet_color  = "yellow" if unmet_count > 0 else "dim"
         metrics = (
             f"  [{ct_color}]{cts}[/] containers"
             f"{sep}[cyan]{actors}[/] actors"
@@ -717,6 +783,9 @@ class ErlkoenigTUI(App):
             f"{sep}{drops} drops"
             f"{sep}[{hp_color}]{s.honeypots}[/] honeypots"
             f"{sep}{s.suspects} suspects"
+            f"{sep}seal {seal_str}"
+            f"{sep}[{breaks_color}]{breaks}[/] chain-breaks"
+            f"{sep}[{unmet_color}]{unmet_count}[/] unmet-caps"
         )
         try:
             self.query_one("#overview-metrics", Static).update(metrics)
@@ -751,16 +820,21 @@ class ErlkoenigTUI(App):
             colors = {
                 "guard": "dark_orange", "container": "green",
                 "firewall": "red", "error": "red",
+                "audit": "cyan", "capability": "yellow",
             }
             severity_colors = {
                 "critical": "bold bright_red", "error": "red", "warn": "yellow",
             }
-            for entry in events[-5:]:
+            for entry in events[-8:]:
                 ts, key, summary, cat = entry[:4]
                 severity = entry[4] if len(entry) >= 5 else None
-                if cat not in ("guard", "container", "firewall", "error"):
+                if cat not in ("guard", "container", "firewall", "error",
+                               "audit", "capability"):
                     continue
-                if cat == "error" and severity in severity_colors:
+                # audit.chain.broken is always critical-red regardless
+                if cat == "audit" and "broken" in key:
+                    color = "bold bright_red"
+                elif cat == "error" and severity in severity_colors:
                     color = severity_colors[severity]
                 else:
                     color = colors.get(cat, "white")

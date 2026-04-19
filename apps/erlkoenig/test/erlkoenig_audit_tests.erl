@@ -293,3 +293,148 @@ canonical_json_deterministic_test_() ->
          Encoded = erlkoenig_audit:canonical_json(M1),
          ?assertEqual(<<"{\"a\":1,\"b\":2,\"c\":{\"x\":10,\"y\":20}}">>, Encoded)
      end}.
+
+%% --- Hash chain tests stage 2: Ed25519 signing (SPEC-AS-005) ---
+
+%% Setup that materialises a fresh Ed25519 keypair, writes the private
+%% key (raw 32 bytes) to a tmp file, configures the audit gen_server
+%% to use it, and yields {Pid, Path, KeyPath, PubKey}.
+setup_signed() ->
+    Path = test_path(),
+    KeyPath = "/tmp/erlkoenig_audit_test_key_" ++
+              integer_to_list(erlang:unique_integer([positive])) ++ ".raw",
+    {PubKey, PrivKey} = crypto:generate_key(eddsa, ed25519),
+    32 = byte_size(PrivKey),
+    32 = byte_size(PubKey),
+    ok = file:write_file(KeyPath, PrivKey),
+    application:set_env(erlkoenig, audit_path, Path),
+    application:set_env(erlkoenig, audit_signing_key, KeyPath),
+    {ok, Pid} = erlkoenig_audit:start_link(),
+    {Pid, Path, KeyPath, PubKey}.
+
+cleanup_signed({Pid, Path, KeyPath, _PubKey}) ->
+    %% Tolerant of tests that already stopped the gen_server before
+    %% tampering with on-disk state (e.g. tampered_signed_event_detected).
+    catch gen_server:stop(Pid),
+    file:delete(Path),
+    file:delete(KeyPath),
+    file:del_dir(filename:dirname(Path)),
+    application:unset_env(erlkoenig, audit_path),
+    application:unset_env(erlkoenig, audit_signing_key).
+
+signing_pubkey_exposed_test_() ->
+    {"signing_pubkey/0 returns the loaded public key",
+     {setup, fun setup_signed/0, fun cleanup_signed/1,
+      fun({_Pid, _Path, _KeyPath, ExpectedPub}) ->
+          [fun() ->
+               ?assertEqual(ExpectedPub, erlkoenig_audit:signing_pubkey())
+           end]
+      end}}.
+
+events_carry_signature_test_() ->
+    {"every event has a non-null hex signature when key is configured",
+     {setup, fun setup_signed/0, fun cleanup_signed/1,
+      fun({_Pid, Path, _KeyPath, _PubKey}) ->
+          [fun() ->
+               erlkoenig_audit:log(#{type => a, subject => <<"x">>, result => ok}),
+               erlkoenig_audit:log(#{type => b, subject => <<"y">>, result => ok}),
+               flush(),
+               Lines = read_lines(Path),
+               Decoded = [json:decode(L) || L <- Lines],
+               lists:foreach(fun(E) ->
+                   Sig = maps:get(<<"signature">>, E),
+                   ?assert(is_binary(Sig)),
+                   %% Ed25519 signature = 64 bytes = 128 hex chars
+                   ?assertEqual(128, byte_size(Sig))
+               end, Decoded)
+           end]
+      end}}.
+
+verify_chain_with_correct_pubkey_test_() ->
+    {"verify_chain/2 succeeds with the right public key",
+     {setup, fun setup_signed/0, fun cleanup_signed/1,
+      fun({_Pid, Path, _KeyPath, PubKey}) ->
+          [fun() ->
+               erlkoenig_audit:log(#{type => a, subject => <<"x">>, result => ok}),
+               erlkoenig_audit:log(#{type => b, subject => <<"y">>, result => ok}),
+               erlkoenig_audit:log(#{type => c, subject => <<"z">>, result => ok}),
+               flush(),
+               ?assertEqual({ok, 3}, erlkoenig_audit:verify_chain(Path, PubKey))
+           end]
+      end}}.
+
+verify_chain_with_wrong_pubkey_test_() ->
+    {"verify_chain/2 fails with a different public key",
+     {setup, fun setup_signed/0, fun cleanup_signed/1,
+      fun({_Pid, Path, _KeyPath, _RealPubKey}) ->
+          [fun() ->
+               erlkoenig_audit:log(#{type => a, subject => <<"x">>, result => ok}),
+               flush(),
+               %% Generate a DIFFERENT keypair
+               {WrongPub, _} = crypto:generate_key(eddsa, ed25519),
+               case erlkoenig_audit:verify_chain(Path, WrongPub) of
+                   {error, {signature_invalid, 1, _}} -> ok;
+                   Other -> ?assertEqual({error, {signature_invalid, 1, '_'}}, Other)
+               end
+           end]
+      end}}.
+
+verify_chain_no_pubkey_skips_signatures_test_() ->
+    {"verify_chain/1 (no pubkey) only checks hash chain, not signatures",
+     {setup, fun setup_signed/0, fun cleanup_signed/1,
+      fun({_Pid, Path, _KeyPath, _PubKey}) ->
+          [fun() ->
+               erlkoenig_audit:log(#{type => a, subject => <<"x">>, result => ok}),
+               flush(),
+               %% Hash chain is intact even though we don't pass a key
+               ?assertEqual({ok, 1}, erlkoenig_audit:verify_chain(Path))
+           end]
+      end}}.
+
+unsigned_chain_with_pubkey_passes_test_() ->
+    {"verify_chain/2 tolerates legacy events without signatures",
+     {setup, fun setup/0, fun cleanup/1,
+      fun({_Pid, Path}) ->
+          [fun() ->
+               %% Setup ran without audit_signing_key, so events have
+               %% signature: null. Verifying with a key still passes
+               %% because verify_signature handles null.
+               erlkoenig_audit:log(#{type => a, subject => <<"x">>, result => ok}),
+               flush(),
+               {SomePub, _} = crypto:generate_key(eddsa, ed25519),
+               ?assertEqual({ok, 1}, erlkoenig_audit:verify_chain(Path, SomePub))
+           end]
+      end}}.
+
+tampered_signed_event_detected_test_() ->
+    {"tampering with a signed event's payload breaks both hash and signature",
+     {setup, fun setup_signed/0, fun cleanup_signed/1,
+      fun({Pid, Path, _KeyPath, PubKey}) ->
+          [fun() ->
+               erlkoenig_audit:log(#{type => a, subject => <<"alpha">>, result => ok}),
+               erlkoenig_audit:log(#{type => b, subject => <<"bravo">>, result => ok}),
+               flush(),
+               ok = gen_server:stop(Pid),
+               {ok, Bin} = file:read_file(Path),
+               Tampered = binary:replace(Bin,
+                   <<"\"subject\":\"alpha\"">>, <<"\"subject\":\"ALPHA\"">>),
+               ?assertNotEqual(Bin, Tampered),
+               ok = file:write_file(Path, Tampered),
+               %% The hash check fires first — that's the cheaper test
+               case erlkoenig_audit:verify_chain(Path, PubKey) of
+                   {error, {chain_break, 1, _}} -> ok;
+                   {error, {signature_invalid, 1, _}} -> ok;
+                   Other -> ?assertMatch({error, {_, 1, _}}, Other)
+               end
+           end]
+      end}}.
+
+hex_to_bin_roundtrip_test_() ->
+    {"hex_to_bin reverses canonical hex encoding",
+     fun() ->
+         Hash = crypto:hash(sha256, <<"test data">>),
+         Hex = list_to_binary(
+             [io_lib:format("~2.16.0b", [B]) || <<B>> <= Hash]),
+         ?assertEqual(64, byte_size(Hex)),
+         ?assertEqual(Hash, erlkoenig_audit:hex_to_bin(Hex))
+     end}.

@@ -58,6 +58,12 @@ resolve(ContainerName, DslVolumes, Uid, Gid) ->
 
 resolve_loop(_ContainerName, [], _Uid, _Gid, Acc) ->
     {ok, lists:reverse(Acc)};
+%% Pre-resolved entries (e.g. capability socket_mounts) skip the
+%% volume store entirely. Marked with `kind => socket_mount` upstream;
+%% they already carry absolute `host`/`container` paths.
+resolve_loop(ContainerName,
+             [#{kind := socket_mount} = Vol | Rest], Uid, Gid, Acc) ->
+    resolve_loop(ContainerName, Rest, Uid, Gid, [Vol | Acc]);
 resolve_loop(ContainerName,
              [#{container := ContPath, persist := Persist} = Vol | Rest],
              Uid, Gid, Acc) ->

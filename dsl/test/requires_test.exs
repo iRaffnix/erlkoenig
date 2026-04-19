@@ -11,8 +11,18 @@ defmodule Erlkoenig.RequiresTest do
     test "knows :journal.local" do
       assert {:ok, spec} = Capabilities.fetch(:"journal.local")
       assert spec.host_socket == "/run/erlkoenig/journal.sock"
-      assert spec.container_socket == "/run/journal.sock"
+      assert spec.container_socket == "/run/erlkoenig/journal.sock"
       assert spec.env_var == "JOURNAL_LOCAL_SOCK"
+    end
+
+    test "all sockets share socket_dir/0" do
+      dir = Capabilities.socket_dir()
+      Enum.each(Capabilities.all(), fn {_name, spec} ->
+        assert String.starts_with?(spec.host_socket, dir),
+               "host_socket #{spec.host_socket} not under #{dir}"
+        assert String.starts_with?(spec.container_socket, dir),
+               "container_socket #{spec.container_socket} not under #{dir}"
+      end)
     end
 
     test "rejects unknown names with the list of valid ones" do
@@ -53,14 +63,14 @@ defmodule Erlkoenig.RequiresTest do
       assert ct.requires == [:"journal.local"]
     end
 
-    test "injects the env var", %{ct: ct} do
-      assert ct.env["JOURNAL_LOCAL_SOCK"] == "/run/journal.sock"
+    test "injects the env var pointing at the same-path socket", %{ct: ct} do
+      assert ct.env["JOURNAL_LOCAL_SOCK"] == "/run/erlkoenig/journal.sock"
     end
 
-    test "adds a socket bind-mount", %{ct: ct} do
+    test "adds a directory bind-mount, not a file bind-mount", %{ct: ct} do
       assert ct.socket_mounts == [
-               %{host: "/run/erlkoenig/journal.sock",
-                 container: "/run/journal.sock",
+               %{host: "/run/erlkoenig/",
+                 container: "/run/erlkoenig/",
                  read_only: false}
              ]
     end
@@ -109,7 +119,32 @@ defmodule Erlkoenig.RequiresTest do
     [ct] = RequiresWithEnv.containers()
     assert ct.env["PORT"] == "80"
     assert ct.env["MODE"] == "prod"
-    assert ct.env["JOURNAL_LOCAL_SOCK"] == "/run/journal.sock"
+    assert ct.env["JOURNAL_LOCAL_SOCK"] == "/run/erlkoenig/journal.sock"
+  end
+
+  # ============================================================
+  # DSL: multiple capabilities collapse to one dir-bind
+  # ============================================================
+  #
+  # We can't add a second real capability to the registry just for
+  # this test, so we exercise the dedup logic via two `requires`
+  # of the same capability — `add_requires` is also where dedup of
+  # the dir-bind happens.
+
+  defmodule TwoRequiresCollapseDir do
+    use Erlkoenig.Container
+
+    container :app do
+      binary "/opt/bin/app"
+      requires :"journal.local"
+      requires :"journal.local"
+    end
+  end
+
+  test "duplicate requires collapse to one dir-bind" do
+    [ct] = TwoRequiresCollapseDir.containers()
+    assert length(ct.socket_mounts) == 1
+    assert hd(ct.socket_mounts).host == "/run/erlkoenig/"
   end
 
   # ============================================================

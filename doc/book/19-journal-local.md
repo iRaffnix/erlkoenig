@@ -305,21 +305,16 @@ malformed input handling, read
 
 ---
 
-## Step 5 — Hook a container up via the DSL
+## Step 5 — One-shot DSL → daemons → workload → verify
 
 Until now you've spoken to the daemon directly. In a real
-deployment the workload sits in a container; a one-line DSL
-declaration wires it up:
+deployment the workload sits in a container that declares its
+dependency in a DSL stack file:
 
 ```elixir
-defmodule MyStack do
-  use Erlkoenig.Container
-
-  container :web do
-    binary "/opt/bin/web"
-    ip {10, 0, 0, 10}
-    requires :"journal.local"
-  end
+container :web do
+  binary "/opt/bin/web"
+  requires :"journal.local"
 end
 ```
 
@@ -334,55 +329,70 @@ time:
 3. Sets the env var `JOURNAL_LOCAL_SOCK=/run/journal.sock` so the
    workload code finds the socket without hard-coding a path.
 
-The workload's only job is to open `os.environ["JOURNAL_LOCAL_SOCK"]`
-and write JSON lines.
+The workload's only job is to open `JOURNAL_LOCAL_SOCK` and write
+JSON lines.
 
-Verify the term shape from a Mix shell:
+The repository ships `examples/journal_demo.exs` which ties the
+whole flow together in one file — DSL stack, daemon startup,
+simulated workload, chain verification. Run it:
 
 ```bash
 cd dsl
-mix compile
-iex -S mix
+mix run ../examples/journal_demo.exs
 ```
+
+Expected output:
+
+```
+=== DSL output ===
+requires      : [:"journal.local"]
+env injected  : JOURNAL_LOCAL_SOCK = /run/journal.sock
+socket_mount  : %{host: "/run/erlkoenig/journal.sock", read_only: false,
+                  container: "/run/journal.sock"}
+
+=== daemons up ===
+audit_path : /tmp/ek-journal-demo-.../audit.jsonl
+socket     : /tmp/ek-journal-demo-.../journal.sock
+
+=== verify_chain ===
+{:ok, 3}
+
+=== chain content (3 events) ===
+seq=1  type=journal  subject=web  msg=starting
+seq=2  type=journal  subject=web  msg=ready
+seq=3  type=journal  subject=web  msg=slow request
+
+=== demo passed ===
+```
+
+What just happened, top to bottom:
+
+| Phase                | What the demo did                                                                |
+|----------------------|----------------------------------------------------------------------------------|
+| DSL output           | Compiled the one-container stack and dumped `:requires`, env, socket mount.      |
+| daemons up           | Started `:erlkoenig_audit` and `:erlkoenig_journal_local` on a `/tmp` sandbox.   |
+| workload             | Opened the env-var path the DSL set, sent three JSON-line entries, closed.       |
+| verify_chain         | Re-walked the audit log byte-by-byte; `{:ok, 3}` means "3 events, links intact". |
+| chain content        | Pretty-printed the journal-typed events the workload produced.                   |
+
+Unknown capability names fail at compile-time:
 
 ```elixir
-iex> defmodule MyStack do
-...>   use Erlkoenig.Container
-...>   container :web do
-...>     binary "/opt/bin/web"
-...>     requires :"journal.local"
-...>   end
-...> end
-
-iex> [ct] = MyStack.containers()
-iex> ct.requires
-[:"journal.local"]
-
-iex> ct.env["JOURNAL_LOCAL_SOCK"]
-"/run/journal.sock"
-
-iex> ct.socket_mounts
-[%{host: "/run/erlkoenig/journal.sock",
-   container: "/run/journal.sock", read_only: false}]
+container :bad do
+  binary "/opt/bin/bad"
+  requires :"nonsense.local"
+end
+# ** (ArgumentError) unknown capability :"nonsense.local"; known: [:"journal.local"]
 ```
 
-Unknown capability names are caught at compile-time:
-
-```elixir
-iex> defmodule WillFail do
-...>   use Erlkoenig.Container
-...>   container :bad do
-...>     binary "/opt/bin/bad"
-...>     requires :"nonsense.local"
-...>   end
-...> end
-** (ArgumentError) unknown capability :"nonsense.local"; known: [:"journal.local"]
-```
-
-The runtime side that *consumes* `:socket_mounts` and binds them
-into the container's mount namespace is the next piece on the
-roadmap; until it lands, the term shape is correct but the bind
-mount has to be done manually (or via an explicit `volume` block).
+> **Honesty.** The demo runs without containers, so the workload
+> uses the host socket path directly (the DSL env var is overridden
+> in-process). In production, the runtime sets up the bind mount
+> the DSL describes (`socket_mounts`) and the env var inside the
+> container points at the in-namespace path. The DSL term is the
+> same either way; only the path resolution differs. Wiring the
+> runtime to consume `:socket_mounts` is the next piece of work
+> tracked in the roadmap.
 
 ## Step 6 — All four integration tests in a row
 

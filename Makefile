@@ -170,6 +170,25 @@ release: erl
 	@echo ""
 	@echo "==> dist/$$(cd dist && ls erlkoenig-*.tar.gz)"
 
+# ── Audit verifier (customer-deliverable) ──────────────────────────
+# SPEC-AS-005 stage 4. Statically-linked Go binary that recomputes
+# the chain + signatures + seal from first principles, independent
+# of the producing runtime. Customer hands this to their auditor.
+
+verifier:
+	@mkdir -p dist
+	cd tools/audit-verifier && \
+	  CGO_ENABLED=0 go build -ldflags="-s -w" \
+	  -o ../../dist/audit-verifier .
+	@echo "==> dist/audit-verifier ($$(du -h dist/audit-verifier | cut -f1))"
+
+# Cross-language regression: Erlang produces a signed+sealed audit
+# log; the Go verifier then walks it through 4 happy-path modes and
+# 3 tamper exercises. Either side drifting on canonical-JSON, hash,
+# signature, or seal format breaks this loud and fast.
+verifier-xcheck: erl verifier
+	cd dsl && mix run ../examples/audit_verifier_demo.exs
+
 # ── Go-Demos (statisch gelinkt) ────────────────────────────────────
 
 GO_DEMOS := $(BUILD_DIR)/echo-server $(BUILD_DIR)/reverse-proxy $(BUILD_DIR)/api-server

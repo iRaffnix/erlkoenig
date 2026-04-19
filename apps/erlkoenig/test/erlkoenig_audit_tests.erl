@@ -438,3 +438,208 @@ hex_to_bin_roundtrip_test_() ->
          ?assertEqual(64, byte_size(Hex)),
          ?assertEqual(Hash, erlkoenig_audit:hex_to_bin(Hex))
      end}.
+
+%% --- Hash chain tests stage 3: daily seal (SPEC-AS-005) ---
+
+%% Setup that materialises a fresh signing keypair AND a fresh HMAC
+%% key, configures both, and starts the audit gen_server. Yields
+%% {Pid, Path, KeyPath, HmacPath, PubKey, HmacKey} so the cleanup can
+%% wipe everything and tests can talk about both keys.
+setup_sealed() ->
+    Path = test_path(),
+    KeyPath = "/tmp/erlkoenig_audit_seal_test_sig_" ++
+              integer_to_list(erlang:unique_integer([positive])) ++ ".raw",
+    HmacPath = "/tmp/erlkoenig_audit_seal_test_hmac_" ++
+               integer_to_list(erlang:unique_integer([positive])) ++ ".raw",
+    {PubKey, PrivKey} = crypto:generate_key(eddsa, ed25519),
+    HmacKey = crypto:strong_rand_bytes(32),
+    ok = file:write_file(KeyPath, PrivKey),
+    ok = file:write_file(HmacPath, HmacKey),
+    application:set_env(erlkoenig, audit_path, Path),
+    application:set_env(erlkoenig, audit_signing_key, KeyPath),
+    application:set_env(erlkoenig, audit_hmac_key, HmacPath),
+    {ok, Pid} = erlkoenig_audit:start_link(),
+    {Pid, Path, KeyPath, HmacPath, PubKey, HmacKey}.
+
+cleanup_sealed({Pid, Path, KeyPath, HmacPath, _Pub, _Hmac}) ->
+    catch gen_server:stop(Pid),
+    %% Wipe both the live file and any sealed siblings produced by
+    %% the test (sealed_path/1 derives names from `Path`).
+    Sealed = filelib:wildcard(Path ++ ".*.sealed"),
+    lists:foreach(fun file:delete/1, [Path, KeyPath, HmacPath | Sealed]),
+    file:del_dir(filename:dirname(Path)),
+    application:unset_env(erlkoenig, audit_path),
+    application:unset_env(erlkoenig, audit_signing_key),
+    application:unset_env(erlkoenig, audit_hmac_key).
+
+seal_creates_sealed_file_test_() ->
+    {"seal_day rotates live file to <path>.<date>.sealed at mode 0440",
+     {setup, fun setup_sealed/0, fun cleanup_sealed/1,
+      fun({_Pid, Path, _Kp, _Hp, _Pub, _Hmac}) ->
+          [fun() ->
+               erlkoenig_audit:log(#{type => a, subject => <<"x">>, result => ok}),
+               erlkoenig_audit:log(#{type => b, subject => <<"y">>, result => ok}),
+               flush(),
+               {ok, Info} = erlkoenig_audit:seal_day(),
+               SealedPath = maps:get(sealed_path, Info),
+               ?assert(filelib:is_regular(SealedPath)),
+               %% Mode 0440 = read-only owner+group.
+               {ok, FI} = file:read_file_info(SealedPath),
+               Mode = element(8, FI) band 8#777,
+               ?assertEqual(8#0440, Mode),
+               %% Live file exists and is empty (fresh day).
+               ?assert(filelib:is_regular(Path)),
+               ?assertEqual(0, filelib:file_size(Path))
+           end]
+      end}}.
+
+seal_event_has_hmac_and_counts_test_() ->
+    {"sealed file's last line is audit.seal with hmac/event_count/byte_count",
+     {setup, fun setup_sealed/0, fun cleanup_sealed/1,
+      fun({_Pid, _Path, _Kp, _Hp, _Pub, _Hmac}) ->
+          [fun() ->
+               erlkoenig_audit:log(#{type => a, subject => <<"x">>, result => ok}),
+               erlkoenig_audit:log(#{type => b, subject => <<"y">>, result => ok}),
+               flush(),
+               {ok, Info} = erlkoenig_audit:seal_day(),
+               SealedPath = maps:get(sealed_path, Info),
+               Lines = read_lines(SealedPath),
+               %% 2 events + 1 seal event = 3 lines.
+               ?assertEqual(3, length(Lines)),
+               Seal = json:decode(lists:last(Lines)),
+               ?assertEqual(<<"audit.seal">>, maps:get(<<"type">>, Seal)),
+               Hmac = maps:get(<<"hmac">>, Seal),
+               ?assert(is_binary(Hmac)),
+               ?assertEqual(64, byte_size(Hmac)),  %% SHA-256 hex = 64 chars
+               ?assertEqual(2, maps:get(<<"event_count">>, Seal)),
+               ?assert(is_integer(maps:get(<<"byte_count">>, Seal)))
+           end]
+      end}}.
+
+verify_seal_clean_test_() ->
+    {"verify_seal/2 returns ok on a freshly sealed file",
+     {setup, fun setup_sealed/0, fun cleanup_sealed/1,
+      fun({_Pid, _Path, _Kp, _Hp, _Pub, HmacKey}) ->
+          [fun() ->
+               erlkoenig_audit:log(#{type => a, subject => <<"x">>, result => ok}),
+               erlkoenig_audit:log(#{type => b, subject => <<"y">>, result => ok}),
+               flush(),
+               {ok, Info} = erlkoenig_audit:seal_day(),
+               SealedPath = maps:get(sealed_path, Info),
+               {ok, V} = erlkoenig_audit:verify_seal(SealedPath, HmacKey),
+               ?assertEqual(2, maps:get(event_count, V)),
+               %% Anchor returned by verify equals seal_day's anchor.
+               ?assertEqual(maps:get(anchor, Info), maps:get(anchor, V))
+           end]
+      end}}.
+
+verify_seal_wrong_key_test_() ->
+    {"verify_seal/2 rejects a sealed file with a different HMAC key",
+     {setup, fun setup_sealed/0, fun cleanup_sealed/1,
+      fun({_Pid, _Path, _Kp, _Hp, _Pub, _RealHmac}) ->
+          [fun() ->
+               erlkoenig_audit:log(#{type => a, subject => <<"x">>, result => ok}),
+               flush(),
+               {ok, Info} = erlkoenig_audit:seal_day(),
+               SealedPath = maps:get(sealed_path, Info),
+               WrongKey = crypto:strong_rand_bytes(32),
+               ?assertEqual({error, seal_hmac_mismatch},
+                            erlkoenig_audit:verify_seal(SealedPath, WrongKey))
+           end]
+      end}}.
+
+verify_seal_tampered_test_() ->
+    {"verify_seal/2 detects byte-level tampering inside the sealed file",
+     {setup, fun setup_sealed/0, fun cleanup_sealed/1,
+      fun({_Pid, _Path, _Kp, _Hp, _Pub, HmacKey}) ->
+          [fun() ->
+               erlkoenig_audit:log(#{type => a, subject => <<"alpha">>, result => ok}),
+               erlkoenig_audit:log(#{type => b, subject => <<"bravo">>, result => ok}),
+               flush(),
+               {ok, Info} = erlkoenig_audit:seal_day(),
+               SealedPath = maps:get(sealed_path, Info),
+               %% Need to make the file writable (chmod 0440 was applied).
+               ok = file:change_mode(SealedPath, 8#0640),
+               {ok, Bin} = file:read_file(SealedPath),
+               Tampered = binary:replace(Bin,
+                   <<"\"subject\":\"alpha\"">>,
+                   <<"\"subject\":\"ALPHA\"">>),
+               ?assertNotEqual(Bin, Tampered),
+               ok = file:write_file(SealedPath, Tampered),
+               ?assertEqual({error, seal_hmac_mismatch},
+                            erlkoenig_audit:verify_seal(SealedPath, HmacKey))
+           end]
+      end}}.
+
+seal_continues_chain_test_() ->
+    {"event after seal references the seal event's this_hash",
+     {setup, fun setup_sealed/0, fun cleanup_sealed/1,
+      fun({_Pid, Path, _Kp, _Hp, _Pub, _Hmac}) ->
+          [fun() ->
+               erlkoenig_audit:log(#{type => a, subject => <<"x">>, result => ok}),
+               flush(),
+               {ok, Info} = erlkoenig_audit:seal_day(),
+               Anchor = maps:get(anchor, Info),
+               %% Chain head reflects the seal event.
+               ?assertEqual(Anchor, erlkoenig_audit:chain_head()),
+               %% Write a follow-up event into the new live file.
+               erlkoenig_audit:log(#{type => post_seal, subject => <<"z">>, result => ok}),
+               flush(),
+               [Line] = read_lines(Path),
+               Event = json:decode(Line),
+               ?assertEqual(Anchor, maps:get(<<"prev_hash">>, Event))
+           end]
+      end}}.
+
+seal_recovery_after_restart_test_() ->
+    {"on restart with empty live file, chain head recovers from sealed file",
+     fun() ->
+         Path = test_path(),
+         KeyPath = "/tmp/erlkoenig_audit_seal_test_sig_" ++
+                   integer_to_list(erlang:unique_integer([positive])) ++ ".raw",
+         HmacPath = "/tmp/erlkoenig_audit_seal_test_hmac_" ++
+                    integer_to_list(erlang:unique_integer([positive])) ++ ".raw",
+         {_Pub, PrivKey} = crypto:generate_key(eddsa, ed25519),
+         HmacKey = crypto:strong_rand_bytes(32),
+         ok = file:write_file(KeyPath, PrivKey),
+         ok = file:write_file(HmacPath, HmacKey),
+         application:set_env(erlkoenig, audit_path, Path),
+         application:set_env(erlkoenig, audit_signing_key, KeyPath),
+         application:set_env(erlkoenig, audit_hmac_key, HmacPath),
+         {ok, Pid1} = erlkoenig_audit:start_link(),
+         erlkoenig_audit:log(#{type => a, subject => <<"x">>, result => ok}),
+         flush(),
+         {ok, Info} = erlkoenig_audit:seal_day(),
+         AnchorBeforeRestart = maps:get(anchor, Info),
+         ok = gen_server:stop(Pid1),
+         {ok, Pid2} = erlkoenig_audit:start_link(),
+         %% Live file exists but is empty; recovery must read from
+         %% the sealed sibling so the chain doesn't reset to genesis.
+         ?assertEqual(AnchorBeforeRestart, erlkoenig_audit:chain_head()),
+         %% New event should reference that anchor in prev_hash.
+         erlkoenig_audit:log(#{type => post_restart, subject => <<"y">>, result => ok}),
+         flush(),
+         [Line] = read_lines(Path),
+         Event = json:decode(Line),
+         ?assertEqual(AnchorBeforeRestart, maps:get(<<"prev_hash">>, Event)),
+         ok = gen_server:stop(Pid2),
+         lists:foreach(fun file:delete/1,
+                       [Path, KeyPath, HmacPath
+                        | filelib:wildcard(Path ++ ".*.sealed")]),
+         file:del_dir(filename:dirname(Path)),
+         application:unset_env(erlkoenig, audit_path),
+         application:unset_env(erlkoenig, audit_signing_key),
+         application:unset_env(erlkoenig, audit_hmac_key)
+     end}.
+
+seal_without_hmac_key_fails_test_() ->
+    {"seal_day returns {error, no_hmac_key} when audit_hmac_key is unset",
+     {setup, fun setup/0, fun cleanup/1,
+      fun({_Pid, _Path}) ->
+          [fun() ->
+               erlkoenig_audit:log(#{type => a, subject => <<"x">>, result => ok}),
+               flush(),
+               ?assertEqual({error, no_hmac_key},
+                            erlkoenig_audit:seal_day())
+           end]
+      end}}.

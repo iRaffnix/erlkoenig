@@ -36,7 +36,8 @@ to support external log rotation (logrotate copytruncate).
 %% API
 -export([start_link/0, log/1, query/1,
          verify_chain/1, verify_chain/2,
-         chain_head/0, signing_pubkey/0]).
+         chain_head/0, signing_pubkey/0,
+         seal_day/0, verify_seal/2]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
@@ -54,7 +55,8 @@ to support external log rotation (logrotate copytruncate).
     seq = 0   :: non_neg_integer(),
     prev_hash = ?GENESIS_HASH :: binary(),  %% hex-encoded SHA-256 of last event
     priv_key  :: binary() | undefined,      %% raw 32-byte Ed25519 private key
-    pub_key   :: binary() | undefined       %% raw 32-byte Ed25519 public key
+    pub_key   :: binary() | undefined,      %% raw 32-byte Ed25519 public key
+    hmac_key  :: binary() | undefined       %% raw 32-byte HMAC-SHA-256 key
 }).
 
 %%%===================================================================
@@ -144,6 +146,41 @@ Customers verify their audit log offline with this key.
 signing_pubkey() ->
     gen_server:call(?MODULE, signing_pubkey).
 
+-doc """
+Seal the current day's audit file (SPEC-AS-005 stage 3).
+
+Computes HMAC-SHA-256 over the live file contents (with the
+configured `audit_hmac_key`), appends a final `audit.seal` event
+that carries `{hmac, event_count, byte_count}`, renames the file to
+`<path>.<YYYY-MM-DD>.sealed`, drops it to mode 0440, and reopens a
+fresh live file. The seal event's `this_hash` becomes tomorrow's
+chain anchor: the next event written goes through normal encoding
+and references it via `prev_hash`, so the chain crosses the file
+boundary without a break.
+
+Returns `{ok, #{sealed_path, event_count, byte_count, anchor}}` on
+success, or `{error, Reason}`.
+""".
+-spec seal_day() -> {ok, map()} | {error, term()}.
+seal_day() ->
+    gen_server:call(?MODULE, seal_day, 60_000).
+
+-doc """
+Verify a sealed audit file: chain integrity + HMAC over the day's
+events. The seal event must be the last line; its details carry the
+HMAC over the preceding `byte_count` bytes. `HmacKey` is the same
+32-byte symmetric key that produced the seal.
+
+Returns `{ok, #{event_count, byte_count, anchor}}` on success or
+`{error, Reason}`.
+""".
+-spec verify_seal(string(), binary()) -> {ok, map()} | {error, term()}.
+verify_seal(Path, HmacKey) when is_binary(HmacKey), byte_size(HmacKey) =:= 32 ->
+    case file:read_file(Path) of
+        {ok, Bin} -> do_verify_seal(Bin, HmacKey);
+        {error, _} = Err -> Err
+    end.
+
 %%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
@@ -152,6 +189,7 @@ init([]) ->
     proc_lib:set_label(erlkoenig_audit),
     Path = application:get_env(erlkoenig, audit_path, ?DEFAULT_PATH),
     {PrivKey, PubKey} = load_signing_key(),
+    HmacKey = load_hmac_key(),
     case open_log(Path) of
         {ok, Fd} ->
             {Seq, PrevHash} = recover_chain_state(Path),
@@ -163,7 +201,8 @@ init([]) ->
                         [Path, Seq, binary:part(PrevHash, 0, 16), SigStatus]),
             {ok, #state{fd = Fd, path = Path, seq = Seq,
                         prev_hash = PrevHash,
-                        priv_key = PrivKey, pub_key = PubKey}};
+                        priv_key = PrivKey, pub_key = PubKey,
+                        hmac_key = HmacKey}};
         {error, Reason} ->
             logger:error("[audit] Cannot open ~s: ~p", [Path, Reason]),
             %% Start without file — events are lost but the system runs.
@@ -171,7 +210,8 @@ init([]) ->
             %% /var/log/erlkoenig doesn't exist yet.
             logger:warning("[audit] Running without audit log"),
             {ok, #state{fd = undefined, path = Path,
-                        priv_key = PrivKey, pub_key = PubKey}}
+                        priv_key = PrivKey, pub_key = PubKey,
+                        hmac_key = HmacKey}}
     end.
 
 handle_call({query, Opts}, _From, State) ->
@@ -183,6 +223,12 @@ handle_call(chain_head, _From, #state{prev_hash = Hash} = State) ->
 
 handle_call(signing_pubkey, _From, #state{pub_key = Key} = State) ->
     {reply, Key, State};
+
+handle_call(seal_day, _From, State) ->
+    case do_seal_day(State) of
+        {ok, Info, NewState} -> {reply, {ok, Info}, NewState};
+        {error, _} = Err     -> {reply, Err, State}
+    end;
 
 handle_call(_Request, _From, State) ->
     {reply, {error, unknown_call}, State}.
@@ -425,23 +471,216 @@ load_signing_key() ->
             end
     end.
 
+%% Load the symmetric HMAC key used to seal daily files.
+%% Keyed identically to the signing key but always raw 32 bytes
+%% because HMAC-SHA-256 has no asymmetric component. Returns
+%% `undefined' when not configured — `seal_day/0' then refuses with
+%% `{error, no_hmac_key}'.
+-spec load_hmac_key() -> binary() | undefined.
+load_hmac_key() ->
+    case application:get_env(erlkoenig, audit_hmac_key) of
+        undefined       -> undefined;
+        {ok, undefined} -> undefined;
+        {ok, KeyPath} ->
+            case file:read_file(KeyPath) of
+                {ok, Bin} when byte_size(Bin) >= 32 ->
+                    Key = binary:part(Bin, 0, 32),
+                    logger:info("[audit] HMAC key loaded from ~s", [KeyPath]),
+                    Key;
+                {ok, _Short} ->
+                    logger:warning("[audit] HMAC key ~s is shorter than "
+                                   "32 bytes; sealing disabled", [KeyPath]),
+                    undefined;
+                {error, Reason} ->
+                    logger:warning("[audit] Cannot read HMAC key ~s: ~p; "
+                                   "sealing disabled", [KeyPath, Reason]),
+                    undefined
+            end
+    end.
+
+%% --- Daily seal ---
+
+%% Seal the current live file. Steps:
+%%   1. Flush + close the writer FD.
+%%   2. Read the file, compute HMAC and counts over the bytes that
+%%      were written BEFORE the seal event. The HMAC binds the day's
+%%      content; the seal event itself is part of the chain so its
+%%      this_hash is what tomorrow's first event will reference.
+%%   3. Re-open and append the seal event through the normal
+%%      encode_event path so it gets a chained prev_hash/this_hash
+%%      and an Ed25519 signature when signing is enabled.
+%%   4. Close, rename to <path>.<UTC date>.sealed, drop to mode 0440.
+%%   5. Re-open a fresh live file at the original path; the chain
+%%      head in state already points at the seal event, so the next
+%%      event recorded continues the chain across the boundary.
+do_seal_day(#state{hmac_key = undefined}) ->
+    {error, no_hmac_key};
+do_seal_day(#state{fd = undefined}) ->
+    {error, no_log_file};
+do_seal_day(#state{fd = Fd, path = Path, seq = Seq,
+                   prev_hash = PrevHash, priv_key = PrivKey,
+                   hmac_key = HmacKey} = State) ->
+    _ = file:close(Fd),
+    case file:read_file(Path) of
+        {ok, Bin} ->
+            ByteCount = byte_size(Bin),
+            EventCount = Seq,
+            Hmac = hex(crypto:mac(hmac, sha256, HmacKey, Bin)),
+            SealSeq = Seq + 1,
+            SealEvent = #{type => 'audit.seal',
+                          subject => <<"audit_log">>,
+                          result => ok,
+                          details => #{<<"hmac">> => Hmac,
+                                       <<"event_count">> => EventCount,
+                                       <<"byte_count">> => ByteCount}},
+            {Line, SealHash} =
+                encode_event(SealSeq, PrevHash, PrivKey, SealEvent),
+            case append_line(Path, [Line, $\n]) of
+                ok ->
+                    SealedPath = sealed_path(Path),
+                    case file:rename(Path, SealedPath) of
+                        ok ->
+                            _ = file:change_mode(SealedPath, 8#0440),
+                            case open_log(Path) of
+                                {ok, NewFd} ->
+                                    Info = #{sealed_path => SealedPath,
+                                             event_count => EventCount,
+                                             byte_count => ByteCount,
+                                             anchor => SealHash},
+                                    logger:info(
+                                      "[audit] Sealed ~s "
+                                      "(events=~p, bytes=~p, anchor=~s)",
+                                      [SealedPath, EventCount, ByteCount,
+                                       binary:part(SealHash, 0, 16)]),
+                                    {ok, Info, State#state{fd = NewFd,
+                                                           seq = SealSeq,
+                                                           prev_hash = SealHash}};
+                                {error, R} ->
+                                    {error, {reopen_failed, R}}
+                            end;
+                        {error, R} ->
+                            {error, {rename_failed, R}}
+                    end;
+                {error, R} ->
+                    {error, {seal_write_failed, R}}
+            end;
+        {error, R} ->
+            {error, {read_failed, R}}
+    end.
+
+%% Compose `<path>.<UTC YYYY-MM-DD>.sealed`. Date in the suffix so an
+%% operator can grep by day; using the live path as base keeps backups
+%% and tests deterministic.
+-spec sealed_path(string()) -> string().
+sealed_path(Path) ->
+    {{Y, Mo, D}, _} = calendar:universal_time(),
+    Date = lists:flatten(io_lib:format("~4..0B-~2..0B-~2..0B", [Y, Mo, D])),
+    Path ++ "." ++ Date ++ ".sealed".
+
+%% Helper: append a line to a file via a short-lived FD. We use this
+%% (rather than the writer FD) for the seal event because the writer
+%% has just been closed in do_seal_day/1.
+-spec append_line(string(), iodata()) -> ok | {error, term()}.
+append_line(Path, Data) ->
+    case file:open(Path, [append, raw]) of
+        {ok, Fd} ->
+            R = file:write(Fd, Data),
+            _ = file:close(Fd),
+            R;
+        {error, _} = Err -> Err
+    end.
+
+%% --- Seal verification ---
+
+do_verify_seal(Bin, HmacKey) ->
+    Lines = [L || L <- binary:split(Bin, <<"\n">>, [global]), L =/= <<>>],
+    case lists:reverse(Lines) of
+        [] -> {error, empty_file};
+        [LastLine | _] ->
+            try json:decode(LastLine) of
+                #{<<"type">> := <<"audit.seal">>} = SealEvent ->
+                    Hmac = maps:get(<<"hmac">>, SealEvent, undefined),
+                    EventCount = maps:get(<<"event_count">>, SealEvent, undefined),
+                    ByteCount = maps:get(<<"byte_count">>, SealEvent, undefined),
+                    Anchor = maps:get(<<"this_hash">>, SealEvent, undefined),
+                    case validate_seal_fields(Hmac, EventCount, ByteCount, Anchor) of
+                        ok ->
+                            verify_seal_hmac(Bin, ByteCount, Hmac,
+                                             HmacKey, EventCount, Anchor);
+                        {error, _} = Err -> Err
+                    end;
+                _ -> {error, last_line_not_seal}
+            catch C:R ->
+                {error, {seal_decode_failed, C, R}}
+            end
+    end.
+
+validate_seal_fields(undefined, _, _, _) -> {error, seal_missing_hmac};
+validate_seal_fields(_, undefined, _, _) -> {error, seal_missing_event_count};
+validate_seal_fields(_, _, undefined, _) -> {error, seal_missing_byte_count};
+validate_seal_fields(_, _, _, undefined) -> {error, seal_missing_this_hash};
+validate_seal_fields(_, _, _, _)         -> ok.
+
+verify_seal_hmac(Bin, ByteCount, ExpectedHex, HmacKey, EventCount, Anchor) ->
+    case byte_size(Bin) >= ByteCount of
+        false -> {error, seal_byte_count_overflow};
+        true ->
+            Day = binary:part(Bin, 0, ByteCount),
+            ActualHex = hex(crypto:mac(hmac, sha256, HmacKey, Day)),
+            case ActualHex =:= ExpectedHex of
+                false -> {error, seal_hmac_mismatch};
+                true ->
+                    {ok, #{event_count => EventCount,
+                           byte_count  => ByteCount,
+                           anchor      => Anchor}}
+            end
+    end.
+
 %% --- Chain recovery on startup ---
 
 %% Read the last non-empty line of the audit log, decode it just enough
 %% to extract `seq` and `this_hash`, and return them as the seed for a
-%% continuing chain. If the file is empty/missing or the last line has
-%% no chain fields (legacy logs from before hash-chaining), start fresh.
+%% continuing chain. If the file is empty/missing, look for the
+%% most-recent sealed file in the same directory so the chain crosses
+%% the daily boundary cleanly. If neither exists or the last line has
+%% no chain fields (legacy logs), start fresh.
 -spec recover_chain_state(string()) -> {non_neg_integer(), binary()}.
 recover_chain_state(Path) ->
+    case last_chain_line(Path) of
+        {ok, Last} -> extract_chain_seed(Last);
+        empty ->
+            case latest_sealed_file(Path) of
+                {ok, Sealed} ->
+                    case last_chain_line(Sealed) of
+                        {ok, Last} -> extract_chain_seed(Last);
+                        empty      -> {0, ?GENESIS_HASH}
+                    end;
+                none -> {0, ?GENESIS_HASH}
+            end
+    end.
+
+-spec last_chain_line(string()) -> {ok, binary()} | empty.
+last_chain_line(Path) ->
     case file:read_file(Path) of
         {ok, Bin} ->
             Lines = [L || L <- binary:split(Bin, <<"\n">>, [global]),
                           L =/= <<>>],
             case lists:reverse(Lines) of
-                [] -> {0, ?GENESIS_HASH};
-                [Last | _] -> extract_chain_seed(Last)
+                []         -> empty;
+                [Last | _] -> {ok, Last}
             end;
-        {error, _} -> {0, ?GENESIS_HASH}
+        {error, _} -> empty
+    end.
+
+%% Newest sealed file derived from `Path`. We rely on the sealed
+%% suffix's lexicographic sort matching chronological order
+%% (`<base>.YYYY-MM-DD.sealed`).
+-spec latest_sealed_file(string()) -> {ok, string()} | none.
+latest_sealed_file(Path) ->
+    Pattern = Path ++ ".*.sealed",
+    case lists:sort(filelib:wildcard(Pattern)) of
+        [] -> none;
+        Matches -> {ok, lists:last(Matches)}
     end.
 
 -spec extract_chain_seed(binary()) -> {non_neg_integer(), binary()}.

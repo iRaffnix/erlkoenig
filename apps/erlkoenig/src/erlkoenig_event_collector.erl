@@ -24,7 +24,9 @@ ETS table for later inspection. Useful for demos and testing.
 Usage:
   Tab = ets:new(events, [ordered_set, public]),
   erlkoenig:subscribe(erlkoenig_event_collector, [Tab]).
-  %% ... events are now stored in Tab as {MonotonicTime, Event} ...
+  %% Events are stored as {{MonotonicTime, Unique}, Event}.
+  %% The `Unique' suffix prevents key collisions when two notifies
+  %% land in the same microsecond on a fast machine.
   erlkoenig:unsubscribe(erlkoenig_event_collector, [Tab]).
 """.
 
@@ -43,7 +45,13 @@ init([Tab]) ->
 
 -spec handle_event(term(), map()) -> {ok, map()}.
 handle_event(Event, #{tab := Tab} = State) ->
-    ets:insert(Tab, {erlang:monotonic_time(microsecond), Event}),
+    %% Key is `{Time, UniqueInteger}` so two events landing in the same
+    %% microsecond don't collide on `ordered_set`. unique_integer with
+    %% [monotonic, positive] keeps the secondary order matching arrival
+    %% order so iteration still gives FIFO within a tie.
+    Key = {erlang:monotonic_time(microsecond),
+           erlang:unique_integer([monotonic, positive])},
+    ets:insert(Tab, {Key, Event}),
     {ok, State}.
 
 -spec handle_call(term(), map()) -> {ok, term(), map()}.

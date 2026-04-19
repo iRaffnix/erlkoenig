@@ -26,9 +26,10 @@ main(_) ->
     test_helper:add_paths(),
     logger:set_primary_config(level, warning),
 
-    Path = "/tmp/erlkoenig_audit_test_38_" ++
-           integer_to_list(erlang:unique_integer([positive])) ++
-           "/audit.jsonl",
+    %% OS time + unique_integer so the path differs across escript runs
+    Tag = integer_to_list(os:system_time(microsecond)) ++ "_" ++
+          integer_to_list(erlang:unique_integer([positive])),
+    Path = "/tmp/erlkoenig_audit_test_38_" ++ Tag ++ "/audit.jsonl",
 
     application:set_env(erlkoenig, audit_path, Path),
     _ = (catch gen_server:stop(erlkoenig_audit)),

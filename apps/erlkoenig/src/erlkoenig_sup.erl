@@ -178,10 +178,24 @@ init([]) ->
         restart => permanent,
         type => supervisor
     },
+    %% `:journal.local` is opt-in: starting it binds a Unix socket
+    %% which usually requires `/run/erlkoenig` to exist with proper
+    %% permissions. Default off so existing installs are unaffected.
+    JournalSpecs = case application:get_env(erlkoenig,
+                                            journal_local_enabled, false) of
+        true ->
+            [#{id => erlkoenig_journal_local,
+               start => {erlkoenig_journal_local, start_link, []},
+               restart => permanent,
+               type => worker}];
+        false ->
+            []
+    end,
     {ok, {SupFlags, [PgSpec, ZoneSpec, ZoneSupSpec, CgroupSpec, EventsSpec,
                      HealthSpec, AuditSpec, PkiSpec, NftSupSpec,
                      QuarantineSpec, AdmissionSpec,
-                     VolumeStoreSpec, VolumeStatsSpec, PodSupSupSpec]}};
+                     VolumeStoreSpec, VolumeStatsSpec, PodSupSupSpec
+                     | JournalSpecs]}};
 
 init(pod_sup_sup) ->
     SupFlags = #{

@@ -40,6 +40,10 @@ integration, operator procedures.
 17. [Property-Based Testing](17-property-based-testing.md) — PropEr invariants covering the runtime's state machines
 18. [Operator CLI](18-operator-cli.md) — `erlkoenigctl` for everyday operations
 
+### Part IV — Service Capabilities
+
+19. [`:journal.local`](19-journal-local.md) — Tamper-evident structured log forwarder on the audit hash chain
+
 ## How to read
 
 A new reader reads Part I linearly, then jumps into Part II on demand. An

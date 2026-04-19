@@ -1,5 +1,5 @@
 -module(test_helper).
--export([boot/0,
+-export([boot/0, add_paths/0,
          step/2, pass/1, fail/2, echo_test/3, cleanup/1,
          project_root/0,
          rt_binary/0,
@@ -115,13 +115,22 @@ first_dir(Paths, ErrReason) ->
 %% Application boot
 %% ============================================================
 
-%% @doc Boot erlkoenig OTP app with sys.config from the project.
-boot() ->
+%% @doc Just add the project's ebin directories to the code path —
+%% no application boot. Useful for integration tests that exercise a
+%% single module in isolation (e.g. erlkoenig_audit hash chain) and
+%% do not need root or kernel resources.
+add_paths() ->
     Root = project_root(),
     code:add_pathsz(filelib:wildcard(
         filename:join(Root, "_build/default/lib/*/ebin"))),
     code:add_pathsz(filelib:wildcard(
         filename:join(Root, "_build/default/checkouts/*/ebin"))),
+    ok.
+
+%% @doc Boot erlkoenig OTP app with sys.config from the project.
+boot() ->
+    add_paths(),
+    Root = project_root(),
     SysConfig = filename:join(Root, "apps/erlkoenig/config/sys.config"),
     {ok, [AppEnvs]} = file:consult(SysConfig),
     lists:foreach(fun({App, Kvs}) ->

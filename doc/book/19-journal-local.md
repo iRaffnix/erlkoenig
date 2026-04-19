@@ -7,18 +7,26 @@ through. Every entry is appended to the SHA-256 hash chain in
 the daily HMAC seal. That gives every workload on the node a
 tamper-evident journal, for free, with no per-workload setup.
 
-This chapter walks through the capability end-to-end: enable it,
-send entries, inspect the audit chain, prove tampering is detected.
+This chapter is **playable**. Copy the commands, run them, watch
+the output. ~20 minutes from a fresh checkout to a verified chain.
+You don't need root, you don't need a VM, you don't need a network.
 
-> **Foundation.** This chapter assumes the audit hash chain is in
-> place (SPEC-AS-005 stages 1-3). If the chapter on the audit log
-> doesn't exist yet, the relevant code lives in
-> `apps/erlkoenig/src/erlkoenig_audit.erl` and is exercised by
-> integration tests 38, 39, 40.
+## What you'll prove
+
+- Single-byte tampering in the audit log is detected at the line
+  that broke.
+- With an Ed25519 key configured, every event is also signed; the
+  customer can verify offline with the public key alone.
+- The daily HMAC seal binds the day's bytes; the seal event becomes
+  the anchor for the next day's first event, so the chain crosses
+  file boundaries.
+- `:journal.local` is just a thin Unix-socket front-end that
+  delivers structured entries into all of the above. Workloads opt
+  in by writing JSON lines to the socket; everything else is free.
 
 ## The shape of an entry
 
-The wire format is one JSON object per newline-terminated line:
+Wire format is one JSON object per newline-terminated line:
 
 ```json
 {"subject":"web","level":"info","msg":"started","fields":{"port":8080}}
@@ -31,24 +39,302 @@ The wire format is one JSON object per newline-terminated line:
 | `msg`      | string | no       | Human-readable message.                                    |
 | `fields`   | object | no       | Arbitrary structured payload preserved verbatim.           |
 
-The daemon never closes a connection on bad input — a malformed line
-is logged and dropped, the next good line is delivered.
+The daemon never closes a connection on bad input — a malformed
+line is logged and dropped, the next good line is delivered.
 
-## Enabling the daemon
+---
 
-Two pieces of configuration:
+## Step 0 — Setup
+
+```bash
+git clone https://github.com/iRaffnix/erlkoenig.git
+cd erlkoenig
+make erl
+```
+
+Expected: rebar3 compiles cleanly. The build leaves the BEAM files
+under `_build/default/lib/erlkoenig/ebin/`.
+
+Set a sandbox path so you don't touch system locations:
+
+```bash
+mkdir -p /tmp/ek-ch19
+```
+
+---
+
+## Step 1 — The hash chain (no signing, no seal)
+
+Run integration test 38. It logs three events, verifies the chain,
+then tampers with one byte and proves verification catches it.
+
+```bash
+tests/integration/38_audit_hash_chain.escript
+```
+
+Expected last line:
+
+```
+=== Test 38 passed ===
+```
+
+**Try it manually** — open an Erlang shell:
+
+```bash
+erl -pa _build/default/lib/*/ebin -noshell -eval '
+    application:set_env(erlkoenig, audit_path, "/tmp/ek-ch19/a.jsonl"),
+    {ok, _} = erlkoenig_audit:start_link(),
+    erlkoenig_audit:log(#{type => hello, subject => <<"world">>, result => ok}),
+    erlkoenig_audit:log(#{type => hello, subject => <<"again">>, result => ok}),
+    timer:sleep(100),
+    io:format("verify_chain => ~p~n",
+        [erlkoenig_audit:verify_chain("/tmp/ek-ch19/a.jsonl")]),
+    halt(0).
+'
+```
+
+Expected output:
+
+```
+verify_chain => {ok,2}
+```
+
+Inspect the file (each line is one JSON event):
+
+```bash
+cat /tmp/ek-ch19/a.jsonl
+```
+
+Each line carries these chain-related fields:
+
+| Field        | Example                                    |
+|--------------|--------------------------------------------|
+| `v`          | `1` (schema version)                       |
+| `seq`        | monotonic counter starting at 1            |
+| `prev_hash`  | hex SHA-256 of the prior event             |
+| `this_hash`  | hex SHA-256 of this event (sans this_hash) |
+
+The genesis event has `prev_hash` = 64 zeros.
+
+Now break it:
+
+```bash
+sed -i 's/"world"/"WORLD"/' /tmp/ek-ch19/a.jsonl
+erl -pa _build/default/lib/*/ebin -noshell -eval '
+    io:format("after tamper => ~p~n",
+        [erlkoenig_audit:verify_chain("/tmp/ek-ch19/a.jsonl")]),
+    halt(0).
+'
+```
+
+Expected:
+
+```
+after tamper => {error,{chain_break,1,this_hash_mismatch}}
+```
+
+The verifier names the broken line and why. That's the whole point
+of stage 1.
+
+Clean up before moving on:
+
+```bash
+rm -f /tmp/ek-ch19/*.jsonl
+```
+
+---
+
+## Step 2 — Add Ed25519 signatures (stage 2)
+
+Generate a fresh keypair, write the private key to disk:
+
+```bash
+erl -pa _build/default/lib/*/ebin -noshell -eval '
+    {Pub, Priv} = crypto:generate_key(eddsa, ed25519),
+    file:write_file("/tmp/ek-ch19/sign.key", Priv),
+    file:write_file("/tmp/ek-ch19/sign.pub", Pub),
+    halt(0).
+'
+```
+
+Re-run with signing enabled, then verify with right and wrong keys:
+
+```bash
+erl -pa _build/default/lib/*/ebin -noshell -eval '
+    application:set_env(erlkoenig, audit_path, "/tmp/ek-ch19/b.jsonl"),
+    application:set_env(erlkoenig, audit_signing_key, "/tmp/ek-ch19/sign.key"),
+    {ok, _} = erlkoenig_audit:start_link(),
+    erlkoenig_audit:log(#{type => signed, subject => <<"first">>, result => ok}),
+    erlkoenig_audit:log(#{type => signed, subject => <<"second">>, result => ok}),
+    timer:sleep(100),
+    {ok, Pub} = file:read_file("/tmp/ek-ch19/sign.pub"),
+    io:format("with key   => ~p~n",
+        [erlkoenig_audit:verify_chain("/tmp/ek-ch19/b.jsonl", Pub)]),
+    {WrongPub, _} = crypto:generate_key(eddsa, ed25519),
+    io:format("wrong key  => ~p~n",
+        [erlkoenig_audit:verify_chain("/tmp/ek-ch19/b.jsonl", WrongPub)]),
+    halt(0).
+'
+```
+
+Expected:
+
+```
+with key   => {ok,2}
+wrong key  => {error,{signature_invalid,1,ed25519_verify_failed}}
+```
+
+Each event now has a 128-hex-char `signature` field (Ed25519 over
+the raw 32 bytes of `this_hash`). The customer keeps the public key
+and can run the same `verify_chain/2` offline.
+
+---
+
+## Step 3 — Daily HMAC seal (stage 3)
+
+Generate a 32-byte HMAC key, then seal:
+
+```bash
+erl -pa _build/default/lib/*/ebin -noshell -eval '
+    file:write_file("/tmp/ek-ch19/hmac.key",
+                    crypto:strong_rand_bytes(32)),
+    halt(0).
+'
+
+erl -pa _build/default/lib/*/ebin -noshell -eval '
+    application:set_env(erlkoenig, audit_path, "/tmp/ek-ch19/c.jsonl"),
+    application:set_env(erlkoenig, audit_signing_key, "/tmp/ek-ch19/sign.key"),
+    application:set_env(erlkoenig, audit_hmac_key, "/tmp/ek-ch19/hmac.key"),
+    {ok, _} = erlkoenig_audit:start_link(),
+    erlkoenig_audit:log(#{type => morning, subject => <<"task1">>, result => ok}),
+    erlkoenig_audit:log(#{type => morning, subject => <<"task2">>, result => ok}),
+    timer:sleep(100),
+    {ok, Info} = erlkoenig_audit:seal_day(),
+    io:format("sealed => ~p~n", [Info]),
+    {ok, Hmac} = file:read_file("/tmp/ek-ch19/hmac.key"),
+    SealedPath = maps:get(sealed_path, Info),
+    io:format("verify_seal => ~p~n",
+        [erlkoenig_audit:verify_seal(SealedPath, Hmac)]),
+    halt(0).
+'
+```
+
+Expected (anchor hash will differ):
+
+```
+sealed => #{anchor => <<"...">>,byte_count => ...,event_count => 2,
+            sealed_path => "/tmp/ek-ch19/c.jsonl.2026-04-19.sealed"}
+verify_seal => {ok,#{anchor => <<"...">>,byte_count => ...,event_count => 2}}
+```
+
+The live file (`c.jsonl`) is empty after the seal — fresh day. The
+sealed file is mode `0440` and ends with an `audit.seal` event
+carrying the HMAC and counts. List both:
+
+```bash
+ls -l /tmp/ek-ch19/c.jsonl*
+```
+
+```
+-rw-rw-r-- 1 you you   0 ... c.jsonl
+-r--r----- 1 you you 879 ... c.jsonl.2026-04-19.sealed
+```
+
+---
+
+## Step 4 — `:journal.local` (the first service capability)
+
+Daemon and client in a single Erlang invocation so the chapter
+works without external tools. The daemon listens on a Unix socket;
+the client connects, sends two JSON-line entries, and we then read
+them back from the audit chain.
+
+```bash
+erl -pa _build/default/lib/*/ebin -noshell -eval '
+    application:set_env(erlkoenig, audit_path, "/tmp/ek-ch19/d.jsonl"),
+    application:set_env(erlkoenig, journal_local_path,
+                        "/tmp/ek-ch19/journal.sock"),
+    {ok, _} = erlkoenig_audit:start_link(),
+    {ok, _} = erlkoenig_journal_local:start_link(),
+    Sock = element(2, gen_tcp:connect(
+        {local, "/tmp/ek-ch19/journal.sock"}, 0,
+        [binary, {packet, line}, {active, false}])),
+    Send = fun(M) ->
+        gen_tcp:send(Sock, [json:encode(M), $\n])
+    end,
+    Send(#{<<"subject">> => <<"web">>, <<"level">> => <<"info">>,
+           <<"msg">> => <<"started">>, <<"fields">> => #{<<"port">> => 8080}}),
+    Send(#{<<"subject">> => <<"web">>, <<"level">> => <<"warn">>,
+           <<"msg">> => <<"slow">>, <<"fields">> => #{<<"ms">> => 1234}}),
+    gen_tcp:close(Sock),
+    timer:sleep(200),
+    io:format("verify_chain => ~p~n",
+        [erlkoenig_audit:verify_chain("/tmp/ek-ch19/d.jsonl")]),
+    halt(0).
+'
+```
+
+Expected:
+
+```
+verify_chain => {ok,2}
+```
+
+Now look at what landed in the chain:
+
+```bash
+cat /tmp/ek-ch19/d.jsonl
+```
+
+Each line carries the `journal` type, the workload's claimed
+subject (`web`), the level/msg/fields you sent, and the chain
+fields (`prev_hash`/`this_hash`). The first event references
+genesis (64 zeros); the second references the first.
+
+**With `socat` installed** the same thing from the command line
+(start the daemon in one shell, run these in another):
+
+```bash
+echo '{"subject":"web","level":"info","msg":"started"}' \
+    | socat - UNIX-CONNECT:/tmp/ek-ch19/journal.sock
+```
+
+For a complete pure-Erlang example with concurrent clients and
+malformed input handling, read
+`tests/integration/41_journal_local.escript`.
+
+---
+
+## Step 5 — All four integration tests in a row
+
+```bash
+for t in 38 39 40 41; do
+    tests/integration/${t}_audit_*.escript 2>/dev/null \
+        || tests/integration/${t}_journal_local.escript
+done
+```
+
+You should see four `=== Test NN passed ===` lines. That's the same
+suite CI runs on every PR.
+
+---
+
+## Production deployment
+
+For an installed node, configure all three knobs in `sys.config`:
 
 ```erlang
-%% sys.config (or set via application:set_env/3)
 {erlkoenig, [
     {audit_path,            "/var/log/erlkoenig/audit.jsonl"},
+    {audit_signing_key,     "/etc/erlkoenig/audit-sign.key"},
+    {audit_hmac_key,        "/etc/erlkoenig/audit-hmac.key"},
     {journal_local_path,    "/run/erlkoenig/journal.sock"},
     {journal_local_enabled, true}
 ]}.
 ```
 
 When `journal_local_enabled` is `true`, the supervisor adds the
-`erlkoenig_journal_local` worker to the boot tree. The default is
+`erlkoenig_journal_local` worker to the boot tree. Default is
 `false` so existing installs are unaffected by the new module.
 
 The socket directory must exist and be writable by the BEAM user:
@@ -57,142 +343,19 @@ The socket directory must exist and be writable by the BEAM user:
 sudo install -d -o $(id -u) -g $(id -g) -m 0755 /run/erlkoenig
 ```
 
-## Send your first entry
-
-The simplest client is `socat` plus `jq`:
+## Cleanup
 
 ```bash
-echo '{"subject":"hello","msg":"world"}' \
-    | socat - UNIX-CONNECT:/run/erlkoenig/journal.sock
+rm -rf /tmp/ek-ch19
 ```
-
-Verify it landed in the chain:
-
-```bash
-tail -n1 /var/log/erlkoenig/audit.jsonl | jq .
-```
-
-You should see something like:
-
-```json
-{
-  "v": 1,
-  "seq": 1,
-  "ts": "2026-04-19T12:34:56Z",
-  "type": "journal",
-  "subject": "hello",
-  "result": "ok",
-  "level": "info",
-  "msg": "world",
-  "fields": {},
-  "conn_id": 17592186044417,
-  "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
-  "this_hash": "9f8e..."
-}
-```
-
-Note the `v=1` schema version, the chained `prev_hash`/`this_hash`,
-and the optional `signature` field (present only when
-`audit_signing_key` is configured — see SPEC-AS-005 stage 2).
-
-## Verify the chain
-
-From an Erlang shell on the node:
-
-```erlang
-1> erlkoenig_audit:verify_chain("/var/log/erlkoenig/audit.jsonl").
-{ok, 1}
-```
-
-`{ok, N}` says "N events validated, every link intact". If a public
-key is configured, pass it to also verify Ed25519 signatures:
-
-```erlang
-2> Pub = erlkoenig_audit:signing_pubkey().
-3> erlkoenig_audit:verify_chain("/var/log/erlkoenig/audit.jsonl", Pub).
-{ok, 1}
-```
-
-## Detect tampering — try it
-
-The whole point of the chain is that you can't quietly change the
-past. Edit a single byte in the audit log:
-
-```bash
-sed -i 's/"hello"/"helLo"/' /var/log/erlkoenig/audit.jsonl
-```
-
-Then re-verify:
-
-```erlang
-4> erlkoenig_audit:verify_chain("/var/log/erlkoenig/audit.jsonl").
-{error, {chain_break, 1, this_hash_mismatch}}
-```
-
-The verifier reports the line number of the first broken link and
-why. With signing enabled, you'll see `signature_invalid` instead.
-
-## Daily seal
-
-Once a day (operator-driven for now, cron-triggered later) the live
-file is sealed:
-
-```erlang
-5> erlkoenig_audit:seal_day().
-{ok, #{sealed_path => "/var/log/erlkoenig/audit.jsonl.2026-04-19.sealed",
-       event_count => 12_345,
-       byte_count  => 4_321_098,
-       anchor      => <<"e2c9...">>}}
-```
-
-The sealed file is renamed with the UTC date, set to mode `0440`,
-and the chain crosses the boundary cleanly: tomorrow's first event
-will reference today's seal anchor in `prev_hash`.
-
-Verify a sealed file with the HMAC key:
-
-```erlang
-6> {ok, HmacKey} = file:read_file("/etc/erlkoenig/audit-hmac.key").
-7> erlkoenig_audit:verify_seal(
-       "/var/log/erlkoenig/audit.jsonl.2026-04-19.sealed", HmacKey).
-{ok, #{event_count => 12_345, ...}}
-```
-
-## End-to-end exercise
-
-The integration test under `tests/integration/41_journal_local.escript`
-runs the full path: bind socket → connect two clients → garbage
-input handling → chain verification. Run it locally:
-
-```bash
-make erl
-tests/integration/41_journal_local.escript
-```
-
-Output:
-
-```
-=== Test 41: journal.local ===
-
-[OK  ] daemon binds the configured socket path
-[OK  ] single client streams 3 entries -> 3 audit events
-[OK  ] two concurrent clients stream cleanly into the chain
-[OK  ] garbage lines are dropped, good lines still arrive
-[OK  ] full audit log validates as a hash chain
-
-=== Test 41 passed ===
-```
-
-This is also the script you should read when you want to know what
-the runtime guarantees in practice.
 
 ## What's next
 
 `:journal.local` is the first capability of eleven planned (see the
 strategy memo `2026-04-19-node-sovereign-architecture` in
 `erlkoenigin/strategy/`). The next ones to land follow the same
-pattern: a Unix-socket service, a documented JSON-line protocol, and
-audit-chained side effects.
+pattern: a Unix-socket service, a documented JSON-line protocol,
+and audit-chained side effects.
 
 | Capability         | Purpose                                  | Status   |
 |--------------------|------------------------------------------|----------|
@@ -200,3 +363,6 @@ audit-chained side effects.
 | `:dns.local`       | Resolver with policy (planned promotion) | partial  |
 | `:postgres.local`  | Tenant-isolated Postgres entry point     | planned  |
 | ...                | (see strategy memo for full catalog)     |          |
+
+Spec for the audit foundation: `erlkoenigin/specs/ai-sandbox/SPEC-AS-005-audit-trail.md`.
+Stage 4 (offline Go verifier, customer-deliverable): planned.

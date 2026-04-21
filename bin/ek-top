@@ -1,0 +1,144 @@
+#!/usr/bin/env escript
+%% -*- erlang -*-
+%% ek-top — live-refreshing container overview (like `top` for erlkoenig).
+%%
+%% Polls the target node every 2s via rpc + renders a full-screen
+%% table with ANSI clear-screen between frames. Ctrl-C to stop.
+%%
+%% Shows: name, state, ip, os_pid, restart count, zone, age.
+%% The showcase-grade operator dashboard in ~200 LOC.
+%%
+%% Usage:
+%%   ek-top
+%%   ek-top interval=5 node=showcase@host cookie=X
+-mode(compile).
+
+main(Args) ->
+    {Target, Cookie, Interval} =
+        parse_opts(Args, default_node(), 'ek-showcase', 2000),
+    connect(Target, Cookie),
+
+    %% Track startup-time per container so we can show age.
+    StartTimes = ets:new(start_times, [set, public]),
+
+    loop(Target, Interval, StartTimes).
+
+loop(Target, Interval, StartTimes) ->
+    render_frame(Target, StartTimes),
+    timer:sleep(Interval),
+    loop(Target, Interval, StartTimes).
+
+%% ── frame ───────────────────────────────────────────────────
+
+render_frame(Target, StartTimes) ->
+    %% Clear screen + home cursor (ANSI). Fall back to \n-pad on
+    %% terminals that don't grok it.
+    io:format("\e[H\e[2J"),
+    Now = erlang:system_time(second),
+
+    case rpc:call(Target, erlkoenig, list, [], 3000) of
+        {badrpc, R} ->
+            io:format("rpc failed: ~p~n", [R]);
+        Cts when is_list(Cts) ->
+            header(Target, length(Cts), Now),
+            io:format("~n"),
+            io:format("  ~-24ts  ~-10ts  ~-14ts  ~-8ts  ~-6ts  ~-10ts  ~ts~n",
+                      ["NAME", "STATE", "IP", "OS-PID", "RESTR", "ZONE", "AGE"]),
+            io:format("  ~ts~n", [lists:duplicate(100, $-)]),
+            lists:foreach(fun(C) -> render_row(C, StartTimes, Now) end, Cts),
+            io:format("~n  [refreshing every 2s, Ctrl-C to quit]~n")
+    end,
+    ok.
+
+header(Target, N, Now) ->
+    {{Y, Mo, D}, {H, Mi, S}} = calendar:system_time_to_universal_time(Now, second),
+    TS = io_lib:format("~4..0B-~2..0B-~2..0B ~2..0B:~2..0B:~2..0B UTC",
+                        [Y, Mo, D, H, Mi, S]),
+    io:format("  erlkoenig ~-50ts    ~ts~n", [Target, TS]),
+    io:format("  ~p containers~n", [N]).
+
+render_row(C, StartTimes, Now) ->
+    Id = maps:get(id, C, <<"">>),
+    Name = truncate(to_str(maps:get(name, C, <<"-">>)), 24),
+    State = color_state(to_str(maps:get(state, C, <<"?">>))),
+    Ip = fmt_ip(maps:get(net_info, C, #{})),
+    OsPid = case maps:get(os_pid, C, undefined) of
+        undefined -> "-";
+        N when is_integer(N) -> integer_to_list(N)
+    end,
+    RestartCount = integer_to_list(maps:get(restart_count, C, 0)),
+    Zone = to_str(maps:get(zone, C, <<"-">>)),
+    Age = age(StartTimes, Id, Now),
+    io:format("  ~-24ts  ~-19ts  ~-14ts  ~-8ts  ~-6ts  ~-10ts  ~ts~n",
+              [Name, State, Ip, OsPid, RestartCount, Zone, Age]).
+
+color_state("running") -> "\e[32mrunning\e[0m";      % green
+color_state("starting") -> "\e[33mstarting\e[0m";   % yellow
+color_state("failed") -> "\e[31mfailed\e[0m";        % red
+color_state("stopped") -> "\e[2mstopped\e[0m";        % dim
+color_state(Other) -> Other.
+
+age(StartTimes, Id, Now) ->
+    case ets:lookup(StartTimes, Id) of
+        [{_, First}] ->
+            fmt_duration(Now - First);
+        [] ->
+            ets:insert(StartTimes, {Id, Now}),
+            "0s"
+    end.
+
+fmt_duration(S) when S < 60  -> integer_to_list(S) ++ "s";
+fmt_duration(S) when S < 3600 ->
+    integer_to_list(S div 60) ++ "m" ++ integer_to_list(S rem 60) ++ "s";
+fmt_duration(S) when S < 86400 ->
+    integer_to_list(S div 3600) ++ "h" ++
+    integer_to_list((S rem 3600) div 60) ++ "m";
+fmt_duration(S) ->
+    integer_to_list(S div 86400) ++ "d" ++
+    integer_to_list((S rem 86400) div 3600) ++ "h".
+
+fmt_ip(#{ip := {A, B, C, D}}) ->
+    lists:flatten(io_lib:format("~p.~p.~p.~p", [A, B, C, D]));
+fmt_ip(_) -> "-".
+
+to_str(B) when is_binary(B) -> binary_to_list(B);
+to_str(A) when is_atom(A)   -> atom_to_list(A);
+to_str(L) when is_list(L)   -> L;
+to_str(X) -> lists:flatten(io_lib:format("~p", [X])).
+
+truncate(S, Max) when length(S) =< Max -> S;
+truncate(S, Max) -> lists:sublist(S, Max - 1) ++ "…".
+
+%% ── plumbing ─────────────────────────────────────────────────
+
+parse_opts([], Node, Cookie, I) -> {Node, Cookie, I};
+parse_opts(["node=" ++ N | Rest], _, Cookie, I) ->
+    parse_opts(Rest, list_to_atom(N), Cookie, I);
+parse_opts(["cookie=" ++ C | Rest], Node, _, I) ->
+    parse_opts(Rest, Node, list_to_atom(C), I);
+parse_opts(["interval=" ++ N | Rest], Node, Cookie, _) ->
+    parse_opts(Rest, Node, Cookie, list_to_integer(N) * 1000);
+parse_opts([U | _], _, _, _) ->
+    io:format(standard_error, "unknown arg: ~s~n", [U]),
+    halt(4).
+
+default_node() ->
+    {ok, Host} = inet:gethostname(),
+    list_to_atom("showcase@" ++ Host).
+
+connect(Target, Cookie) ->
+    {ok, MyHost} = inet:gethostname(),
+    MyName = list_to_atom("ek-top-" ++
+        integer_to_list(erlang:system_time(second)) ++ "@" ++ MyHost),
+    case net_kernel:start([MyName, shortnames]) of
+        {ok, _}                       -> ok;
+        {error, {already_started, _}} -> ok
+    end,
+    erlang:set_cookie(node(), Cookie),
+    case net_kernel:connect_node(Target) of
+        true -> ok;
+        _    ->
+            io:format(standard_error,
+                "cannot reach ~s (cookie ~p)~n", [Target, Cookie]),
+            halt(2)
+    end.

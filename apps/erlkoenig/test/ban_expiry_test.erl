@@ -42,7 +42,7 @@ ban_ip_ipv6_timeout_test() ->
 
 config_ban_duration_present_test() ->
     %% The firewall.term config has ct_guard with ban_duration
-    {ok, [Config]} = file:consult("etc/firewall.term"),
+    {ok, [Config]} = file:consult("examples/scenarios/firewall.term"),
     CtGuard = maps:get(ct_guard, Config, #{}),
     BanDuration = maps:get(ban_duration, CtGuard, undefined),
     ?assertEqual(3600, BanDuration).
@@ -50,7 +50,7 @@ config_ban_duration_present_test() ->
 %% --- Config with timeout flags loads correctly ---
 
 config_with_timeout_sets_test() ->
-    {ok, ChainMap} = nft_vm_config:load("etc/firewall.term"),
+    {ok, ChainMap} = nft_vm_config:load("examples/scenarios/firewall.term"),
     %% Should still load and produce chains
     ?assert(maps:is_key(<<"inbound">>, ChainMap)),
     ?assert(maps:is_key(<<"prerouting_ban">>, ChainMap)).

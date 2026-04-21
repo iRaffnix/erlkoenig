@@ -24,6 +24,18 @@ defmodule Erlkoenig.RequiresTest do
       refute Map.has_key?(spec, :env_var)
     end
 
+    test "knows :postgres.local with env_value override" do
+      assert {:ok, spec} = Capabilities.fetch(:"postgres.local")
+      assert spec.kind == :socket
+      assert spec.host_socket == "/run/erlkoenig/.s.PGSQL.5432"
+      assert spec.container_socket == "/run/erlkoenig/.s.PGSQL.5432"
+      # libpq wants a DIRECTORY for PGHOST when path is absolute;
+      # env_value overrides container_socket so the workload sees
+      # the dir, not the socket file path.
+      assert spec.env_var == "PGHOST"
+      assert spec.env_value == "/run/erlkoenig"
+    end
+
     test "all :socket-kind sockets share socket_dir/0" do
       dir = Capabilities.socket_dir()
 
@@ -218,6 +230,32 @@ defmodule Erlkoenig.RequiresTest do
   end
 
   # ============================================================
+  # DSL: postgres.local — exercises env_value override
+  # ============================================================
+
+  defmodule WithPostgres do
+    use Erlkoenig.Container
+
+    container :case_mgmt do
+      binary "/agents/case_mgmt"
+      requires :"postgres.local"
+      requires :"journal.local"
+    end
+  end
+
+  test "postgres.local injects PGHOST as the directory, not the socket file" do
+    [ct] = WithPostgres.containers()
+    assert ct.requires == [:"postgres.local", :"journal.local"]
+    # dir-bind dedup: both caps share /run/erlkoenig/, exactly one mount
+    assert length(ct.socket_mounts) == 1
+    assert hd(ct.socket_mounts).host == "/run/erlkoenig/"
+    # PGHOST is the dir libpq scans, NOT the .s.PGSQL.5432 file path
+    assert ct.env["PGHOST"] == "/run/erlkoenig"
+    # journal env still injected normally (no override)
+    assert ct.env["JOURNAL_LOCAL_SOCK"] == "/run/erlkoenig/journal.sock"
+  end
+
+  # ============================================================
   # DSL: containers without requires stay clean
   # ============================================================
 
@@ -249,6 +287,85 @@ defmodule Erlkoenig.RequiresTest do
           requires :"nonsense.local"
         end
       end
+    end
+  end
+
+  # ============================================================
+  # :"dns.allowlist" — opts-bearing capability
+  # ============================================================
+
+  describe ":dns.allowlist capability" do
+    test "registry knows it as :dns_allowlist kind" do
+      assert {:ok, spec} = Capabilities.fetch(:"dns.allowlist")
+      assert spec.kind == :dns_allowlist
+      assert is_binary(spec.description)
+    end
+
+    defmodule WithDnsAllowlist do
+      use Erlkoenig.Container
+
+      container :web do
+        binary "/opt/bin/web"
+        ip {10, 0, 0, 50}
+        requires :"dns.allowlist", hosts: ["api.openai.com", "*.github.com"]
+      end
+    end
+
+    test "stores the host list on the container term" do
+      [ct] = WithDnsAllowlist.containers()
+      assert ct.requires == [:"dns.allowlist"]
+      assert ct.dns_allowlist == ["api.openai.com", "*.github.com"]
+    end
+
+    test "does NOT inject env vars or socket mounts" do
+      [ct] = WithDnsAllowlist.containers()
+      env = Map.get(ct, :env, %{})
+      refute Map.has_key?(env, "DNS_ALLOWLIST")
+      assert Map.get(ct, :socket_mounts, []) == []
+    end
+
+    test "missing :hosts raises at compile time" do
+      assert_raise CompileError, ~r/needs a non-empty :hosts list/, fn ->
+        defmodule MissingHosts do
+          use Erlkoenig.Container
+
+          container :bad do
+            binary "/opt/bin/bad"
+            requires :"dns.allowlist"
+          end
+        end
+      end
+    end
+
+    test "empty :hosts raises at compile time" do
+      assert_raise CompileError, ~r/needs a non-empty :hosts list/, fn ->
+        defmodule EmptyHosts do
+          use Erlkoenig.Container
+
+          container :bad do
+            binary "/opt/bin/bad"
+            requires :"dns.allowlist", hosts: []
+          end
+        end
+      end
+    end
+
+    test "non-string host pattern raises at compile time" do
+      assert_raise CompileError, ~r/host pattern must be a non-empty/, fn ->
+        defmodule BadHost do
+          use Erlkoenig.Container
+
+          container :bad do
+            binary "/opt/bin/bad"
+            requires :"dns.allowlist", hosts: [42]
+          end
+        end
+      end
+    end
+
+    test "spawn opts carry :dns_allowlist when set" do
+      [ct] = WithDnsAllowlist.containers()
+      assert ct.dns_allowlist == ["api.openai.com", "*.github.com"]
     end
   end
 end

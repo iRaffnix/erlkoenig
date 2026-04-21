@@ -1,0 +1,176 @@
+#!/usr/bin/env escript
+%% -*- erlang -*-
+%% ek-inspect — detailed container info, one row per field.
+%%
+%% Usage:
+%%   ek-inspect <name-or-id>
+%%   ek-inspect case_mgmt-0-agent node=showcase@host cookie=X
+%%
+%% Takes a name (case_mgmt-0-agent) or a UUID prefix. Looks up the
+%% pid via erlkoenig:find_by_id/1 or erlkoenig:list/0 + match.
+-mode(compile).
+
+main([]) ->
+    io:format(standard_error, "usage: ek-inspect <name-or-id> [node=...] [cookie=...]~n", []),
+    halt(4);
+main([QueryArg | Rest]) ->
+    Query = list_to_binary(QueryArg),
+    {Target, Cookie} = parse_opts(Rest, default_node(), 'ek-showcase'),
+    connect(Target, Cookie),
+
+    case find(Target, Query) of
+        {ok, Info} ->
+            render(Info),
+            halt(0);
+        not_found ->
+            io:format(standard_error,
+                "no container matches ~s~n", [QueryArg]),
+            halt(3)
+    end.
+
+%% ── lookup ──────────────────────────────────────────────────
+
+find(Target, Query) ->
+    %% Try exact ID match first (via find_by_id), else fall back to
+    %% a linear scan over erlkoenig:list/0 with substring matching.
+    case rpc:call(Target, erlkoenig, find_by_id, [Query], 5000) of
+        {ok, Pid} ->
+            {ok, fetch_info(Target, Pid)};
+        _ ->
+            case rpc:call(Target, erlkoenig, list, [], 5000) of
+                List when is_list(List) ->
+                    match_substring(List, Query);
+                _ -> not_found
+            end
+    end.
+
+match_substring([], _) -> not_found;
+match_substring([Info | Rest], Query) ->
+    Name = to_bin(maps:get(name, Info, <<"">>)),
+    Id = to_bin(maps:get(id, Info, <<"">>)),
+    case binary:match(Name, Query) =/= nomatch
+         orelse binary:match(Id, Query) =/= nomatch of
+        true  -> {ok, Info};
+        false -> match_substring(Rest, Query)
+    end.
+
+fetch_info(Target, Pid) ->
+    rpc:call(Target, erlkoenig, inspect, [Pid], 5000).
+
+%% ── render ──────────────────────────────────────────────────
+
+render(Info) ->
+    io:format("~n"),
+    line("id",          maps:get(id, Info, <<"">>)),
+    line("name",        maps:get(name, Info, undefined)),
+    line("state",       maps:get(state, Info, undefined)),
+    line("binary",      maps:get(binary, Info, <<"">>)),
+    line("os_pid",      maps:get(os_pid, Info, undefined)),
+    line("zone",        maps:get(zone, Info, undefined)),
+    line("restart",     maps:get(restart, Info, undefined)),
+    line("restart_count", maps:get(restart_count, Info, 0)),
+    line("seccomp",     maps:get(seccomp, Info, undefined)),
+    case maps:get(net_info, Info, undefined) of
+        undefined -> ok;
+        Net ->
+            io:format("  ~-16ts~n", ["net"]),
+            sub("ip",        maps:get(ip, Net, undefined)),
+            sub("gateway",   maps:get(gateway, Net, undefined)),
+            sub("netmask",   maps:get(netmask, Net, undefined)),
+            sub("iface",     maps:get(iface, Net, undefined))
+    end,
+    case maps:get(args, Info, []) of
+        []   -> ok;
+        Args -> io:format("  ~-16ts ~ts~n", ["args", fmt_list(Args)])
+    end,
+    case maps:get(caps, Info, []) of
+        []   -> ok;
+        Caps -> io:format("  ~-16ts ~ts~n", ["caps", fmt_list(Caps)])
+    end,
+    case maps:get(limits, Info, #{}) of
+        M when map_size(M) == 0 -> ok;
+        M ->
+            io:format("  ~-16ts~n", ["limits"]),
+            lists:foreach(fun({K, V}) -> sub(K, V) end,
+                          maps:to_list(M))
+    end,
+    case maps:get(volumes, Info, []) of
+        [] -> ok;
+        Vols ->
+            io:format("  ~-16ts~n", ["volumes"]),
+            lists:foreach(fun(V) ->
+                Host = to_str(maps:get(host, V, <<"">>)),
+                Cont = to_str(maps:get(container, V, <<"">>)),
+                Kind = case maps:get(kind, V, undefined) of
+                    socket_mount -> " [cap]";
+                    _            -> ""
+                end,
+                io:format("    ~ts → ~ts~ts~n", [Host, Cont, Kind])
+            end, Vols)
+    end,
+    case maps:get(exit_info, Info, undefined) of
+        undefined -> ok;
+        Exit ->
+            io:format("  ~-16ts~n", ["exit"]),
+            sub("exit_code",   maps:get(exit_code, Exit, undefined)),
+            sub("term_signal", maps:get(term_signal, Exit, undefined))
+    end,
+    io:format("~n").
+
+line(Name, Val) ->
+    io:format("  ~-16ts ~ts~n", [Name, fmt(Val)]).
+
+sub(Name, Val) ->
+    NameStr = to_str(Name),
+    io:format("    ~-14ts ~ts~n", [NameStr, fmt(Val)]).
+
+fmt(undefined) -> "-";
+fmt(V) when is_binary(V) -> binary_to_list(V);
+fmt(V) when is_atom(V)   -> atom_to_list(V);
+fmt(V) when is_integer(V) -> integer_to_list(V);
+fmt({A,B,C,D}) -> lists:flatten(io_lib:format("~p.~p.~p.~p", [A,B,C,D]));
+fmt(V) -> lists:flatten(io_lib:format("~p", [V])).
+
+fmt_list(L) ->
+    "[" ++ string:join([fmt(E) || E <- L], ", ") ++ "]".
+
+%% ── plumbing ─────────────────────────────────────────────────
+
+to_bin(B) when is_binary(B) -> B;
+to_bin(L) when is_list(L)   -> list_to_binary(L);
+to_bin(A) when is_atom(A)   -> atom_to_binary(A).
+
+to_str(B) when is_binary(B) -> binary_to_list(B);
+to_str(A) when is_atom(A)   -> atom_to_list(A);
+to_str(L) when is_list(L)   -> L;
+to_str(X) -> lists:flatten(io_lib:format("~p", [X])).
+
+parse_opts([], Node, Cookie) -> {Node, Cookie};
+parse_opts(["node=" ++ N | Rest], _, Cookie) ->
+    parse_opts(Rest, list_to_atom(N), Cookie);
+parse_opts(["cookie=" ++ C | Rest], Node, _) ->
+    parse_opts(Rest, Node, list_to_atom(C));
+parse_opts([Unknown | _], _, _) ->
+    io:format(standard_error, "unknown arg: ~s~n", [Unknown]),
+    halt(4).
+
+default_node() ->
+    {ok, Host} = inet:gethostname(),
+    list_to_atom("showcase@" ++ Host).
+
+connect(Target, Cookie) ->
+    {ok, MyHost} = inet:gethostname(),
+    MyName = list_to_atom("ek-inspect-" ++
+        integer_to_list(erlang:system_time(second)) ++ "@" ++ MyHost),
+    case net_kernel:start([MyName, shortnames]) of
+        {ok, _}                       -> ok;
+        {error, {already_started, _}} -> ok
+    end,
+    erlang:set_cookie(node(), Cookie),
+    case net_kernel:connect_node(Target) of
+        true -> ok;
+        _    ->
+            io:format(standard_error, "cannot reach ~s (cookie ~p)~n",
+                      [Target, Cookie]),
+            halt(2)
+    end.

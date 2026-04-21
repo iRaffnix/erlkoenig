@@ -189,6 +189,50 @@ verifier:
 verifier-xcheck: erl verifier
 	cd dsl && mix run ../examples/audit_verifier_demo.exs
 
+# ── case_mgmt showcase (book ch21) ─────────────────────────────
+# End-to-end demo: build the two Go agents, deploy to a remote
+# erlkoenig host (SHOWCASE_HOST, default erlkoenig-2__root), wipe +
+# re-seed Postgres, spawn the pod, print the URL the operator
+# can curl. Idempotent — run again to reset.
+
+SHOWCASE_HOST ?= erlkoenig-2__root
+SHOWCASE_RT_DEMO ?= /opt/erlkoenig/rt/demo
+
+agents-build:
+	cd examples/agents/case_mgmt && \
+	  CGO_ENABLED=0 go build -ldflags="-s -w" -o case_mgmt .
+	cd examples/agents/deadline_worker && \
+	  CGO_ENABLED=0 go build -ldflags="-s -w" -o deadline_worker .
+
+showcase: agents-build
+	@echo "==> deploying agents + schema to $(SHOWCASE_HOST)"
+	scp examples/agents/case_mgmt/case_mgmt          $(SHOWCASE_HOST):$(SHOWCASE_RT_DEMO)/
+	scp examples/agents/deadline_worker/deadline_worker $(SHOWCASE_HOST):$(SHOWCASE_RT_DEMO)/
+	scp examples/agents/case_mgmt/schema.sql         $(SHOWCASE_HOST):/tmp/
+	scp examples/agents/case_mgmt/seed.sql           $(SHOWCASE_HOST):/tmp/
+	@echo "==> resetting cases db (DROP + CREATE + seed)"
+	ssh $(SHOWCASE_HOST) 'sudo -u postgres psql -d cases -f /tmp/schema.sql > /dev/null && \
+	                     sudo -u postgres psql -d cases -f /tmp/seed.sql > /dev/null && \
+	                     echo "    seeded $$(sudo -u postgres psql -d cases -t -c "SELECT COUNT(*) FROM tasks;" | xargs) tasks"'
+	@echo "==> deploying showcase pod runner"
+	scp tests/integration/showcase_case_mgmt.escript $(SHOWCASE_HOST):/root/erlkoenig/tests/integration/
+	@echo ""
+	@echo "==> showcase ready"
+	@echo "    start the pod (long-running):"
+	@echo "      ssh $(SHOWCASE_HOST) /root/erlkoenig/tests/integration/showcase_case_mgmt.escript"
+	@echo ""
+	@echo "    or run the one-shot integration test:"
+	@echo "      ssh $(SHOWCASE_HOST) /root/erlkoenig/tests/integration/45_case_mgmt.escript"
+
+# Verify the showcase audit log offline with the Go verifier.
+showcase-verify: verifier
+	@AUDIT=$$(ssh $(SHOWCASE_HOST) ls -1t /var/log/erlkoenig/case_mgmt_audit.jsonl 2>/dev/null); \
+	  if [ -z "$$AUDIT" ]; then echo "no audit log on $(SHOWCASE_HOST) — start the showcase pod first"; exit 1; fi; \
+	  echo "==> pulling $$AUDIT from $(SHOWCASE_HOST)"; \
+	  scp $(SHOWCASE_HOST):$$AUDIT /tmp/case_mgmt_audit.jsonl; \
+	  echo "==> verifying chain"; \
+	  dist/audit-verifier verify-chain /tmp/case_mgmt_audit.jsonl
+
 # ── Go-Demos (statisch gelinkt) ────────────────────────────────────
 
 GO_DEMOS := $(BUILD_DIR)/echo-server $(BUILD_DIR)/reverse-proxy $(BUILD_DIR)/api-server

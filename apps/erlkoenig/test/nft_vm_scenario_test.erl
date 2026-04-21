@@ -17,7 +17,7 @@ run_file_with_fail_test() ->
 
 run_term_test() ->
     Scenario = #{
-        config => "etc/firewall.term",
+        config => "examples/scenarios/firewall.term",
         chain => <<"inbound">>,
         policy => drop,
         packets => [
@@ -50,7 +50,7 @@ run_bad_config_test() ->
 
 run_unknown_chain_test() ->
     Scenario = #{
-        config => "etc/firewall.term",
+        config => "examples/scenarios/firewall.term",
         chain => <<"nonexistent">>,
         packets => [#{name => <<"x">>, proto => tcp, saddr => {10,0,0,1}, dport => 22, expect => accept}]
     },
@@ -60,7 +60,7 @@ run_unknown_chain_test() ->
 
 tcp_packet_test() ->
     Scenario = #{
-        config => "etc/firewall.term",
+        config => "examples/scenarios/firewall.term",
         chain => <<"inbound">>,
         policy => drop,
         packets => [
@@ -72,7 +72,7 @@ tcp_packet_test() ->
 
 udp_packet_test() ->
     Scenario = #{
-        config => "etc/firewall.term",
+        config => "examples/scenarios/firewall.term",
         chain => <<"inbound">>,
         policy => drop,
         packets => [
@@ -84,7 +84,7 @@ udp_packet_test() ->
 
 icmp_packet_test() ->
     Scenario = #{
-        config => "etc/firewall.term",
+        config => "examples/scenarios/firewall.term",
         chain => <<"inbound">>,
         policy => drop,
         packets => [
@@ -98,7 +98,7 @@ icmp_packet_test() ->
 
 set_injection_test() ->
     Scenario = #{
-        config => "etc/firewall.term",
+        config => "examples/scenarios/firewall.term",
         chain => <<"prerouting_ban">>,
         policy => accept,
         sets => #{<<"blocklist">> => [{192,0,2,99}]},
@@ -114,7 +114,7 @@ set_injection_test() ->
 
 ct_state_test() ->
     Scenario = #{
-        config => "etc/firewall.term",
+        config => "examples/scenarios/firewall.term",
         chain => <<"inbound">>,
         policy => drop,
         packets => [

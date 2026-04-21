@@ -114,7 +114,7 @@ make(Type, Reason, Context, Data, Opts)
 Emit an error onto the event bus.
 
 Fail-safe: if the bus is not running, the error is logged via
-`logger:warning' and dropped. Never crashes the caller.
+`logger:warning` and dropped. Never crashes the caller.
 """.
 -spec emit(error_map()) -> ok.
 emit(#{type := _, reason := _} = Err) ->
@@ -186,11 +186,11 @@ to_map(#{type := T, reason := R, context := C, data := D,
 %%====================================================================
 
 -doc """
-Routing key for an error: `error.<type>.<reason>'.
+Routing key for an error: `error.<type>.<reason>`.
 
-Routing keys follow the project schema `<category>.<entity>.<event>'
-(see erlkoenig_amqp_codec moduledoc). `error' is the category,
-`<type>' the entity (e.g. network, config), `<reason>' the event.
+Routing keys follow the project schema `<category>.<entity>.<event>`
+(see erlkoenig_amqp_codec moduledoc). `error` is the category,
+`<type>` the entity (e.g. network, config), `<reason>` the event.
 """.
 -spec routing_key(error_map()) -> binary().
 routing_key(#{type := T, reason := R}) ->

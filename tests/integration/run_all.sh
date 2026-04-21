@@ -39,6 +39,17 @@ TESTS=(
     "25_volume_mount_opts.escript Volume Mount Options (ro, nosuid, opts: string)"
     "26_dsl_volume_opts.escript  DSL → .term → load → verify kernel mount flags"
     "27_ephemeral_volume_cleanup.escript Ephemeral volumes + UUID store + cleanup"
+    "28_dns_allowlist.escript    DNS egress allowlist (SPEC-AS-009 L7 DNS)"
+    "29_dns_allowlist_dsl.escript DSL capability auto-register + unregister"
+    "30_nft_cidr_set.escript     nft_cidr_set interval element round-trip"
+    "31_conn_limit.escript       conn_limit per_ip drops 3rd concurrent"
+    "32_dsl_e2e_edge.escript     E2E DSL: .exs→.term→spawn with dns.allowlist + conn_limit"
+    "46_tutorial_01_overview.escript        Tutorial 01: minimal stack (zone + pod + host nft)"
+    "47_tutorial_02_capabilities.escript    Tutorial 02: all 4 capabilities + Glasbox explicit nft"
+    "48_tutorial_03_firewall.escript        Tutorial 03: sets/counters/maps/vmaps/flowtable/conn_limit"
+    "49_tutorial_04_threat_detection.escript Tutorial 04: guard block + honeypot ban simulation"
+    "50_tutorial_05_storage_and_pki.escript  Tutorial 05: persistent/ro/opts/ephemeral volumes"
+    "51_tutorial_06_multi_tier.escript       Tutorial 06: 3 pods, 13 containers, replica_ips resolve"
 )
 
 echo ""

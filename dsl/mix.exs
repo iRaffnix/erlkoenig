@@ -34,7 +34,10 @@ defmodule Erlkoenig.DSL.MixProject do
           "../doc/book/17-property-based-testing.md": [title: "17. Property-Based Testing"],
           "../doc/book/18-operator-cli.md": [title: "18. Operator CLI"],
           "../doc/book/19-journal-local.md": [title: "19. Service Capabilities"],
-          "../doc/book/20-audit-verifier.md": [title: "20. Audit Verifier"]
+          "../doc/book/20-audit-verifier.md": [title: "20. Audit Verifier"],
+          "../doc/book/21-case-mgmt.md": [title: "21. case_mgmt Use-Case"],
+          "../doc/book/22-dns-egress-allowlist.md": [title: "22. DNS Egress Allowlist"],
+          "../doc/book/23-edge-primitives.md": [title: "23. Edge Primitives"]
         ],
         groups_for_extras: [
           "Getting Started":  Path.wildcard("../doc/book/0[1-3]-*.md"),
@@ -42,13 +45,38 @@ defmodule Erlkoenig.DSL.MixProject do
                               Path.wildcard("../doc/book/1[0-1]-*.md"),
           "Internals & Ops":  Path.wildcard("../doc/book/1[2-8]-*.md"),
           "Service Capabilities": Path.wildcard("../doc/book/19-*.md") ++
-                                  Path.wildcard("../doc/book/20-*.md")
+                                  Path.wildcard("../doc/book/20-*.md") ++
+                                  Path.wildcard("../doc/book/21-*.md") ++
+                                  Path.wildcard("../doc/book/22-*.md") ++
+                                  Path.wildcard("../doc/book/23-*.md")
         ],
         groups_for_modules: [
-          "DSL":      [Erlkoenig.Stack, Erlkoenig.Capabilities],
-          "Builders": [Erlkoenig.Pod.Builder,
-                       Erlkoenig.Nft.TableBuilder,
-                       Erlkoenig.Nft.ChainBuilder]
+          "DSL Entry":  [Erlkoenig.Stack,
+                         Erlkoenig.DSL,
+                         Erlkoenig.Capabilities],
+          "Builders":   [Erlkoenig.Container,
+                         Erlkoenig.Container.Builder,
+                         Erlkoenig.Pod.Builder,
+                         Erlkoenig.Host.Builder,
+                         Erlkoenig.Images.Builder,
+                         Erlkoenig.Limits.Builder,
+                         Erlkoenig.Steering.Builder,
+                         Erlkoenig.Nft.TableBuilder,
+                         Erlkoenig.Nft.ChainBuilder],
+          "NFT Firewall": [ErlkoenigNft.Firewall,
+                           ErlkoenigNft.Firewall.Builder,
+                           ErlkoenigNft.Firewall.Profiles,
+                           ErlkoenigNft.Guard,
+                           ErlkoenigNft.Guard.Builder,
+                           ErlkoenigNft.Watch,
+                           ErlkoenigNft.Watch.Builder,
+                           ErlkoenigNft.CLI.Formatter],
+          "Primitives": [Erlkoenig.Limits,
+                         Erlkoenig.Seccomp,
+                         Erlkoenig.TimeUnits,
+                         Erlkoenig.Validation],
+          "Mix Tasks":  [Mix.Tasks.Erlkoenig.Compile,
+                         Mix.Tasks.Erlkoenig.Validate]
         ]
       ]
     ]
@@ -60,7 +88,8 @@ defmodule Erlkoenig.DSL.MixProject do
 
   defp deps do
     [
-      {:ex_doc, "~> 0.35", only: :dev, runtime: false}
+      {:ex_doc, "~> 0.35", only: :dev, runtime: false},
+      {:stream_data, "~> 1.1", only: [:dev, :test], runtime: false}
     ]
   end
 end

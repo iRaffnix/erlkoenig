@@ -79,9 +79,10 @@ start_link() ->
     gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
 
 -doc """
-Pre-spawn check. Called by `erlkoenig_ct:creating_do_spawn/1` before
-the C-runtime socket is opened. Returns `ok` to proceed, or an error
-aborting the spawn and transitioning the container to `failed`.
+Pre-spawn check. Called from the `erlkoenig_ct` creating state
+before the C-runtime socket is opened. Returns `ok` to proceed, or
+an error aborting the spawn and transitioning the container to
+`failed`.
 
 Accepts a binary path; the hash is computed internally.
 """.

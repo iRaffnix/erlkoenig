@@ -73,4 +73,54 @@ defmodule Erlkoenig.Nft.ChainBuilder do
 
     %{c | rules: rs ++ [{action, Map.new(opts)}]}
   end
+
+  # --- conn_limit sugar -------------------------------------------
+  #
+  # `conn_limit per_ip: N` expands to a plain `nft_rule
+  # :connlimit_drop, max: N`. The sugar exists only to give the
+  # operator a short, typed form with a compile-time integer check.
+  # Zero synthesis beyond that — the resulting rule lives in the
+  # chain's rule list exactly where it was written.
+
+  def add_conn_limit(%__MODULE__{} = chain, opts) when is_list(opts) do
+    {action, rule_opts} = compile_conn_limit!(opts)
+    add_rule(chain, action, rule_opts)
+  end
+
+  @doc false
+  # Shared validator used by both chain paths (Stack container-inline
+  # via Pod.Builder, and Stack table-level via this module).
+  def compile_conn_limit!(opts) when is_list(opts) do
+    reject_deprecated!(opts)
+
+    case Keyword.get(opts, :per_ip) do
+      n when is_integer(n) and n > 0 ->
+        {:connlimit_drop, [max: n]}
+
+      nil ->
+        raise CompileError,
+          description:
+            "conn_limit needs :per_ip with a positive integer " <>
+              "(got #{inspect(opts)})"
+
+      other ->
+        raise CompileError,
+          description:
+            "conn_limit :per_ip must be a positive integer, got " <>
+              inspect(other)
+    end
+  end
+
+  # `global:` and `audit:` lived in the previous design. Reject both
+  # loudly so in-flight stack files are found, not silently accepted.
+  defp reject_deprecated!(opts) do
+    Enum.each([:global, :audit], fn key ->
+      if Keyword.has_key?(opts, key) do
+        raise CompileError,
+          description:
+            "conn_limit #{inspect(key)}: option removed — see " <>
+              "SPEC-EK-028 §3. Remove the option from your stack file."
+      end
+    end)
+  end
 end

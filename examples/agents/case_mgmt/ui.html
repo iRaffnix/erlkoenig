@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>case_mgmt — task tracker</title>
+<style>
+  :root {
+    --bg: #f6f5f0;
+    --fg: #1a1816;
+    --muted: #6b6358;
+    --line: #d8d3c4;
+    --accent: #355075;       /* blueprint blue */
+    --urgent: #b6391d;
+    --ok: #2e6f3f;
+    --card: #ffffff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    background: var(--bg); color: var(--fg);
+  }
+  header {
+    background: var(--accent); color: white;
+    padding: 16px 24px; display: flex; align-items: baseline; gap: 18px;
+  }
+  header h1 { margin: 0; font-size: 18px; font-weight: 600; }
+  header .sub { color: rgba(255,255,255,.7); font-size: 13px; }
+  header .audit { margin-left: auto; }
+  header .audit a {
+    color: white; text-decoration: none; font-size: 13px;
+    border: 1px solid rgba(255,255,255,.4); padding: 4px 10px; border-radius: 3px;
+  }
+  main {
+    display: grid; grid-template-columns: 360px 1fr; gap: 0;
+    height: calc(100vh - 56px);
+  }
+  aside { border-right: 1px solid var(--line); overflow-y: auto; background: white; }
+  aside section { padding: 12px 16px; border-bottom: 1px solid var(--line); }
+  aside h2 { margin: 0 0 8px 0; font-size: 12px; text-transform: uppercase;
+             letter-spacing: 1px; color: var(--muted); font-weight: 600; }
+  .task-list { display: flex; flex-direction: column; gap: 4px; }
+  .task {
+    padding: 8px 10px; border: 1px solid transparent;
+    border-radius: 3px; cursor: pointer; font-size: 13px;
+  }
+  .task:hover { background: #eef2f6; }
+  .task.active { background: #e0e7ef; border-color: var(--accent); }
+  .task .title { font-weight: 600; }
+  .task .desc { color: var(--muted); font-size: 12px;
+                white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .task .status-closed { color: var(--ok); font-size: 11px; text-transform: uppercase; }
+  .deadlines { display: flex; flex-direction: column; gap: 4px; }
+  .deadline {
+    padding: 6px 8px; font-size: 12px;
+    border-left: 3px solid var(--line); cursor: pointer;
+  }
+  .deadline.urgent { border-left-color: var(--urgent); background: #fdf2ee; }
+  .deadline.warn { border-left-color: #c8902a; }
+  .deadline .due { font-weight: 600; }
+  .deadline .desc { color: var(--muted); font-size: 11px; }
+
+  section.detail { padding: 24px 32px; overflow-y: auto; }
+  section.detail h1 { margin: 0; font-size: 22px; }
+  section.detail .desc-line { color: var(--muted); margin-top: 4px; font-size: 14px; }
+  section.detail .effort {
+    margin-top: 16px; padding: 10px 14px;
+    background: white; border: 1px solid var(--line); border-radius: 3px;
+    display: inline-flex; gap: 24px; font-size: 13px;
+  }
+  section.detail .effort strong { font-size: 18px; }
+  .pane { margin-top: 24px; }
+  .pane h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 1px;
+             color: var(--muted); margin: 0 0 8px 0; }
+  .row { padding: 8px 12px; background: white;
+         border: 1px solid var(--line); border-radius: 3px;
+         margin-bottom: 4px; font-size: 13px; }
+  .row .when { color: var(--muted); font-size: 11px; }
+  form.add { margin-top: 8px; display: flex; gap: 6px; }
+  form.add input, form.add textarea, form.add select {
+    flex: 1; padding: 6px 8px; border: 1px solid var(--line); border-radius: 3px;
+    font: inherit; background: white;
+  }
+  form.add button { padding: 6px 14px; border: 1px solid var(--accent);
+                    background: var(--accent); color: white; cursor: pointer;
+                    border-radius: 3px; font: inherit; }
+  form.add button:hover { background: #243b58; }
+  .empty { color: var(--muted); font-style: italic; font-size: 13px; }
+  .tag { display: inline-block; padding: 1px 6px; font-size: 10px;
+         text-transform: uppercase; border-radius: 2px;
+         background: var(--accent); color: white; margin-right: 6px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>case_mgmt</h1>
+  <span class="sub">reference task tracker — erlkoenig showcase</span>
+  <div class="audit">
+    <a href="#" id="audit-link" title="audit chain status">audit chain ✓</a>
+  </div>
+</header>
+
+<main>
+  <aside>
+    <section>
+      <h2>Tasks (<span id="task-count">…</span>)</h2>
+      <div class="task-list" id="task-list"></div>
+    </section>
+    <section>
+      <h2>Upcoming deadlines (14 days)</h2>
+      <div class="deadlines" id="deadlines-list"></div>
+    </section>
+  </aside>
+
+  <section class="detail" id="detail">
+    <p class="empty">← pick a task on the left.</p>
+  </section>
+</main>
+
+<script>
+const fmtMoney = c => (c / 100).toLocaleString("en-US",
+    { style: "currency", currency: "USD" });
+const fmtDate = s => new Date(s).toLocaleString("en-US",
+    { dateStyle: "medium", timeStyle: "short" });
+const fmtDay = s => new Date(s).toLocaleDateString("en-US",
+    { dateStyle: "medium" });
+
+let activeTaskId = null;
+
+async function loadTasks() {
+  const r = await fetch("/tasks");
+  const tasks = await r.json();
+  document.getElementById("task-count").textContent = tasks.length;
+  const list = document.getElementById("task-list");
+  list.innerHTML = "";
+  tasks.forEach(t => {
+    const div = document.createElement("div");
+    div.className = "task" + (t.id === activeTaskId ? " active" : "");
+    div.innerHTML = `
+      <div class="title">${esc(t.title)}</div>
+      <div class="desc">${esc(t.description)}</div>
+      ${t.status === "closed" ? '<div class="status-closed">closed</div>' : ''}
+    `;
+    div.onclick = () => openTask(t.id);
+    list.appendChild(div);
+  });
+}
+
+async function loadUpcoming() {
+  const r = await fetch("/deadlines/upcoming?days=14");
+  const ds = await r.json();
+  const el = document.getElementById("deadlines-list");
+  el.innerHTML = "";
+  if (ds.length === 0) {
+    el.innerHTML = '<div class="empty">No deadlines in the next 14 days.</div>';
+    return;
+  }
+  ds.forEach(d => {
+    const cls = d.days_left <= 7 ? "urgent" : (d.days_left <= 14 ? "warn" : "");
+    const div = document.createElement("div");
+    div.className = "deadline " + cls;
+    div.innerHTML = `
+      <div class="due">${fmtDay(d.due_at)} (${d.days_left}d)</div>
+      <div class="desc">${esc(d.title)} — ${esc(d.description)}</div>
+    `;
+    div.onclick = () => openTask(d.task_id);
+    el.appendChild(div);
+  });
+}
+
+async function openTask(id) {
+  activeTaskId = id;
+  await loadTasks(); // re-render highlight
+  const r = await fetch(`/tasks/${id}`);
+  if (!r.ok) {
+    document.getElementById("detail").innerHTML =
+      `<p class="empty">Task ${id} not found.</p>`;
+    return;
+  }
+  const body = await r.json();
+  const t = body.task;
+  document.getElementById("detail").innerHTML = `
+    <h1>${esc(t.title)}</h1>
+    <div class="desc-line">${esc(t.description)}</div>
+    <div class="effort">
+      <span><strong>${fmtMoney(body.effort.total_cents)}</strong> logged effort</span>
+      <span>${body.effort.entry_count} time entries</span>
+      <span>${body.deadlines.filter(d => d.status === "open").length} open deadlines</span>
+    </div>
+
+    <div class="pane">
+      <h3>Deadlines</h3>
+      ${body.deadlines.length === 0 ? '<p class="empty">no deadlines</p>' :
+        body.deadlines.map(d => {
+          const done = d.status === "done";
+          return `<div class="row">
+              <span class="tag">${esc(d.category)}</span>
+              ${esc(d.description)}
+              <div class="when">
+                due ${fmtDate(d.due_at)}${done ? ' • done' : ''}
+                ${!done ? ` <a href="#" onclick="markDeadlineDone(${d.id});return false">→ mark done</a>` : ''}
+              </div>
+          </div>`;
+        }).join("")}
+      <form class="add" onsubmit="addDeadline(event, ${t.id})">
+        <input type="datetime-local" name="due_at" required>
+        <input name="description" placeholder="Description" required>
+        <select name="category">
+          <option value="release">Release</option>
+          <option value="review">Review</option>
+          <option value="response">Response</option>
+          <option value="meeting">Meeting</option>
+        </select>
+        <button>+ Deadline</button>
+      </form>
+    </div>
+
+    <div class="pane">
+      <h3>Notes</h3>
+      ${body.notes.length === 0 ? '<p class="empty">no notes</p>' :
+        body.notes.map(n => `
+          <div class="row">${esc(n.body)}<div class="when">${fmtDate(n.created_at)}</div></div>
+        `).join("")}
+      <form class="add" onsubmit="addNote(event, ${t.id})">
+        <input name="body" placeholder="Add a note" required>
+        <button>+ Note</button>
+      </form>
+    </div>
+
+    <div class="pane">
+      <h3>Time entries — total ${fmtMoney(body.effort.total_cents)}</h3>
+      ${body.time_entries.length === 0 ? '<p class="empty">no entries</p>' :
+        body.time_entries.map(e => `
+          <div class="row">
+            <strong>${e.minutes}min</strong> ${esc(e.description)}
+            <div class="when">
+              ${esc(e.user_name)} • ${e.occurred_on} •
+              ${fmtMoney(e.amount_cents)} (${fmtMoney(e.rate_cents)}/h)
+            </div>
+          </div>
+        `).join("")}
+    </div>
+  `;
+}
+
+async function addDeadline(ev, taskId) {
+  ev.preventDefault();
+  const f = ev.target;
+  await fetch(`/tasks/${taskId}/deadlines`, {
+    method: "POST",
+    body: JSON.stringify({
+      due_at: new Date(f.due_at.value).toISOString(),
+      description: f.description.value,
+      category: f.category.value,
+    }),
+  });
+  f.description.value = "";
+  openTask(taskId);
+  loadUpcoming();
+}
+
+async function addNote(ev, taskId) {
+  ev.preventDefault();
+  const f = ev.target;
+  await fetch(`/tasks/${taskId}/notes`, {
+    method: "POST",
+    body: JSON.stringify({ body: f.body.value }),
+  });
+  f.body.value = "";
+  openTask(taskId);
+}
+
+async function markDeadlineDone(id) {
+  await fetch(`/deadlines/${id}/done`, { method: "POST" });
+  if (activeTaskId !== null) openTask(activeTaskId);
+  loadUpcoming();
+}
+
+function esc(s) {
+  return String(s)
+    .replaceAll("&", "&amp;").replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+}
+
+loadTasks();
+loadUpcoming();
+setInterval(loadUpcoming, 30000); // worker polls every 30s, UI too
+</script>
+</body>
+</html>

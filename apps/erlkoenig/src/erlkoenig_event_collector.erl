@@ -25,7 +25,7 @@ Usage:
   Tab = ets:new(events, [ordered_set, public]),
   erlkoenig:subscribe(erlkoenig_event_collector, [Tab]).
   %% Events are stored as {{MonotonicTime, Unique}, Event}.
-  %% The `Unique' suffix prevents key collisions when two notifies
+  %% The `Unique` suffix prevents key collisions when two notifies
   %% land in the same microsecond on a fast machine.
   erlkoenig:unsubscribe(erlkoenig_event_collector, [Tab]).
 """.

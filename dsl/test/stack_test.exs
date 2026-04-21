@@ -182,6 +182,39 @@ defmodule StackTest do
     assert length(ct.socket_mounts) == 1
   end
 
+  test "container requires :postgres.local — env_value overrides container_socket" do
+    [{mod, _}] = Code.compile_string(~S"""
+    defmodule TestStack.Postgres do
+      use Erlkoenig.Stack
+
+      host do
+        ipvlan "net0", parent: {:dummy, "ek0"}, subnet: {10, 0, 0, 0, 24}
+      end
+
+      pod "case", strategy: :one_for_one do
+        container "case_mgmt",
+          binary: "/agents/case_mgmt",
+          zone: "net0",
+          replicas: 1,
+          restart: :permanent do
+          requires :"postgres.local"
+        end
+      end
+    end
+    """)
+
+    [pod] = mod.config().pods
+    [ct] = pod.containers
+    assert ct.requires == [:"postgres.local"]
+    # PGHOST is the directory libpq scans for `.s.PGSQL.<port>`,
+    # NOT the socket file path itself.
+    assert ct.env["PGHOST"] == "/run/erlkoenig"
+    assert ct.socket_mounts == [
+             %{host: "/run/erlkoenig/",
+               container: "/run/erlkoenig/", read_only: false}
+           ]
+  end
+
   test "duplicate requires is idempotent" do
     [{mod, _}] = Code.compile_string(~S"""
     defmodule TestStack.Dup do

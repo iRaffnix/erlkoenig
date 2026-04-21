@@ -4,7 +4,7 @@
 %% --- Load tests ---
 
 load_webserver_test() ->
-    {ok, ChainMap} = nft_vm_config:load("etc/firewall.term"),
+    {ok, ChainMap} = nft_vm_config:load("examples/scenarios/firewall.term"),
     ?assert(is_map(ChainMap)),
     ?assert(maps:is_key(<<"inbound">>, ChainMap)),
     ?assert(maps:is_key(<<"prerouting_ban">>, ChainMap)),
@@ -23,18 +23,18 @@ load_anti_spoofing_test() ->
     ?assert(maps:is_key(<<"raw_prerouting">>, ChainMap)).
 
 load_term_test() ->
-    {ok, [Config]} = file:consult("etc/firewall.term"),
+    {ok, [Config]} = file:consult("examples/scenarios/firewall.term"),
     ChainMap = nft_vm_config:load_term(Config),
     ?assert(maps:is_key(<<"inbound">>, ChainMap)),
     ?assertEqual(9, length(maps:get(<<"inbound">>, ChainMap))).
 
 load_chain_test() ->
-    {ok, Rules} = nft_vm_config:load_chain("etc/firewall.term", <<"inbound">>),
+    {ok, Rules} = nft_vm_config:load_chain("examples/scenarios/firewall.term", <<"inbound">>),
     ?assertEqual(9, length(Rules)).
 
 load_chain_unknown_test() ->
     {error, {unknown_chain, <<"nope">>, _}} =
-        nft_vm_config:load_chain("etc/firewall.term", <<"nope">>).
+        nft_vm_config:load_chain("examples/scenarios/firewall.term", <<"nope">>).
 
 %% --- Error tests ---
 
@@ -60,7 +60,7 @@ load_empty_config_test() ->
 %% --- Rule structure tests ---
 
 rules_are_expression_lists_test() ->
-    {ok, ChainMap} = nft_vm_config:load("etc/firewall.term"),
+    {ok, ChainMap} = nft_vm_config:load("examples/scenarios/firewall.term"),
     Rules = maps:get(<<"inbound">>, ChainMap),
     %% Each rule is a list of {Type, Opts} tuples
     lists:foreach(fun(Rule) ->
@@ -93,35 +93,35 @@ multi_rule_expansion_test() ->
 %% --- VM evaluation integration tests ---
 
 eval_ssh_accept_test() ->
-    {ok, ChainMap} = nft_vm_config:load("etc/firewall.term"),
+    {ok, ChainMap} = nft_vm_config:load("examples/scenarios/firewall.term"),
     Rules = maps:get(<<"inbound">>, ChainMap),
     Pkt = nft_vm_pkt:tcp(#{saddr => {10,0,0,1}}, #{dport => 22}),
     {Verdict, _Trace} = nft_vm:eval_chain(Rules, Pkt, drop),
     ?assertEqual(accept, Verdict).
 
 eval_http_accept_test() ->
-    {ok, ChainMap} = nft_vm_config:load("etc/firewall.term"),
+    {ok, ChainMap} = nft_vm_config:load("examples/scenarios/firewall.term"),
     Rules = maps:get(<<"inbound">>, ChainMap),
     Pkt = nft_vm_pkt:tcp(#{saddr => {10,0,0,1}}, #{dport => 80}),
     {Verdict, _} = nft_vm:eval_chain(Rules, Pkt, drop),
     ?assertEqual(accept, Verdict).
 
 eval_random_udp_drop_test() ->
-    {ok, ChainMap} = nft_vm_config:load("etc/firewall.term"),
+    {ok, ChainMap} = nft_vm_config:load("examples/scenarios/firewall.term"),
     Rules = maps:get(<<"inbound">>, ChainMap),
     Pkt = nft_vm_pkt:udp(#{saddr => {10,0,0,1}}, #{dport => 12345}),
     {Verdict, _} = nft_vm:eval_chain(Rules, Pkt, drop),
     ?assertEqual(drop, Verdict).
 
 eval_icmp_accept_test() ->
-    {ok, ChainMap} = nft_vm_config:load("etc/firewall.term"),
+    {ok, ChainMap} = nft_vm_config:load("examples/scenarios/firewall.term"),
     Rules = maps:get(<<"inbound">>, ChainMap),
     Pkt = nft_vm_pkt:icmp(#{saddr => {10,0,0,1}}, #{type => echo_request}),
     {Verdict, _} = nft_vm:eval_chain(Rules, Pkt, drop),
     ?assertEqual(accept, Verdict).
 
 eval_established_accept_test() ->
-    {ok, ChainMap} = nft_vm_config:load("etc/firewall.term"),
+    {ok, ChainMap} = nft_vm_config:load("examples/scenarios/firewall.term"),
     Rules = maps:get(<<"inbound">>, ChainMap),
     %% ct_state goes in Meta (3rd arg), not IpOpts
     Pkt = nft_vm_pkt:tcp(#{saddr => {10,0,0,1}}, #{dport => 9999}, #{ct_state => established}),
@@ -129,7 +129,7 @@ eval_established_accept_test() ->
     ?assertEqual(accept, Verdict).
 
 eval_set_lookup_test() ->
-    {ok, ChainMap} = nft_vm_config:load("etc/firewall.term"),
+    {ok, ChainMap} = nft_vm_config:load("examples/scenarios/firewall.term"),
     Rules = maps:get(<<"prerouting_ban">>, ChainMap),
     %% Banned IP should be dropped (set elements as 4-byte binaries)
     Pkt1 = nft_vm_pkt:tcp(#{saddr => {192,0,2,99}}, #{dport => 80}),

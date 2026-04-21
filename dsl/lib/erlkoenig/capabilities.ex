@@ -27,13 +27,14 @@ defmodule Erlkoenig.Capabilities do
   changes per capability; the kind dispatches the right injection.
   """
 
-  @type kind :: :socket | :network
+  @type kind :: :socket | :network | :dns_allowlist
 
   @type socket_spec :: %{
-          kind: :socket,
-          host_socket: String.t(),
-          container_socket: String.t(),
-          env_var: String.t()
+          required(:kind) => :socket,
+          required(:host_socket) => String.t(),
+          required(:container_socket) => String.t(),
+          required(:env_var) => String.t(),
+          optional(:env_value) => String.t()
         }
 
   @type network_spec :: %{
@@ -41,7 +42,12 @@ defmodule Erlkoenig.Capabilities do
           description: String.t()
         }
 
-  @type spec :: socket_spec() | network_spec()
+  @type dns_allowlist_spec :: %{
+          kind: :dns_allowlist,
+          description: String.t()
+        }
+
+  @type spec :: socket_spec() | network_spec() | dns_allowlist_spec()
 
   @doc """
   Directory the socket-kind capability sockets live in
@@ -70,6 +76,33 @@ defmodule Erlkoenig.Capabilities do
             "The container's /etc/resolv.conf is configured by the C " <>
             "runtime via the EK_ATTR_DNS_IP TLV; declaring this capability " <>
             "surfaces the dependency in the container term."
+      },
+      :"dns.allowlist" => %{
+        kind: :dns_allowlist,
+        description:
+          "L7 egress allow-list for the per-zone DNS resolver " <>
+            "(SPEC-AS-009). Takes a `:hosts` opt — a list of hostname " <>
+            "patterns. The container's source IP is registered against " <>
+            "this list at spawn time; lookups for non-matching names " <>
+            "are answered with authoritative NXDOMAIN and audit-logged. " <>
+            "Operator still owns the L4 nft policy that lets the " <>
+            "container reach the resolver in the first place — " <>
+            "Glasbox-Prinzip."
+      },
+      :"postgres.local" => %{
+        kind: :socket,
+        # Postgres always names its socket file `.s.PGSQL.<port>`
+        # inside its `unix_socket_directories`; the dir-bind we
+        # already do for socket-kind capabilities makes the file
+        # appear at the same absolute path on both sides.
+        host_socket: "/run/erlkoenig/.s.PGSQL.5432",
+        container_socket: "/run/erlkoenig/.s.PGSQL.5432",
+        # libpq reads PGHOST as a DIRECTORY when the value starts
+        # with `/` and looks for `.s.PGSQL.<PGPORT>` inside.
+        # Override the env_value so we expose the directory, not
+        # the socket file.
+        env_var: "PGHOST",
+        env_value: "/run/erlkoenig"
       }
     }
   end

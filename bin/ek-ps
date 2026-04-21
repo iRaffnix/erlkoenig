@@ -1,0 +1,103 @@
+#!/usr/bin/env escript
+%% -*- erlang -*-
+%% ek-ps — list running containers on a local erlkoenig BEAM.
+%%
+%% Connects to a distributed-named BEAM (default: `showcase@HOST`)
+%% via Erlang distribution, rpc-calls erlkoenig:list/0, prints a
+%% formatted table.
+%%
+%% Usage:
+%%   ek-ps                          # default: showcase@<short-hostname>
+%%   ek-ps node=app@host cookie=X   # override
+%%
+%% Needs to run on the same host as the target BEAM (epmd binds
+%% localhost by default). For cross-host operation, tunnel epmd
+%% + distribution ports via SSH or use inet_dist_listen_*.
+-mode(compile).
+
+main(Args) ->
+    {Target, Cookie} = parse_args(Args),
+
+    %% Start this escript as a named node so we can talk to others.
+    {ok, HostShort} = inet:gethostname(),
+    MyName = list_to_atom("ek-ps-" ++
+        integer_to_list(erlang:system_time(second)) ++ "@" ++ HostShort),
+    case net_kernel:start([MyName, shortnames]) of
+        {ok, _}                           -> ok;
+        {error, {already_started, _}}     -> ok
+    end,
+    erlang:set_cookie(node(), Cookie),
+
+    %% Connect + list.
+    case net_kernel:connect_node(Target) of
+        true -> ok;
+        _    ->
+            io:format(standard_error, "cannot reach ~s~n", [Target]),
+            io:format(standard_error, "  check: node running? cookie ~p?~n",
+                      [Cookie]),
+            halt(2)
+    end,
+
+    case rpc:call(Target, erlkoenig, list, [], 5000) of
+        {badrpc, Reason} ->
+            io:format(standard_error, "rpc failed: ~p~n", [Reason]),
+            halt(3);
+        Cts when is_list(Cts) ->
+            render(Cts, Target)
+    end,
+    halt(0).
+
+parse_args(Args) ->
+    parse_args(Args, default_node(), 'ek-showcase').
+
+parse_args([], Node, Cookie) -> {Node, Cookie};
+parse_args(["node=" ++ N | Rest], _, Cookie) ->
+    parse_args(Rest, list_to_atom(N), Cookie);
+parse_args(["cookie=" ++ C | Rest], Node, _) ->
+    parse_args(Rest, Node, list_to_atom(C));
+parse_args([Unknown | _], _, _) ->
+    io:format(standard_error, "unknown arg: ~s~n", [Unknown]),
+    halt(4).
+
+default_node() ->
+    {ok, Host} = inet:gethostname(),
+    list_to_atom("showcase@" ++ Host).
+
+%% ── render ───────────────────────────────────────────────────
+
+render([], Target) ->
+    io:format("no containers running on ~s~n", [Target]);
+render(Cts, Target) ->
+    io:format("~n  node: ~ts  (~p containers)~n~n", [Target, length(Cts)]),
+    io:format("  ~-24ts  ~-10ts  ~-14ts  ~-7ts  ~-22ts  ~ts~n",
+              ["NAME", "STATE", "IP", "OS-PID", "ID", "BINARY"]),
+    io:format("  ~ts~n", [lists:duplicate(110, $-)]),
+    lists:foreach(fun(C) -> render_row(C) end, Cts),
+    io:format("~n").
+
+render_row(C) ->
+    Name = truncate(to_str(maps:get(name, C, <<"-">>)), 24),
+    State = to_str(maps:get(state, C, <<"?">>)),
+    Ip = lists:flatten(fmt_ip(maps:get(net_info, C, #{}))),
+    OsPid = integer_to_list(maps:get(os_pid, C, 0)),
+    Id = truncate(to_str(maps:get(id, C, <<"">>)), 22),
+    Bin = shorten_path(to_str(maps:get(binary, C, <<"">>))),
+    io:format("  ~-24ts  ~-10ts  ~-14ts  ~-7ts  ~-22ts  ~ts~n",
+              [Name, State, Ip, OsPid, Id, Bin]).
+
+fmt_ip(#{ip := {A, B, C, D}}) ->
+    io_lib:format("~p.~p.~p.~p", [A, B, C, D]);
+fmt_ip(_) -> "-".
+
+to_str(B) when is_binary(B) -> binary_to_list(B);
+to_str(A) when is_atom(A)   -> atom_to_list(A);
+to_str(X)                    -> lists:flatten(io_lib:format("~p", [X])).
+
+truncate(S, Max) when length(S) =< Max -> S;
+truncate(S, Max) -> lists:sublist(S, Max - 1) ++ "…".
+
+shorten_path(P) ->
+    case filename:split(P) of
+        [] -> P;
+        L  -> filename:join([".../" ++ lists:last(L)])
+    end.

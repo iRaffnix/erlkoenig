@@ -83,6 +83,19 @@ build_batch(#{chains := Chains} = _Config, TableName) ->
 
 %% Translate DSL option keys to internal keys used by compile_generic_rule.
 %% Same mapping as erlkoenig_config:expand_nft_rule but without veth_of/replica_ips.
+%%
+%% Note: container-local nft runs in the container's netns and knows
+%% ONLY its own IP.  Cross-container references
+%% (`{:replica_ips, "backend", "api"}`) cannot be resolved here — the
+%% target pod's IPs may not even exist yet when this container
+%% spawns.  We fail loud rather than silently drop the constraint
+%% (which would widen the rule from "only from backend api" to
+%% "from any IP" — a Glasbox violation that turned a declared
+%% security boundary into no boundary at all).
+%%
+%% Fix for the operator: move cross-container refs into the host
+%% `nft_table` (lifts to the host netns, has full IpMap, resolves
+%% replica_ips at load-time).
 -spec translate_opts(map()) -> map().
 translate_opts(Opts) ->
     maps:fold(fun
@@ -92,6 +105,18 @@ translate_opts(Opts) ->
         (iifname, V, Acc) -> Acc#{iif => iolist_to_binary(V)};
         (oifname, V, Acc) -> Acc#{oif => iolist_to_binary(V)};
         (oifname_ne, V, Acc) -> Acc#{oif_neq => iolist_to_binary(V)};
+        (Key, {replica_ips, Pod, Ct}, _Acc)
+            when Key =:= ip_saddr; Key =:= ip_daddr ->
+            error({unresolvable_replica_ips_in_container_nft,
+                   #{key => Key, pod => Pod, container => Ct,
+                     hint => <<"cross-container replica_ips refs must "
+                               "live in host nft_table, not container-local "
+                               "nft (SPEC-EK-023 §4)">>}});
+        (Key, {veth_of, Pod, Ct}, _Acc)
+            when Key =:= iifname; Key =:= oifname; Key =:= oifname_ne ->
+            error({unresolvable_veth_of_in_container_nft,
+                   #{key => Key, pod => Pod, container => Ct,
+                     hint => <<"veth_of refs must live in host nft_table">>}});
         (ip_saddr, {A,B,C,D}, Acc) -> Acc#{saddr => {A,B,C,D,32}};
         (ip_saddr, {A,B,C,D,P}, Acc) -> Acc#{saddr => {A,B,C,D,P}};
         (ip_daddr, {A,B,C,D}, Acc) -> Acc#{daddr => {A,B,C,D,32}};
@@ -99,7 +124,21 @@ translate_opts(Opts) ->
         (ip_protocol, Proto, Acc) -> Acc#{protocol => Proto};
         (log_prefix, P, Acc) -> Acc#{log => P};
         (counter, C, Acc) -> Acc#{counter => iolist_to_binary(C)};
-        (K, V, Acc) -> Acc#{K => V}
+        %% conn_limit sugar: `max:` + `over:` + `saddr:` — the DSL
+        %% emits {:connlimit_drop, #{max: N}} for `conn_limit per_ip: N`.
+        (max, N, Acc) when is_integer(N) -> Acc#{max => N};
+        (over, N, Acc) when is_integer(N) -> Acc#{over => N};
+        %% Fail loud on unknown keys — a typo like `ip_saddrr` would
+        %% otherwise silently flow through and leave the rule weaker
+        %% than the operator declared (Glasbox violation).
+        (K, V, _Acc) ->
+            error({unknown_container_nft_rule_opt,
+                   #{key => K, value => V,
+                     hint => <<"unknown container-local nft option — "
+                               "check spelling against SPEC-EK-023 §3: "
+                               "ct_state, tcp_dport, udp_dport, iifname, "
+                               "oifname, oifname_ne, ip_saddr, ip_daddr, "
+                               "ip_protocol, log_prefix, counter, max, over">>}})
     end, #{}, Opts).
 
 build_msgs([], Seq, MsgAcc, SeqAcc) ->

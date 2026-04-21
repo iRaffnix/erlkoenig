@@ -40,14 +40,23 @@ All access is serialized through the gen_server to avoid races.
 %% Last  = broadcast - 1     (skip the broadcast).
 %% Cursor `next' walks First → Last; `free' is a recycle list of
 %% absolute integers between First and Last.
+%%
+%% `cooldown' holds recently-released IPs that are NOT yet eligible
+%% for re-allocation.  Necessary because the kernel IPVLAN slave in
+%% the dying container's netns is destroyed asynchronously after the
+%% gen_statem exit — if we re-hand-out the same IP immediately, the
+%% new container's `ip addr add` races the old slave and trips
+%% `EADDRINUSE (-98)`.  See finding_pod_sup_ip_reuse_race.md.
+-define(IP_COOLDOWN_MS, 500).
 -record(state, {
-    zone    :: atom(),
-    subnet  :: {byte(), byte(), byte(), byte()},
-    netmask :: 16..30,
-    first   :: non_neg_integer(),
-    last    :: non_neg_integer(),
-    next    :: non_neg_integer(),
-    free    :: [non_neg_integer()]
+    zone     :: atom(),
+    subnet   :: {byte(), byte(), byte(), byte()},
+    netmask  :: 16..30,
+    first    :: non_neg_integer(),
+    last     :: non_neg_integer(),
+    next     :: non_neg_integer(),
+    free     :: [non_neg_integer()],
+    cooldown :: [{non_neg_integer(), integer()}]  %% {Abs, EligibleAtMs}
 }).
 
 %%%===================================================================
@@ -143,7 +152,8 @@ build_state(ZoneName, {A, B, C, D}, Netmask) ->
            first = First,
            last  = Last,
            next  = First,
-           free  = []}.
+           free  = [],
+           cooldown = []}.
 
 register_zone_service(ZoneName) ->
     try erlkoenig_zone:register_service(ZoneName, ip_pool, self())
@@ -173,29 +183,59 @@ find_pool_for_ip({A, B, C, D} = Ip, [Zone | Rest]) ->
             find_pool_for_ip(Ip, Rest)
     end.
 
-handle_call(allocate, _From, #state{free = [H | T]} = S) ->
-    {reply, {ok, u32_to_ip(H)}, S#state{free = T}};
-handle_call(allocate, _From, #state{next = N, last = L} = S) when N > L ->
-    {reply, {error, exhausted}, S};
-handle_call(allocate, _From, #state{next = N} = S) ->
-    {reply, {ok, u32_to_ip(N)}, S#state{next = N + 1}};
+%% Every allocate opportunistically drains any cooldown entries
+%% whose timer has elapsed — this keeps the cooldown bounded and
+%% avoids requiring an explicit timer in state.
+handle_call(allocate, _From, S0) ->
+    S = drain_cooldown(S0),
+    case S#state.free of
+        [H | T] ->
+            {reply, {ok, u32_to_ip(H)}, S#state{free = T}};
+        [] ->
+            case S#state.next of
+                N when N > S#state.last ->
+                    {reply, {error, exhausted}, S};
+                N ->
+                    {reply, {ok, u32_to_ip(N)}, S#state{next = N + 1}}
+            end
+    end;
 
 handle_call(used_count, _From, #state{next = N, first = First,
-                                       free = Free} = S) ->
+                                       free = Free,
+                                       cooldown = Cooldown} = S) ->
     %% Allocated = (N - First) total handed out, minus recycled
-    {reply, (N - First) - length(Free), S}.
+    %% (in free or still cooling down).
+    {reply, (N - First) - length(Free) - length(Cooldown), S}.
 
 handle_cast({release, {A, B, C, D}},
-            #state{first = First, last = Last, free = Free} = S) ->
+            #state{first = First, last = Last, free = Free,
+                   cooldown = Cooldown} = S) ->
     Abs = (A bsl 24) bor (B bsl 16) bor (C bsl 8) bor D,
-    case Abs >= First andalso Abs =< Last andalso
-         not lists:member(Abs, Free) of
-        true  -> {noreply, S#state{free = [Abs | Free]}};
-        false -> {noreply, S}
+    AlreadyKnown = lists:member(Abs, Free)
+                   orelse lists:keymember(Abs, 1, Cooldown),
+    case Abs >= First andalso Abs =< Last andalso not AlreadyKnown of
+        true ->
+            Eligible = erlang:monotonic_time(millisecond) + ?IP_COOLDOWN_MS,
+            {noreply, S#state{cooldown = [{Abs, Eligible} | Cooldown]}};
+        false ->
+            {noreply, S}
     end.
 
 handle_info(_Msg, S) ->
     {noreply, S}.
+
+%% Move cooled-down IPs whose EligibleAt is in the past into `free`.
+drain_cooldown(#state{cooldown = []} = S) ->
+    S;
+drain_cooldown(#state{cooldown = CD, free = Free} = S) ->
+    Now = erlang:monotonic_time(millisecond),
+    {Ready, Still} = lists:partition(fun({_, E}) -> E =< Now end, CD),
+    case Ready of
+        [] -> S;
+        _  ->
+            ReadyIps = [A || {A, _} <- Ready],
+            S#state{cooldown = Still, free = Free ++ ReadyIps}
+    end.
 
 %%%===================================================================
 %%% Internal helpers

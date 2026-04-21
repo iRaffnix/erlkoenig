@@ -140,12 +140,24 @@ open_listen(Path) ->
     _ = file:delete(Path),
     case filelib:ensure_dir(Path) of
         ok ->
-            gen_tcp:listen(0,
-                [binary,
-                 {packet, line},
-                 {active, false},
-                 {reuseaddr, true},
-                 {ifaddr, {local, Path}}]);
+            case gen_tcp:listen(0,
+                   [binary,
+                    {packet, line},
+                    {active, false},
+                    {reuseaddr, true},
+                    {ifaddr, {local, Path}}]) of
+                {ok, _} = OK ->
+                    %% Containers bind-mount this socket dir and run
+                    %% as uid=65534 (nobody). Unix-socket connect
+                    %% requires `write` on the socket file; the default
+                    %% umask leaves it group+other read/exec only.
+                    %% Make it world-writable so any container that
+                    %% declared `requires :"journal.local"` can
+                    %% connect — the bind-mount IS the access grant.
+                    _ = file:change_mode(Path, 8#0666),
+                    OK;
+                Err -> Err
+            end;
         {error, _} = Err -> Err
     end.
 

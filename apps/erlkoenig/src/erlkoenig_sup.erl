@@ -100,6 +100,23 @@ init([]) ->
         restart => permanent,
         type => worker
     },
+    %% L7 egress: per-container DNS allowlist (SPEC-AS-009 §3, DNS half).
+    %% Starts before zone_sup so the named ETS table exists before any
+    %% `erlkoenig_dns` child binds UDP/53. Filter is fail-open — an
+    %% empty registration map is a no-op — so correctness does not
+    %% hinge on strict ordering, only cleanliness does.
+    DnsFilterSpec = #{
+        id => erlkoenig_dns_filter,
+        start => {erlkoenig_dns_filter, start_link, []},
+        restart => permanent,
+        type => worker
+    },
+    %% Note: SPEC-EK-028 phase 1 uses lifecycle-boundary audit
+    %% events (tracker_installed / tracker_torn_down) emitted
+    %% directly from erlkoenig_ct — no separate NFLOG listener
+    %% needed today. Phase 1-bis (per-packet audit across the
+    %% container netns boundary) will bring back a dedicated
+    %% subscriber here.
     ZoneSupSpec = #{
         id => erlkoenig_zone_sup,
         start => {erlkoenig_zone_sup, start_link, []},
@@ -191,7 +208,8 @@ init([]) ->
         false ->
             []
     end,
-    {ok, {SupFlags, [PgSpec, ZoneSpec, ZoneSupSpec, CgroupSpec, EventsSpec,
+    {ok, {SupFlags, [PgSpec, ZoneSpec, DnsFilterSpec, ZoneSupSpec,
+                     CgroupSpec, EventsSpec,
                      HealthSpec, AuditSpec, PkiSpec, NftSupSpec,
                      QuarantineSpec, AdmissionSpec,
                      VolumeStoreSpec, VolumeStatsSpec, PodSupSupSpec

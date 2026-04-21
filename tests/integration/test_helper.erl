@@ -149,7 +149,7 @@ boot() ->
 
 %% @doc Run a test step with name and fun.
 step(Name, Fun) ->
-    io:format("[....] ~s", [Name]),
+    io:format("[....] ~ts", [Name]),
     try Fun() of
         ok ->
             pass(Name);
@@ -160,18 +160,18 @@ step(Name, Fun) ->
             fail(Name, Reason)
     catch
         Class:Error:Stack ->
-            io:format("\r[~sFAIL~s] ~s~n  ~p:~p~n  ~p~n",
-                      [?RED, ?RESET, Name, Class, Error,
+            io:format("\r[~ts~ts~ts] ~ts~n  ~p:~p~n  ~p~n",
+                      [?RED, "FAIL", ?RESET, Name, Class, Error,
                        lists:sublist(Stack, 3)]),
             cleanup([]),
             halt(1)
     end.
 
 pass(Name) ->
-    io:format("\r[~sOK~s  ] ~s~n", [?GREEN, ?RESET, Name]).
+    io:format("\r[~tsOK~ts  ] ~ts~n", [?GREEN, ?RESET, Name]).
 
 fail(Name, Reason) ->
-    io:format("\r[~sFAIL~s] ~s: ~p~n", [?RED, ?RESET, Name, Reason]),
+    io:format("\r[~tsFAIL~ts] ~ts: ~p~n", [?RED, ?RESET, Name, Reason]),
     cleanup([]),
     halt(1).
 

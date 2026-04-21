@@ -1251,15 +1251,45 @@ is_allowlist(Name) ->
     binary:match(Name, <<"allow">>) =/= nomatch.
 
 %% --- Internal: Build initial set elements ---
+%%
+%% Regular point-value sets use add_elems/5 with a list of keys.
+%% Interval-flagged sets (`flags => [interval]`) carry CIDR /
+%% range strings as elements; each is expanded into a
+%% `{StartBin, EndBin}` pair and loaded via add_range_elems/5 so
+%% the kernel sees one KEY + KEY_END per entry.
 
 -spec build_set_elems(binary(), tuple()) -> [fun()].
-build_set_elems(Table, {SetName, SetType, #{elements := Elements}}) when
+build_set_elems(Table, {SetName, SetType, #{elements := Elements} = Opts}) when
     is_list(Elements), Elements =/= []
 ->
-    Keys = normalize_set_elements(Elements, SetType),
-    [fun(S) -> nft_set_elem:add_elems(?INET, Table, ensure_binary(SetName), Keys, S) end];
+    SetBin = ensure_binary(SetName),
+    case lists:member(interval, maps:get(flags, Opts, [])) of
+        true when SetType =:= ipv4_addr ->
+            Ranges = [parse_range(E) || E <- Elements],
+            [fun(S) ->
+                 nft_set_elem:add_range_elems(?INET, Table, SetBin,
+                                               Ranges, S)
+             end];
+        _ ->
+            Keys = normalize_set_elements(Elements, SetType),
+            [fun(S) ->
+                 nft_set_elem:add_elems(?INET, Table, SetBin, Keys, S)
+             end]
+    end;
 build_set_elems(_Table, _SetSpec) ->
     [].
+
+%% Strict: `parse_range/1` raises on bad input. The DSL already
+%% validates CIDR shape at compile time (`nft_cidr_set`), so
+%% reaching this with garbage means someone bypassed the DSL and
+%% wrote a hand-crafted term — a loud failure is preferable to
+%% silently skipping the element and loading an empty allow-list.
+-spec parse_range(term()) -> {binary(), binary()}.
+parse_range(E) ->
+    case erlkoenig_nft_ip:parse_cidr4(E) of
+        {ok, Range} -> Range;
+        {error, _}  -> error({bad_cidr_element, E})
+    end.
 
 -spec normalize_set_elements([term()], atom()) -> [binary()].
 normalize_set_elements(Elements, ipv4_addr) ->

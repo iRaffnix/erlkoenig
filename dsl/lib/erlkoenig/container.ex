@@ -160,9 +160,25 @@ defmodule Erlkoenig.Container do
   """
   defmacro requires(capability) do
     quote do
-      @ct_current Builder.add_requires(@ct_current, unquote(capability))
+      @ct_current Builder.add_requires(@ct_current,
+                                       unquote(capability), [])
     end
   end
+
+  @doc "`requires/2` — declare a capability with parameterised options."
+  defmacro requires(capability, opts) do
+    quote do
+      @ct_current Builder.add_requires(@ct_current,
+                                       unquote(capability),
+                                       unquote(opts))
+    end
+  end
+
+  # `conn_limit` deliberately not exposed in the single-container DSL.
+  # This DSL builds container terms directly; it has no inline `nft`
+  # block for a conn_limit rule to live in. If future callers need a
+  # Single-Container nft shape, add it at the chain level like
+  # Erlkoenig.Stack.conn_limit/1 — never at container level.
 
   # --- Volumes (persistent bind-mount directories) ---
 

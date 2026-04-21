@@ -252,13 +252,18 @@ encode_cmd_spawn(Opts) when is_map(Opts) ->
     Args = maps:get(args, Opts, []),
     Attrs5 = Attrs4 ++ [tlv_str(?EK_ATTR_ARG, iolist_to_binary(A)) || A <- Args],
 
-    %% Env (each as "key\0val")
-    Env = maps:get(env, Opts, []),
+    %% Env (each as "key\0val").  Accept either a list of {K,V}
+    %% tuples (hand-built opts) or a map (capability injection
+    %% returns a map; DSL emission flattens to map too).
+    EnvRaw = maps:get(env, Opts, []),
+    EnvList = if is_map(EnvRaw) -> maps:to_list(EnvRaw);
+                 true -> EnvRaw
+              end,
     Attrs6 = Attrs5 ++ lists:map(fun({K, V}) ->
         KB = iolist_to_binary(K),
         VB = iolist_to_binary(V),
         tlv_str(?EK_ATTR_ENV, <<KB/binary, 0, VB/binary>>)
-    end, Env),
+    end, EnvList),
 
     %% Rootfs size
     Attrs7 = case maps:get(rootfs_mb, Opts, 0) of

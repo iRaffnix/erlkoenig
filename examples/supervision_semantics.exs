@@ -83,6 +83,8 @@ defmodule SupervisionSemantics do
       replicas: 3,
       restart: :permanent do
 
+      requires :"dns.local"
+
       volume "/data", persist: "svc-data"
     end
   end

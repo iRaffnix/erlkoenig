@@ -104,6 +104,9 @@ defmodule Erlkoenig.Pod.Builder do
           "Allowed: #{inspect(@valid_restart_policies)}"
     end
 
+    validate_signature!(name, opts[:signature])
+    validate_files!(name, opts[:files])
+
     ct = %{
       name: name,
       binary: to_string(binary),
@@ -118,11 +121,37 @@ defmodule Erlkoenig.Pod.Builder do
       gid: opts[:gid] || 65534,
       args: opts[:args] || [],
       caps: opts[:caps] || [],
+      env: opts[:env] || %{},
+      signature: opts[:signature],
+      files: opts[:files] || %{},
       volumes: [],
+      socket_mounts: [],
+      requires: [],
       publish: [],
       stream: nil
     }
     %{pod | current_ct: ct}
+  end
+
+  # --- conn_limit (SPEC-EK-028 phase 1, tracker column `conn_cur`) ---
+  #
+  # Chain-scoped. Validates opts, then re-enters the normal nft_rule
+  # emission path so the resulting `{:connlimit_drop, %{max: N}}`
+  # entry shows up in the chain's rule list exactly like a hand-
+  # written `nft_rule :connlimit_drop, max: 100`. Glasbox: one DSL
+  # line becomes exactly one nft rule, visible in place.
+
+  def add_conn_limit(%__MODULE__{current_nft_chain: nil}, _opts) do
+    raise CompileError,
+      description:
+        "conn_limit must appear inside an `nft do input ... end` " <>
+        "(or output) block — it compiles to a chain rule, not to " <>
+        "a hidden synthesis"
+  end
+
+  def add_conn_limit(%__MODULE__{} = pod, opts) when is_list(opts) do
+    {action, rule_opts} = Erlkoenig.Nft.ChainBuilder.compile_conn_limit!(opts)
+    add_nft_rule(pod, action, rule_opts)
   end
 
   # --- Volume lifecycle (called from Erlkoenig.Stack.volume macro) ---
@@ -134,6 +163,116 @@ defmodule Erlkoenig.Pod.Builder do
 
   def add_volume(%__MODULE__{current_ct: ct} = pod, entry) when is_map(entry) do
     %{pod | current_ct: Map.update(ct, :volumes, [entry], &(&1 ++ [entry]))}
+  end
+
+  # --- Capability requirements (called from Erlkoenig.Stack.requires macro) ---
+
+  def add_requires(%__MODULE__{current_ct: nil}, _capability, _opts) do
+    raise CompileError,
+      description: "requires must be declared inside a container block"
+  end
+
+  def add_requires(%__MODULE__{current_ct: ct} = pod, capability, opts)
+      when is_atom(capability) and is_list(opts) do
+    if capability in ct.requires do
+      pod
+    else
+      spec = Erlkoenig.Capabilities.fetch!(capability)
+      %{pod | current_ct: apply_capability(ct, capability, spec, opts)}
+    end
+  end
+
+  defp apply_capability(ct, capability, %{kind: :network}, _opts) do
+    %{ct | requires: ct.requires ++ [capability]}
+  end
+
+  defp apply_capability(ct, capability, %{kind: :socket} = spec, _opts) do
+    dir = Erlkoenig.Capabilities.socket_dir()
+    dir_mount = %{host: dir, container: dir, read_only: false}
+
+    socket_mounts =
+      if Enum.any?(ct.socket_mounts, &(&1.host == dir)) do
+        ct.socket_mounts
+      else
+        ct.socket_mounts ++ [dir_mount]
+      end
+
+    # libpq + similar tools want a directory in their env var, not
+    # the socket-file path. Capabilities override via :env_value.
+    env_value = Map.get(spec, :env_value, spec.container_socket)
+
+    %{ct |
+       requires: ct.requires ++ [capability],
+       socket_mounts: socket_mounts,
+       env: Map.put(ct.env, spec.env_var, env_value)}
+  end
+
+  defp apply_capability(ct, capability, %{kind: :dns_allowlist}, opts) do
+    hosts =
+      case Keyword.fetch(opts, :hosts) do
+        {:ok, list} when is_list(list) and list != [] ->
+          Enum.map(list, &validate_host_pattern!/1)
+
+        _ ->
+          raise CompileError,
+            description:
+              "requires :#{capability} needs a non-empty :hosts list, " <>
+                "e.g. requires :\"dns.allowlist\", hosts: [\"api.openai.com\"]"
+      end
+
+    # We carry the allowlist as a top-level field on the container
+    # term — separate from `:requires` so the existing readers don't
+    # need to learn a new shape. The Erlang side reads `:dns_allowlist`
+    # at spawn time and registers it against the container's IP.
+    ct
+    |> Map.put(:requires, ct.requires ++ [capability])
+    |> Map.put(:dns_allowlist, hosts)
+  end
+
+  # Hostname pattern: bare hostname or `*.<rest>` wildcard.  We accept
+  # binaries, atoms, and charlists; everything else is a compile error
+  # so typos don't reach the runtime as silent allow-everything.
+  #
+  # Why strict validation: the DNS filter matches on the Question
+  # Name of each DNS query verbatim.  If the operator writes
+  # `"http://api.example.com"` (a URL, not a hostname) into the
+  # allowlist, NO DNS query will ever match it because queries don't
+  # carry schemes — the container is silently blackholed.
+  defp validate_host_pattern!(h) when is_binary(h) do
+    if valid_host_pattern?(h), do: h, else: bad_host!(h)
+  end
+  defp validate_host_pattern!(h) when is_atom(h) do
+    validate_host_pattern!(Atom.to_string(h))
+  end
+  defp validate_host_pattern!(h) when is_list(h) do
+    if List.ascii_printable?(h) do
+      validate_host_pattern!(List.to_string(h))
+    else
+      bad_host!(h)
+    end
+  end
+  defp validate_host_pattern!(h), do: bad_host!(h)
+
+  # A DNS-filter-matchable pattern: optional `*.` wildcard followed
+  # by one-or-more labels separated by `.`.  Each label is 1-63
+  # chars of letters/digits/hyphens, not starting or ending in
+  # hyphen.  Total length ≤253.
+  defp valid_host_pattern?(s) when is_binary(s) do
+    byte_size(s) > 0 and byte_size(s) <= 253 and
+      Regex.match?(
+        ~r/^\*\.(([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)(\.([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?))+)$|^(([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)(\.([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?))*)$/,
+        s
+      )
+  end
+
+  defp bad_host!(h) do
+    raise CompileError,
+      description:
+        "dns.allowlist host pattern must be a bare hostname or `*.<rest>` " <>
+          "wildcard (no scheme, no path, no spaces), got #{inspect(h)}.  " <>
+          "The DNS filter matches DNS query names verbatim — URLs or " <>
+          "patterns with non-hostname characters will never match, " <>
+          "silently blackholing all container egress."
   end
 
   defp require_opt!(opts, key, ct_name, hint) do
@@ -331,7 +470,9 @@ defmodule Erlkoenig.Pod.Builder do
         caps: ct.caps
       }
 
-      ct_term = if ct.image, do: Map.put(ct_term, :image, ct.image), else: ct_term
+      # Runtime convention is `:image_path` (see erlkoenig_config:build_spawn_opts).
+      # The DSL option is still `image:` for operator ergonomics.
+      ct_term = if ct.image, do: Map.put(ct_term, :image_path, ct.image), else: ct_term
 
       ct_term = if ct[:publish] != nil and ct[:publish] != [] do
         publish_term = Enum.map(ct.publish, fn pub ->
@@ -362,6 +503,48 @@ defmodule Erlkoenig.Pod.Builder do
         ct_term
       end
 
+      # Capability declarations and their injections.
+      ct_term = if ct[:requires] != nil and ct[:requires] != [] do
+        Map.put(ct_term, :requires, ct.requires)
+      else
+        ct_term
+      end
+
+      ct_term = if ct[:socket_mounts] != nil and ct[:socket_mounts] != [] do
+        Map.put(ct_term, :socket_mounts, ct.socket_mounts)
+      else
+        ct_term
+      end
+
+      ct_term = case ct[:dns_allowlist] do
+        nil -> ct_term
+        []  -> ct_term
+        hosts -> Map.put(ct_term, :dns_allowlist, hosts)
+      end
+
+      ct_term = if ct[:env] != nil and ct[:env] != %{} do
+        Map.put(ct_term, :env, ct.env)
+      else
+        ct_term
+      end
+
+      # Signature gate (SPEC-EK-017). Two shapes:
+      #   signature: :required   → runtime enforces trusted sig against installed roots
+      #   signature: "/path.sig" → explicit detached signature file
+      ct_term = case ct[:signature] do
+        nil       -> ct_term
+        :required -> Map.put(ct_term, :signature_required, true)
+        path when is_binary(path) or is_list(path) ->
+          Map.put(ct_term, :sig_path, to_string(path))
+      end
+
+      # Injected files (SPEC-EK-024 §4). Map of container-path → contents.
+      ct_term = if is_map(ct[:files]) and ct[:files] != %{} do
+        Map.put(ct_term, :files, ct.files)
+      else
+        ct_term
+      end
+
       ct_term
       |> Enum.reject(fn {_k, v} -> v == nil or v == [] or v == %{} end)
       |> Map.new()
@@ -372,5 +555,35 @@ defmodule Erlkoenig.Pod.Builder do
       strategy: pod.strategy,
       containers: containers
     }
+  end
+
+  # Validators — fail at compile time so the operator sees the error
+  # at `mix compile` rather than at container spawn.
+
+  defp validate_signature!(_name, nil), do: :ok
+  defp validate_signature!(_name, :required), do: :ok
+  defp validate_signature!(_name, path) when is_binary(path), do: :ok
+  defp validate_signature!(name, other) do
+    raise CompileError,
+      description: "container #{inspect(name)}: signature: must be " <>
+        ":required or a string path, got #{inspect(other)}"
+  end
+
+  defp validate_files!(_name, nil), do: :ok
+  defp validate_files!(name, files) when is_map(files) do
+    Enum.each(files, fn
+      {path, content} when (is_binary(path) or is_list(path)) and
+                            (is_binary(content) or is_list(content)) -> :ok
+      {path, content} ->
+        raise CompileError,
+          description: "container #{inspect(name)}: files entry " <>
+            "#{inspect(path)} → #{inspect(content)}: both key and " <>
+            "value must be strings"
+    end)
+  end
+  defp validate_files!(name, other) do
+    raise CompileError,
+      description: "container #{inspect(name)}: files: must be a map " <>
+        "of \"/path\" => \"contents\", got #{inspect(other)}"
   end
 end

@@ -42,7 +42,11 @@ integration, operator procedures.
 
 ### Part IV — Service Capabilities
 
-19. [`:journal.local`](19-journal-local.md) — Tamper-evident structured log forwarder on the audit hash chain
+19. [Service Capabilities — `:journal.local` & `:dns.local`](19-journal-local.md) — Tamper-evident structured log forwarder on the audit hash chain + per-zone DNS resolver, with the `requires` macro that wires both
+20. [Customer-side Audit Verification](20-audit-verifier.md) — A 2.4 MB statically-linked Go binary the customer hands to their auditor; recomputes hash chain, Ed25519 signatures, and HMAC seal offline
+21. [Full-Stack Use-Case: case_mgmt](21-case-mgmt.md) — Real workload (Go binary, Postgres, journal) running inside a container; peer-auth via bind-mounted socket, every mutation tamper-evident, externally re-verifiable
+22. [DNS Egress Allowlist — `:dns.allowlist`](22-dns-egress-allowlist.md) — L7 name filter as a declarative capability, operator-owned L4 stays intact (Glasbox); NXDOMAIN + audit chain for denied lookups; foundation for SNI/TLS-pin phases of SPEC-AS-009
+23. [Edge Primitives: CIDR Sets and Connection Limits](23-edge-primitives.md) — `nft_cidr_set` and `conn_limit per_ip / global` in the DSL; nginx/HAProxy ergonomics over nft without giving up Glasbox; first concrete column of the SPEC-EK-028 Tracker frame with signed `tracker_installed`/`tracker_torn_down` audit events
 
 ## How to read
 

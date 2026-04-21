@@ -43,6 +43,8 @@ Usage:
     get_counter_reset/4, get_counter_reset/5,
     get_all_counters/3, get_all_counters/4
 ]).
+%% Exposed for fuzzing — pure parsers of kernel responses.
+-export([parse_obj_response/1, parse_dump/2]).
 
 -include("nft_constants.hrl").
 
@@ -190,16 +192,22 @@ query_counter(Sock, MsgType, Family, Table, Name, Seq) ->
 parse_obj_response(
     <<Len:32/little, Type:16/little, _Flags:16/little, _Seq:32/little, _Pid:32/little, Rest/binary>>
 ) when
-    Len >= 20
+    Len >= 20, Len - 16 =< byte_size(Rest)
 ->
     Subsys = Type bsr 8,
     case Subsys of
         ?NFNL_SUBSYS_NFTABLES ->
             PayloadLen = Len - 16,
             <<Payload:PayloadLen/binary, _/binary>> = Rest,
-            <<_NfGenMsg:4/binary, AttrBin/binary>> = Payload,
-            Attrs = nfnl_attr:decode(AttrBin),
-            {ok, parse_counter_response(Attrs)};
+            case Payload of
+                <<_NfGenMsg:4/binary, AttrBin/binary>> ->
+                    try nfnl_attr:decode(AttrBin) of
+                        Attrs -> {ok, parse_counter_response(Attrs)}
+                    catch _:_ -> {error, invalid_response}
+                    end;
+                _ ->
+                    {error, invalid_response}
+            end;
         _ ->
             {error, unexpected_subsystem}
     end;
@@ -217,7 +225,11 @@ parse_counter_response(Attrs) ->
     M2 =
         case lists:keyfind(?NFTA_OBJ_DATA, 1, Attrs) of
             {_, nested, Data} -> parse_counter_data(M1, Data);
-            {_, Bin} when is_binary(Bin) -> parse_counter_data(M1, nfnl_attr:decode(Bin));
+            {_, Bin} when is_binary(Bin) ->
+                try nfnl_attr:decode(Bin) of
+                    Decoded -> parse_counter_data(M1, Decoded)
+                catch _:_ -> M1
+                end;
             _ -> M1
         end,
     M2.
@@ -274,19 +286,23 @@ parse_dump(<<Len:32/little, ?NLMSG_DONE:16/little, _/binary>>, Acc) when
 parse_dump(
     <<Len:32/little, Type:16/little, _:16/little, _:32/little, _:32/little, Rest/binary>>, Acc
 ) when
-    Len >= 20
+    Len >= 20, Len - 16 =< byte_size(Rest)
 ->
     Subsys = Type bsr 8,
     PayloadLen = Len - 16,
     <<Payload:PayloadLen/binary, Tail/binary>> = Rest,
     case Subsys of
-        ?NFNL_SUBSYS_NFTABLES ->
+        ?NFNL_SUBSYS_NFTABLES when byte_size(Payload) >= 4 ->
             <<_:4/binary, AttrBin/binary>> = Payload,
-            parse_dump(Tail, [nfnl_attr:decode(AttrBin) | Acc]);
+            try nfnl_attr:decode(AttrBin) of
+                Attrs -> parse_dump(Tail, [Attrs | Acc])
+            catch _:_ -> parse_dump(Tail, Acc)
+            end;
         _ ->
             parse_dump(Tail, Acc)
     end;
-parse_dump(<<Len:32/little, _/binary>> = Bin, Acc) when Len >= 16 ->
+parse_dump(<<Len:32/little, _/binary>> = Bin, Acc)
+  when Len >= 16, Len =< byte_size(Bin) ->
     <<_:Len/binary, Tail/binary>> = Bin,
     parse_dump(Tail, Acc);
 parse_dump(_, Acc) ->

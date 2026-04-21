@@ -465,6 +465,44 @@ encode_payload({container_metrics, Id, #{type := Type}}) ->
 encode_payload({container_metrics, _Id, _}) ->
     skip;
 
+%% ── Audit chain (SPEC-AS-005) ─────────────────────────────────
+%% Routing: audit.chain.<event> — fits the dashboard's 3-part
+%% category.entity.event schema (entity=chain).
+
+encode_payload({audit_sealed, #{sealed_path := Path, event_count := EC,
+                                byte_count := BC, anchor := Anchor}}) ->
+    {ok, <<"audit.chain.sealed">>, #{
+        <<"sealed_path">> => ensure_binary(Path),
+        <<"event_count">> => EC,
+        <<"byte_count">>  => BC,
+        <<"anchor">>      => ensure_binary(Anchor)
+    }};
+
+encode_payload({audit_chain_break, #{path := Path, line := Line, reason := R}}) ->
+    {ok, <<"audit.chain.broken">>, #{
+        <<"path">>   => ensure_binary(Path),
+        <<"line">>   => Line,
+        <<"reason">> => ensure_binary(io_lib:format("~p", [R]))
+    }};
+
+%% ── Capability framework (declarative requires + strict mode) ─
+%% Routing: capability.<event>
+%%
+%% Emitted when strict_capabilities is on AND a container spawned
+%% without declaring a capability the runtime would otherwise have
+%% provided. Today this fires for `:dns.local` opt-out (container
+%% gets no /etc/resolv.conf). Operators usually want to see this -
+%% the most common cause is "operator forgot to add `requires`
+%% during the migration".
+encode_payload({capability_unmet, Id, Name, Capability, Action}) ->
+    NameBin = ensure_binary(Name),
+    {ok, <<"capability.unmet.", (atom_to_binary(Capability))/binary>>, #{
+        <<"id">>         => ensure_binary(Id),
+        <<"name">>       => NameBin,
+        <<"capability">> => atom_to_binary(Capability),
+        <<"action">>     => atom_to_binary(Action)
+    }};
+
 %% Unknown
 encode_payload(Event) ->
     logger:debug("erlkoenig_amqp_codec: skipping unknown event: ~p", [Event]),

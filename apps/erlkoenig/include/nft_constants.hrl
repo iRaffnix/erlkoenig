@@ -251,7 +251,15 @@
 
 -define(NFTA_SET_ELEM_KEY, 1).
 -define(NFTA_SET_ELEM_DATA, 2).
+-define(NFTA_SET_ELEM_FLAGS, 3).
 -define(NFTA_SET_ELEM_TIMEOUT, 4).
+
+%% NFT_SET_ELEM_INTERVAL_END flag value for NFTA_SET_ELEM_FLAGS:
+%% marks an element as the (exclusive) upper bound of a range
+%% rather than a point membership. Used by nftables' internal
+%% interval-set encoding — each range [a, b] is represented by
+%% two elements: key=a (no flags) and key=b+1 (flags=INTERVAL_END).
+-define(NFT_SET_ELEM_INTERVAL_END, 1).
 
 %% ===================================================================
 %% NFTA_OBJ_*

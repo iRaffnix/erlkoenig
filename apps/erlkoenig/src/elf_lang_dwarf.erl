@@ -32,7 +32,9 @@ Supports DWARF-4 and DWARF-5 compilation unit headers.
 -export([
     has_debug_info/1,
     compilation_units/1,
-    source_files/1
+    source_files/1,
+    parse_line_units/3,
+    parse_line_unit_files/2
 ]).
 
 -export_type([dwarf_cu/0]).

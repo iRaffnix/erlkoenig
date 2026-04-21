@@ -40,7 +40,8 @@ See erlkoenig_ebpfd/include/ek_ebpfd_proto.h for the spec.
     get_status/0,
     list_routes/0,
     list_services/0,
-    list_backends/3
+    list_backends/3,
+    decode_attrs/1
 ]).
 
 %% -- Protocol constants -------------------------------------------

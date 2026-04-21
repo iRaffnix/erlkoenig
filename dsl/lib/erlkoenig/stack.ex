@@ -420,6 +420,118 @@ defmodule Erlkoenig.Stack do
     end
   end
 
+  @doc """
+  Declare a service-capability requirement for the enclosing container.
+
+  ## Example
+
+      container "api", binary: "/opt/bin/api", zone: "containers", ... do
+        requires :"dns.local"          # network capability — declarative
+        requires :"journal.local"      # socket capability — auto-mount + env
+
+        nft do
+          # ...
+        end
+      end
+
+  Behaviour follows `Erlkoenig.Capabilities.fetch!/1`:
+
+    * `:socket`-kind capabilities pull in a directory bind-mount of
+      `/run/erlkoenig/` and inject the per-capability env var
+      pointing at the in-container socket path.
+    * `:network`-kind capabilities are recorded in `:requires` only;
+      the runtime configures the network path (e.g. `/etc/resolv.conf`
+      for DNS) regardless of declaration.
+
+  Operators reading the stack file see at a glance which workloads
+  depend on which node-local services. Unknown capability names
+  raise at compile time.
+  """
+  defmacro requires(capability) do
+    quote do
+      var!(ek_pod_builder) =
+        Erlkoenig.Pod.Builder.add_requires(var!(ek_pod_builder),
+                                           unquote(capability), [])
+    end
+  end
+
+  @doc """
+  `conn_limit/1` — bound the concurrent connection count keyed by
+  source IP. SPEC-EK-028 Tracker column #1.
+
+  **Chain-scoped.** Must appear INSIDE an `nft do input ... end`
+  (container-inline form) or an `nft_table ... base_chain ...`
+  block (host/table form). This keeps Glasbox: the rule shows up in
+  the nft chain exactly where the operator placed it, including
+  policy and ordering. Zero auto-synthesis.
+
+  Compiles to a single `connlimit_drop` nft rule: `ct count over N
+  saddr drop` — matching the kernel when the source's concurrent
+  conntrack count exceeds `N`.
+
+  ## Options
+
+  | Option | Type | Required | Description |
+  |--------|------|----------|-------------|
+  | `per_ip:` | integer | yes | Cap concurrent connections per source IP |
+
+  ## Example
+
+      container "api", binary: "/opt/bin/api" do
+        nft do
+          input policy: :drop do
+            nft_rule :accept, ct_state: [:established, :related]
+            nft_rule :accept, tcp_dport: 8080
+            conn_limit per_ip: 100
+          end
+        end
+      end
+
+  The `conn_limit` line is visible in the input chain next to the
+  other accept rules. An operator running `ek inspect nft <ct>`
+  sees the generated `ct count over 100 saddr drop` line right
+  where the DSL placed it.
+
+  ## What this does NOT do
+
+  * No per-rejection audit-chain event in phase 1 — that needs
+    cross-netns NFLOG dispatch (SPEC-EK-028 §8bis, phase 1-bis).
+  * No global (unkeyed) variant — `global:` was removed from the
+    spec after review: the kernel's `listen()` backlog already
+    provides per-container total-conn backpressure, so a second
+    nft-layer cap was ceremony. Re-add when a real use case
+    surfaces.
+  """
+  defmacro conn_limit(opts) do
+    if Module.get_attribute(__CALLER__.module, :ek_container_nft) do
+      quote do
+        var!(ek_pod_builder) = Erlkoenig.Pod.Builder.add_conn_limit(
+          var!(ek_pod_builder), unquote(opts))
+      end
+    else
+      quote do
+        var!(ek_nft_chain) = Erlkoenig.Nft.ChainBuilder.add_conn_limit(
+          var!(ek_nft_chain), unquote(opts))
+      end
+    end
+  end
+
+  @doc """
+  `requires/2` — declare a capability with options.
+
+  Used by capabilities whose injection is parameterised. Today only
+  `:"dns.allowlist"` consumes opts (`hosts: [...]`); other capabilities
+  accept and ignore opts.
+  """
+  defmacro requires(capability, opts) do
+    quote do
+      var!(ek_pod_builder) =
+        Erlkoenig.Pod.Builder.add_requires(var!(ek_pod_builder),
+                                           unquote(capability),
+                                           unquote(opts))
+    end
+  end
+
   # ═══════════════════════════════════════════════════════════
   # volume — persistent bind-mount directories
   # ═══════════════════════════════════════════════════════════
@@ -1406,6 +1518,65 @@ defmodule Erlkoenig.Stack do
   end
 
   @doc """
+  Declare a CIDR allow-/block-list set in one line.
+
+  Sugar over `nft_set name, :ipv4_addr, flags: [:interval],
+  elements: [cidrs]`. The `interval` flag tells the kernel this
+  set stores ranges rather than point values, so `ip saddr @name`
+  matches any IP inside any listed CIDR.
+
+  Operator still writes the rule that consumes the set — the
+  set definition carries no policy on its own.
+
+  ## Arguments
+
+  | Argument | Type | Description |
+  |----------|------|-------------|
+  | `name` | string | Set name; referenced by rules via `set: "name"` |
+  | `cidrs` | `[String.t()]` | CIDR strings (`"10.0.0.0/8"`) and/or single IPs (`"192.168.42.5"`) |
+
+  ## Compile-time checks
+
+  - Empty `cidrs` list → `CompileError`
+  - Non-binary entry → `CompileError`
+  - Entry not matching an IPv4-with-optional-prefix pattern →
+    `CompileError`
+
+  Actual CIDR well-formedness (valid mask, no host bits set, etc.)
+  is deferred to the runtime — nothing is gained by replicating
+  that logic in the DSL.
+
+  ## Examples
+
+      nft_table :inet, "erlkoenig" do
+        nft_cidr_set "trusted", [
+          "10.0.0.0/8",
+          "192.168.0.0/16",
+          "203.0.113.42"
+        ]
+
+        base_chain "input", hook: :input, type: :filter,
+          priority: :filter, policy: :drop do
+          nft_rule :accept, ct_state: [:established, :related]
+          nft_rule :accept, set: "trusted"
+        end
+      end
+
+  Compiles to the equivalent of:
+
+      nft_set "trusted", :ipv4_addr,
+        flags: [:interval],
+        elements: ["10.0.0.0/8", "192.168.0.0/16", "203.0.113.42"]
+  """
+  defmacro nft_cidr_set(name, cidrs) do
+    quote do
+      var!(ek_nft_table) =
+        Erlkoenig.Nft.TableBuilder.add_cidr_set(
+          var!(ek_nft_table), unquote(name), unquote(cidrs))
+    end
+  end
+
+  @doc """
   Declare a flowtable for hardware/software fast-path offload.
 
   Flowtables bypass the full nftables evaluation pipeline for
@@ -1517,11 +1688,18 @@ defmodule Erlkoenig.Stack do
         port: 8443
   """
   defmacro nft_map(name, key_type, data_type, opts \\ []) do
-    entries = Keyword.get(opts, :entries, [])
+    # Accept both shapes:
+    #   nft_map "m", :t, :t, [entries: [{k, v}, ...]]   (keyword form)
+    #   nft_map "m", :t, :t, [{k, v}, {k, v}, ...]      (positional list)
+    #   nft_map "m", :t, :t, {:replica_ips, "p", "c"}   (single ref)
+    # Previously only keyword form was read — positional lists were
+    # silently dropped (emitted as entries: []), leaving operators
+    # with empty maps in the kernel.
     quote do
       var!(ek_nft_table) = Erlkoenig.Nft.TableBuilder.add_map(
         var!(ek_nft_table), unquote(name), unquote(key_type),
-        unquote(data_type), unquote(entries))
+        unquote(data_type),
+        Erlkoenig.Nft.TableBuilder.normalize_map_entries(unquote(opts)))
     end
   end
 

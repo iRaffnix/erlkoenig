@@ -35,6 +35,8 @@ Usage:
 -export([apply_nft_tables/5]).
 -ifdef(TEST).
 -export([resolve_host_refs/2, find_all_replica_ips/3]).
+%% Exposed for fuzzing — pure parser.
+-export([parse_container_name/1]).
 -endif.
 
 %% ETS table for tracking loaded configs
@@ -855,8 +857,11 @@ apply_nft_table(#{name := TableName, chains := Chains} = Table, VethMap, Replica
     %% references them via `set:` lookup, otherwise the batch fails with
     %% ENOENT. Supports 2-tuple {Name, Type} and 3-tuple {Name, Type, Opts}
     %% forms (Opts may carry flags like [timeout] and an initial timeout).
-    SetMsgs = [compile_set_msg(FamilyNum, TableBin, SetDef)
-               || SetDef <- maps:get(sets, Table, [])],
+    %% Each DSL set can emit 1-2 batch messages (create + optional
+    %% element-add), so flatmap rather than comprehend.
+    SetMsgs = lists:flatmap(
+        fun(SetDef) -> compile_set_msg(FamilyNum, TableBin, SetDef) end,
+        maps:get(sets, Table, [])),
 
     %% 4a-ft. Create flowtables (declared via nft_flowtable).
     %% Must exist before any rule references them via flow_offload.
@@ -923,23 +928,66 @@ apply_nft_table(_, _, _) -> ok.
 set_name({Name, _Type})       -> Name;
 set_name({Name, _Type, _Opts}) -> Name.
 
-%% Build an nft_set:add message for one DSL set definition.
+%% Build nft_set:add + (if declared) nft_set_elem:add msgs for one
+%% DSL set definition.  Returns a LIST of message-builder funs so
+%% the caller can flat-append into the batch.
 compile_set_msg(Family, Table, {Name, Type}) ->
-    fun(S) -> nft_set:add(Family, #{
+    %% No opts → no elements, just create the set.
+    [fun(S) -> nft_set:add(Family, #{
         table => Table,
         name  => iolist_to_binary(Name),
         type  => Type
-    }, S) end;
+    }, S) end];
 compile_set_msg(Family, Table, {Name, Type, Opts}) when is_map(Opts) ->
-    Base = #{table => Table,
-             name  => iolist_to_binary(Name),
-             type  => Type,
-             flags => maps:get(flags, Opts, [])},
+    NameBin = iolist_to_binary(Name),
+    Flags = maps:get(flags, Opts, []),
+    Base = #{table => Table, name => NameBin, type => Type, flags => Flags},
     Full = case maps:find(timeout, Opts) of
         {ok, T} -> Base#{timeout => T};
         error   -> Base
     end,
-    fun(S) -> nft_set:add(Family, Full, S) end.
+    CreateFun = fun(S) -> nft_set:add(Family, Full, S) end,
+
+    %% Populate declared `elements:` into the set. Previously the
+    %% caller built the create-fun and silently dropped the
+    %% elements, leaving operators with an empty set — the exact
+    %% Glasbox violation we found in tutorial 03 (trusted_cidrs had
+    %% 4 CIDRs declared, 0 in kernel).
+    Elements = maps:get(elements, Opts, []),
+    ElemFuns =
+        case {Elements, lists:member(interval, Flags)} of
+            {[], _} ->
+                [];
+            {Es, true} ->
+                Ranges = [parse_cidr_range_strict(E) || E <- Es],
+                [fun(S) ->
+                    nft_set_elem:add_range_elems(Family, Table,
+                                                  NameBin, Ranges, S)
+                 end];
+            {Es, false} ->
+                Keys = normalize_plain_elements(Es, Type),
+                [fun(S) ->
+                    nft_set_elem:add_elems(Family, Table, NameBin, Keys, S)
+                 end]
+        end,
+    [CreateFun | ElemFuns].
+
+%% Fail-loud parser for CIDR set elements.  DSL validation should
+%% catch bad input at compile time; silently ignoring a bad element
+%% here would leave the operator with an incomplete allowlist.
+parse_cidr_range_strict(E) ->
+    case erlkoenig_nft_ip:parse_cidr4(E) of
+        {ok, Range} -> Range;
+        {error, R}  -> error({bad_cidr_element, E, R})
+    end.
+
+normalize_plain_elements(Es, Type) when Type =:= ipv4_addr;
+                                         Type =:= ipv6_addr ->
+    [begin {ok, B} = erlkoenig_nft_ip:normalize(E), B end || E <- Es];
+normalize_plain_elements(Es, inet_service) ->
+    [<<Port:16/big>> || Port <- Es];
+normalize_plain_elements(Es, _) ->
+    Es.
 
 compile_nft_chain_split(Family, Table, #{name := Name, rules := Rules} = Chain,
                         VethMap, ReplicaIpMap) ->
@@ -1079,7 +1127,12 @@ compile_explicit_vmap(Family, Table, #{name := Name, type := Type,
     end,
     [CreateVmap, AddElems].
 
-%% Resolve map entries — expand {:replica_ips, Pod, Ct}
+%% Resolve map entries — expand {:replica_ips, Pod, Ct} AND
+%% normalize static entries to the (binary, binary) pairs the
+%% wire-encoder wants.  Previously static entries flowed through
+%% as-is — including raw IP tuples — and the kernel silently
+%% stored them as zero-length elements (visible: empty map after
+%% load).
 resolve_map_entries({replica_ips, Pod, Ct}, ReplicaIpMap, _KT, _DT) ->
     IpList = maps:get({iolist_to_binary(Pod), iolist_to_binary(Ct)},
                       ReplicaIpMap, []),
@@ -1087,8 +1140,21 @@ resolve_map_entries({replica_ips, Pod, Ct}, ReplicaIpMap, _KT, _DT) ->
         [<<Idx:32/big>> || Idx <- lists:seq(0, length(IpList) - 1)],
         [ip_to_binary(Ip) || Ip <- IpList]
     );
-resolve_map_entries(Entries, _ReplicaIpMap, _KT, _DT) when is_list(Entries) ->
-    Entries.
+resolve_map_entries(Entries, _ReplicaIpMap, KT, DT) when is_list(Entries) ->
+    [{normalize_map_key(K, KT), normalize_map_key(V, DT)}
+     || {K, V} <- Entries].
+
+%% Normalize a map key/value to the 4/2/N-byte binary the kernel
+%% expects for the named type.  Fail-loud on bad shape so operators
+%% don't discover empty maps at runtime.
+normalize_map_key(<<B/binary>>, _Type) -> B;
+normalize_map_key({A, B, C, D}, ipv4_addr) -> <<A, B, C, D>>;
+normalize_map_key({A, B, C, D, _Prefix}, ipv4_addr) -> <<A, B, C, D>>;
+normalize_map_key(Port, inet_service) when is_integer(Port),
+                                            Port >= 0, Port =< 65535 ->
+    <<Port:16/big>>;
+normalize_map_key(Other, Type) ->
+    error({bad_map_entry_value, #{value => Other, expected_type => Type}}).
 
 %% Resolve vmap entries — convert tuples to binary keys
 resolve_vmap_entries(Entries, _ReplicaIpMap, _Fields) when is_list(Entries) ->
@@ -1185,7 +1251,13 @@ expand_nft_rule(flow_offload, #{flowtable := FtName}, _VethMap, _ReplicaIpMap) -
 
 expand_nft_rule(dnat_jhash, Opts, VethMap, _ReplicaIpMap) ->
     MapName = maps:get(map, Opts),
-    Port = maps:get(port, Opts, 0),
+    %% Accept either `port:` (internal shorthand) or `dport:` (DSL
+    %% tutorial form). `tcp_dport:` is the explicit tcp-specific
+    %% variant — normalised via the clause below.
+    Port = case maps:get(dport, Opts, undefined) of
+        undefined -> maps:get(port, Opts, 0);
+        P         -> P
+    end,
     Mod = maps:get(mod, Opts),
     BaseOpts = maps:fold(fun
         (iifname, {veth_of, P, C}, Acc) ->
@@ -1198,8 +1270,14 @@ expand_nft_rule(dnat_jhash, Opts, VethMap, _ReplicaIpMap) ->
         (counter, N, Acc) -> Acc#{counter => iolist_to_binary(N)};
         (map, _, Acc) -> Acc;
         (port, _, Acc) -> Acc;
+        (dport, _, Acc) -> Acc;
         (mod, _, Acc) -> Acc;
-        (K, V, Acc) -> Acc#{K => V}
+        (K, V, _Acc) ->
+            error({unknown_nft_rule_opt,
+                   #{context => dnat_jhash, key => K, value => V,
+                     hint => <<"unknown option in dnat_jhash rule — "
+                               "supported: iifname, tcp_dport, counter, "
+                               "map, port, dport, mod">>}})
     end, #{}, Opts),
     [{rule, dnat_jhash, BaseOpts#{map => MapName, dport => Port, mod => Mod}}];
 
@@ -1209,8 +1287,31 @@ expand_nft_rule(dnat_lb, Opts, VethMap, ReplicaIpMap) ->
     Targets = case maps:get(targets, Opts, undefined) of
         {replica_ips, Pod, Ct} ->
             IpList = maps:get({Pod, Ct}, ReplicaIpMap, []),
-            [ip_to_binary(Ip) || Ip <- IpList];
-        _ -> []
+            case IpList of
+                [] ->
+                    %% Fail loud: empty LB target list means either the
+                    %% referenced pod doesn't exist, or none of its
+                    %% replicas have spawned yet.  Silently emitting a
+                    %% DNAT rule with no backends is a Glasbox
+                    %% violation — the rule would match traffic and
+                    %% DNAT it into nowhere (kernel returns undefined
+                    %% behaviour).
+                    error({dnat_lb_no_targets,
+                           #{pod => Pod, container => Ct,
+                             hint => <<"dnat_lb targets pod/container "
+                                       "has 0 spawned replicas at apply-"
+                                       "time — check pod/container name "
+                                       "or order dependencies so the "
+                                       "target pod spawns first">>}});
+                _ ->
+                    [ip_to_binary(Ip) || Ip <- IpList]
+            end;
+        undefined ->
+            error({dnat_lb_missing_targets,
+                   #{hint => <<"dnat_lb rule requires `targets:` with "
+                               "a {:replica_ips, Pod, Ct} reference">>}});
+        Other ->
+            error({dnat_lb_bad_targets, #{value => Other}})
     end,
     BaseOpts = maps:fold(fun
         (iifname, {veth_of, P, C}, Acc) ->
@@ -1223,7 +1324,12 @@ expand_nft_rule(dnat_lb, Opts, VethMap, ReplicaIpMap) ->
         (counter, N, Acc) -> Acc#{counter => iolist_to_binary(N)};
         (targets, _, Acc) -> Acc;
         (port, _, Acc) -> Acc;
-        (K, V, Acc) -> Acc#{K => V}
+        (K, V, _Acc) ->
+            error({unknown_nft_rule_opt,
+                   #{context => dnat_lb, key => K, value => V,
+                     hint => <<"unknown option in dnat_lb rule — "
+                               "supported: iifname, tcp_dport, counter, "
+                               "targets, port">>}})
     end, #{}, Opts),
     [{rule, dnat_lb, BaseOpts#{targets => Targets, dport => Port}}];
 
@@ -1255,8 +1361,35 @@ expand_nft_rule(Action, Opts, VethMap, ReplicaIpMap) ->
         (udp_dport, Port, Acc) -> Acc#{udp => Port};
         (ct_state, States, Acc) -> Acc#{ct => hd(States)};
         (log_prefix, Prefix, Acc) -> Acc#{log => Prefix};
+        (log, Prefix, Acc) -> Acc#{log => Prefix};
         (counter, Name, Acc) -> Acc#{counter => iolist_to_binary(Name)};
-        (K, V, Acc) -> Acc#{K => V}
+        %% Named-object references (set/map/vmap/flowtable) pass
+        %% through with the operator-given name.  The downstream
+        %% compile step resolves them to SET_IDs at batch-emit.
+        (set, Name, Acc) -> Acc#{set => iolist_to_binary(Name)};
+        (vmap, Name, Acc) -> Acc#{vmap => iolist_to_binary(Name)};
+        (flowtable, Name, Acc) -> Acc#{flowtable => iolist_to_binary(Name)};
+        %% jhash-related options for dnat_jhash verdict (see dnat_jhash
+        %% clause above for the primary handler; generic expand also
+        %% sees them when the verdict is dnat_jhash reached here).
+        (map, Name, Acc) -> Acc#{map => iolist_to_binary(Name)};
+        (dport, Port, Acc) -> Acc#{dport => Port};
+        (mod, N, Acc) -> Acc#{mod => N};
+        %% Rate-limit modifier (consumed by compile_generic_modifiers).
+        %% Accepts both map form `%{rate: R, burst: B}` and legacy
+        %% tuple form `{R, [burst: B]}` — the firewall compiler
+        %% normalizes both.
+        (limit, L, Acc) -> Acc#{limit => L};
+        %% connlimit_drop carries `max` as a rule-level opt
+        (max, N, Acc) when is_integer(N) -> Acc#{max => N};
+        (over, N, Acc) when is_integer(N) -> Acc#{over => N};
+        (K, V, _Acc) ->
+            error({unknown_nft_rule_opt,
+                   #{context => generic_rule, verdict => Action,
+                     key => K, value => V,
+                     hint => <<"unknown nft rule option — check spelling "
+                               "(e.g. ip_saddr vs ip_saddrr). See "
+                               "SPEC-EK-023 §3 for supported keys.">>}})
     end, #{}, Opts),
 
     %% Expand replica_ips into multiple rules (cartesian product)
@@ -1589,7 +1722,23 @@ resolve_and_compile_rule({rule, Verdict, Opts}, RefMap, PodName, ChainName) when
                 {ok, Ip} -> Acc#{daddr => {element(1,Ip), element(2,Ip), element(3,Ip), element(4,Ip), 32}};
                 error -> Acc#{oif => <<"__unresolved__">>}
             end;
-        (K, V, Acc) -> Acc#{K => V}
+        %% This branch handles ALREADY-translated internal keys (saddr,
+        %% daddr, tcp, udp, ct, protocol, counter, log) coming from
+        %% upstream translators — NOT raw DSL keys.  We still warn on
+        %% genuinely unknown keys so typos don't just flow silently
+        %% through to compile_generic_rule.
+        (K, V, Acc) when K =:= saddr; K =:= daddr; K =:= tcp;
+                          K =:= udp; K =:= ct; K =:= protocol;
+                          K =:= counter; K =:= log;
+                          K =:= iif; K =:= oif; K =:= oif_neq ->
+            Acc#{K => V};
+        (K, V, Acc) ->
+            logger:warning("erlkoenig_config: pod-local rule in "
+                           "pod ~s has unknown key ~p=~p "
+                           "(passing through to compile_generic_rule — "
+                           "this path is legacy, prefer host nft_table)",
+                           [PodName, K, V]),
+            Acc#{K => V}
     end, #{}, Opts),
     case has_unresolved(Resolved) of
         true ->
@@ -1753,8 +1902,29 @@ run_action(Unknown, WatchName, _Counter, _Metric, _Value, _Threshold) ->
 
 -spec build_spawn_opts(map()) -> map().
 build_spawn_opts(Ct) ->
+    %% Capability-driven fields must travel through too — without
+    %% them the DSL `requires :"..."` declarations emit their side
+    %% effects into the term but `erlkoenig_ct` never sees them at
+    %% spawn time, so e.g. `dns.allowlist` doesn't register and
+    %% `journal.local` doesn't get its socket bind-mount. That is
+    %% exactly the failure mode that integration test 32 catches.
     Keys = [ip, ports, args, env, firewall, limits, seccomp,
-            restart, name, files, zone, volumes, image_path, publish, stream, nft],
+            restart, name, files, zone, volumes, image_path,
+            publish, stream, nft,
+            %% capability surfaces:
+            requires, socket_mounts, dns_allowlist,
+            %% PKI / signature gating (SPEC-EK-017):
+            %% `signature_required` forces per-container enforcement
+            %% even when the global PKI mode is `off`.  `sig_path` is
+            %% the explicit detached-signature location.
+            signature_required, sig_path,
+            %% cgroup user/group IDs (Pod.Builder emits these):
+            uid, gid,
+            %% internal but reachable via pod-supervisor code path:
+            pod_supervised,
+            %% PTY is internal-only (no DSL surface) but reach the
+            %% runtime via manual-opts callers (tests, CLI):
+            pty],
     lists:foldl(fun(K, Acc) -> copy_if(K, Ct, Acc) end, #{}, Keys).
 
 -spec copy_if(atom(), map(), map()) -> map().

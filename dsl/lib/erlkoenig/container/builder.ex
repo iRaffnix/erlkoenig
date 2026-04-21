@@ -54,6 +54,13 @@ defmodule Erlkoenig.Container.Builder do
     }
   end
 
+  # NOTE: conn_limit deliberately not exposed here. In Stack DSL it
+  # lives at chain level (see `Erlkoenig.Nft.ChainBuilder.add_conn_limit/2`)
+  # and expands to a visible `{:connlimit_drop, ...}` nft rule. The
+  # Single-Container DSL has no inline nft block so the macro is
+  # simply absent — a container-level sugar here would recreate the
+  # Glasbox violation we just removed from Stack DSL.
+
   def set_binary(state, path) when is_binary(path) do
     %{state | binary: path}
   end
@@ -188,7 +195,8 @@ defmodule Erlkoenig.Container.Builder do
 
   Idempotent — declaring the same capability twice is a no-op.
   """
-  def add_requires(state, capability) when is_atom(capability) do
+  def add_requires(state, capability, opts \\ [])
+      when is_atom(capability) and is_list(opts) do
     if capability in state.requires do
       state
     else
@@ -196,11 +204,11 @@ defmodule Erlkoenig.Container.Builder do
 
       state
       |> Map.put(:requires, state.requires ++ [capability])
-      |> apply_capability(spec)
+      |> apply_capability(spec, opts)
     end
   end
 
-  defp apply_capability(state, %{kind: :socket} = spec) do
+  defp apply_capability(state, %{kind: :socket} = spec, _opts) do
     dir = Erlkoenig.Capabilities.socket_dir()
     dir_mount = %{host: dir, container: dir, read_only: false}
 
@@ -211,13 +219,41 @@ defmodule Erlkoenig.Container.Builder do
         state.socket_mounts ++ [dir_mount]
       end
 
+    # Some backends (e.g. libpq) want a *directory* in the env var
+    # rather than the socket-file path itself. Capabilities can
+    # override container_socket for the env value via :env_value.
+    env_value = Map.get(spec, :env_value, spec.container_socket)
+
     state
     |> Map.put(:socket_mounts, socket_mounts)
-    |> put_env(spec.env_var, spec.container_socket)
+    |> put_env(spec.env_var, env_value)
   end
 
-  defp apply_capability(state, %{kind: :network}) do
+  defp apply_capability(state, %{kind: :network}, _opts) do
     state
+  end
+
+  defp apply_capability(state, %{kind: :dns_allowlist}, opts) do
+    hosts =
+      case Keyword.fetch(opts, :hosts) do
+        {:ok, list} when is_list(list) and list != [] ->
+          Enum.map(list, fn
+            h when is_binary(h) and byte_size(h) > 0 -> h
+            h when is_atom(h) -> Atom.to_string(h)
+            other ->
+              raise CompileError,
+                description:
+                  "dns.allowlist host pattern must be a non-empty " <>
+                    "string, got #{inspect(other)}"
+          end)
+
+        _ ->
+          raise CompileError,
+            description:
+              "requires :\"dns.allowlist\" needs a non-empty :hosts list"
+      end
+
+    Map.put(state, :dns_allowlist, hosts)
   end
 
   def to_spawn_opts(state) do
@@ -257,6 +293,10 @@ defmodule Erlkoenig.Container.Builder do
     opts = if state.zone, do: Map.put(opts, :zone, state.zone), else: opts
     opts = if state.rootfs, do: Map.put(opts, :rootfs, state.rootfs), else: opts
     opts = if state.requires != [], do: Map.put(opts, :requires, state.requires), else: opts
+    opts = case Map.get(state, :dns_allowlist) do
+      nil -> opts
+      hosts -> Map.put(opts, :dns_allowlist, hosts)
+    end
     opts = if state.socket_mounts != [],
               do: Map.put(opts, :socket_mounts, state.socket_mounts),
               else: opts

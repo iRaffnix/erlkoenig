@@ -23,7 +23,7 @@ Handles both IPv4 and IPv6 addresses in all common representations:
 tuples, binaries, strings, and binary strings.
 """.
 
--export([normalize/1, format/1, version/1, af/1]).
+-export([normalize/1, format/1, version/1, af/1, parse_cidr4/1]).
 
 -doc """
 Normalize any IP representation to a fixed-size binary.
@@ -93,3 +93,49 @@ version(Bin) when byte_size(Bin) =:= 16 -> v6.
 -spec af(binary()) -> 2 | 10.
 af(Bin) when byte_size(Bin) =:= 4 -> 2;
 af(Bin) when byte_size(Bin) =:= 16 -> 10.
+
+-doc """
+Parse an IPv4 CIDR (or plain address) into an inclusive binary
+range `{StartBin, EndBin}`.
+
+Accepts:
+  - `"10.0.0.0/8"`   → `{<<10,0,0,0>>, <<10,255,255,255>>}`
+  - `"10.0.0.0"`     → `{<<10,0,0,0>>, <<10,0,0,0>>}`  (singleton)
+  - `"10.0.0.0/32"`  → `{<<10,0,0,0>>, <<10,0,0,0>>}`
+
+Returns `{error, bad_cidr}` for anything else. Host bits below the
+mask are tolerated and zeroed — `"10.1.2.3/8"` is treated the
+same as `"10.0.0.0/8"`. Feeding invalid host-bit combinations to
+the kernel would get rejected with EINVAL; zeroing here gives a
+cleaner error surface.
+""".
+-spec parse_cidr4(string() | binary()) ->
+    {ok, {binary(), binary()}} | {error, bad_cidr}.
+parse_cidr4(Bin) when is_binary(Bin) ->
+    parse_cidr4(binary_to_list(Bin));
+parse_cidr4(Str) when is_list(Str) ->
+    {Addr, Prefix} = case string:split(Str, "/") of
+        [A, P] ->
+            case string:to_integer(P) of
+                {N, ""} when N >= 0, N =< 32 -> {A, N};
+                _                             -> {A, bad}
+            end;
+        [A] -> {A, 32}
+    end,
+    case Prefix of
+        bad -> {error, bad_cidr};
+        _ ->
+            case inet:parse_ipv4_address(Addr) of
+                {ok, {W, X, Y, Z}} ->
+                    <<AsInt:32>> = <<W, X, Y, Z>>,
+                    Mask = case Prefix of
+                        0 -> 0;
+                        _ -> (16#FFFFFFFF bsl (32 - Prefix)) band 16#FFFFFFFF
+                    end,
+                    StartInt = AsInt band Mask,
+                    EndInt   = StartInt bor ((bnot Mask) band 16#FFFFFFFF),
+                    {ok, {<<StartInt:32>>, <<EndInt:32>>}};
+                _ ->
+                    {error, bad_cidr}
+            end
+    end.

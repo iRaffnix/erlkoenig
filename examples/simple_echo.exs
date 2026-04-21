@@ -168,6 +168,14 @@ defmodule SimpleEcho do
       replicas: 1,
       restart: :transient do
 
+      # ── Service-Capability Dependencies ────────────────
+      # `requires :"dns.local"` makes the dependency explicit:
+      # operators see at a glance that this container resolves
+      # names. The host-side udp/53 allowlist above stays for now;
+      # the strict-mode runtime hook will drive both off the same
+      # declaration in a follow-up.
+      requires :"dns.local"
+
       # ── cgroup Metrics ─────────────────────────────────
       #
       # publish: periodische cgroup-Metriken über AMQP.

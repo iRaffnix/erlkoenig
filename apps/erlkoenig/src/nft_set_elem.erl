@@ -38,6 +38,7 @@ Corresponds to libnftnl src/set_elem.c.
 -export([
     add/5, add/6,
     add_elems/5,
+    add_range_elems/5,
     add_vmap_elems/5,
     add_vmap_elems/6,
     add_data_map_elems/6,
@@ -139,6 +140,85 @@ add_elems(Family, Table, Set, Keys, Seq) ->
     ]),
     NlFlags = ?NLM_F_REQUEST bor ?NLM_F_ACK bor ?NLM_F_CREATE,
     nfnl_msg:build_hdr(?NFT_MSG_NEWSETELEM, Family, NlFlags, Seq, Attrs).
+
+-doc """
+Add multiple range elements to an interval-flagged set.
+
+Each element is a `{StartKey, EndKey}` tuple of raw binaries of
+the set's key type. For IPv4 the keys are 4-byte binaries
+representing the **inclusive** bounds of the CIDR/range.
+
+The set MUST have been created with `flags => [interval]`;
+otherwise the kernel rejects the element addition with `EINVAL`.
+
+Wire encoding note: we emit each range as two `NFTA_LIST_ELEM`
+entries — `key=Start` with no flags, and `key=End+1` carrying
+`NFT_SET_ELEM_INTERVAL_END`. That's the legacy format the in-
+tree nftables userspace uses on `NEWSETELEM` for range adds.
+A singleton range `{Start, Start}` becomes a `Start` element +
+`Start+1` end-marker — still two attrs.
+
+Example:
+
+    %% Populate `trusted` with 10.0.0.0/8 and a single host.
+    Ranges = [
+        {<<10,0,0,0>>,     <<10,255,255,255>>},
+        {<<192,168,42,5>>, <<192,168,42,5>>}
+    ],
+    nft_set_elem:add_range_elems(1, <<"fw">>, <<"trusted">>, Ranges, Seq)
+""".
+-spec add_range_elems(0..255, binary(), binary(),
+                      [{binary(), binary()}], non_neg_integer()) ->
+    nfnl_msg:nl_msg().
+add_range_elems(Family, Table, Set, Ranges, Seq) ->
+    ElemList = iolist_to_binary(
+        lists:flatmap(fun({Start, End}) ->
+            [start_elem(Start), interval_end_elem(next_key(End))]
+        end, Ranges)
+    ),
+    Attrs = iolist_to_binary([
+        nfnl_attr:encode_str(?NFTA_SET_ELEM_LIST_TABLE, Table),
+        nfnl_attr:encode_str(?NFTA_SET_ELEM_LIST_SET, Set),
+        nfnl_attr:encode_nested(?NFTA_SET_ELEM_LIST_ELEMENTS, ElemList)
+    ]),
+    NlFlags = ?NLM_F_REQUEST bor ?NLM_F_ACK bor ?NLM_F_CREATE,
+    nfnl_msg:build_hdr(?NFT_MSG_NEWSETELEM, Family, NlFlags, Seq, Attrs).
+
+%% Plain start-of-range element: key only, no flags.
+start_elem(Key) ->
+    nfnl_attr:encode_nested(
+        ?NFTA_LIST_ELEM,
+        nfnl_attr:encode_nested(
+            ?NFTA_SET_ELEM_KEY,
+            nfnl_attr:encode(?NFTA_DATA_VALUE, Key)
+        )
+    ).
+
+%% Exclusive-end-of-range element: key + INTERVAL_END flag.
+interval_end_elem(Key) ->
+    nfnl_attr:encode_nested(
+        ?NFTA_LIST_ELEM,
+        iolist_to_binary([
+            nfnl_attr:encode_u32(
+                ?NFTA_SET_ELEM_FLAGS,
+                ?NFT_SET_ELEM_INTERVAL_END
+            ),
+            nfnl_attr:encode_nested(
+                ?NFTA_SET_ELEM_KEY,
+                nfnl_attr:encode(?NFTA_DATA_VALUE, Key)
+            )
+        ])
+    ).
+
+%% Return the key value one unit past `Key`, as a same-width binary.
+%% For IPv4 4-byte keys this is `Key + 1` with wrap-around left to
+%% the kernel (nothing sensible we can do if someone asks for the
+%% interval [255.255.255.255, 255.255.255.255] — just let EINVAL
+%% surface).
+next_key(Bin) when is_binary(Bin) ->
+    Bits = byte_size(Bin) * 8,
+    <<N:Bits>> = Bin,
+    <<(N + 1):Bits>>.
 
 -doc """
 Add multiple verdict map elements to a set.

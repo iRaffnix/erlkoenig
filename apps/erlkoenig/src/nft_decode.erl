@@ -27,6 +27,8 @@ building binary expressions, we read them back.
 """.
 
 -export([rule_description/1]).
+%% Exposed for fuzzing — pure parsers of nft-internal exprs.
+-export([decode_expr/2, decode_expr_attrs/1, decode_list_elem/1]).
 
 -include("nft_constants.hrl").
 
@@ -39,7 +41,17 @@ Input is the decoded attribute list from NFTA_RULE_EXPRESSIONS.
 """.
 -spec rule_description(binary() | [tuple()]) -> binary().
 rule_description(ExprBin) when is_binary(ExprBin) ->
-    rule_description(nfnl_attr:decode(ExprBin));
+    %% nfnl_attr:decode raises on malformed input (short header, bad
+    %% Len field).  Swallow that here — this function is purely
+    %% human-output, its callers route the return to logs/dumps.
+    %% Crashing takes down the nft query gen_server on any malformed
+    %% kernel response.
+    try nfnl_attr:decode(ExprBin) of
+        Decoded -> rule_description(Decoded)
+    catch
+        error:{invalid_nla, _, _} -> <<"<invalid nla>">>;
+        _:_ -> <<"<unparseable>">>
+    end;
 rule_description(ExprList) when is_list(ExprList) ->
     Exprs = lists:map(fun decode_list_elem/1, ExprList),
     Parts = build_description(Exprs, []),
@@ -51,7 +63,13 @@ rule_description(ExprList) when is_list(ExprList) ->
 decode_list_elem({_, nested, Attrs}) ->
     decode_expr_attrs(Attrs);
 decode_list_elem({_, Bin}) when is_binary(Bin) ->
-    decode_expr_attrs(nfnl_attr:decode(Bin));
+    %% Catch malformed-NLA inside an expression element — same
+    %% Glasbox as the top-level rule_description wrap.
+    try nfnl_attr:decode(Bin) of
+        Attrs -> decode_expr_attrs(Attrs)
+    catch
+        _:_ -> #{type => unknown}
+    end;
 decode_list_elem(_) ->
     #{type => unknown}.
 
@@ -65,20 +83,29 @@ decode_expr_attrs(Attrs) ->
     Data =
         case lists:keyfind(?NFTA_EXPR_DATA, 1, Attrs) of
             {_, nested, D} -> D;
-            {_, D} when is_binary(D) -> nfnl_attr:decode(D);
+            {_, D} when is_binary(D) ->
+                try nfnl_attr:decode(D) of
+                    Ds -> Ds
+                catch _:_ -> [] end;
             false -> []
         end,
     decode_expr(Name, Data).
 
 -spec decode_expr(binary(), [tuple()]) -> map().
-decode_expr(<<"meta">>, Data) ->
+decode_expr(Name, Data) ->
+    try decode_expr_inner(Name, Data)
+    catch _:_ -> #{type => Name, decode_error => true}
+    end.
+
+-spec decode_expr_inner(binary(), [tuple()]) -> map().
+decode_expr_inner(<<"meta">>, Data) ->
     Key =
         case lists:keyfind(2, 1, Data) of
             {2, <<K:32/big>>} -> meta_key_name(K);
             _ -> <<"?">>
         end,
     #{type => meta, key => Key};
-decode_expr(<<"cmp">>, Data) ->
+decode_expr_inner(<<"cmp">>, Data) ->
     Op =
         case lists:keyfind(2, 1, Data) of
             {2, <<O:32/big>>} -> cmp_op_name(O);
@@ -101,7 +128,7 @@ decode_expr(<<"cmp">>, Data) ->
                 <<>>
         end,
     #{type => cmp, op => Op, value => Value};
-decode_expr(<<"payload">>, Data) ->
+decode_expr_inner(<<"payload">>, Data) ->
     Base =
         case lists:keyfind(2, 1, Data) of
             {2, <<B:32/big>>} -> B;
@@ -118,16 +145,23 @@ decode_expr(<<"payload">>, Data) ->
             _ -> 0
         end,
     #{type => payload, base => Base, offset => Offset, len => Len};
-decode_expr(<<"immediate">>, Data) ->
-    case lists:keyfind(2, 1, Data) of
-        {2, nested, VerdictOuter} ->
-            decode_verdict(VerdictOuter);
-        {2, VBin} when is_binary(VBin) ->
-            decode_verdict(nfnl_attr:decode(VBin));
-        _ ->
-            #{type => immediate, verdict => <<"?">>}
+decode_expr_inner(<<"immediate">>, Data) ->
+    %% Same Glasbox as rule_description: nfnl_attr:decode + the
+    %% verdict decoder can both raise on malformed inputs.  Swallow
+    %% tagged errors instead of propagating to the caller (nft_query).
+    try
+        case lists:keyfind(2, 1, Data) of
+            {2, nested, VerdictOuter} ->
+                decode_verdict(VerdictOuter);
+            {2, VBin} when is_binary(VBin) ->
+                decode_verdict(nfnl_attr:decode(VBin));
+            _ ->
+                #{type => immediate, verdict => <<"?">>}
+        end
+    catch _:_ ->
+        #{type => immediate, verdict => <<"?">>}
     end;
-decode_expr(<<"counter">>, Data) ->
+decode_expr_inner(<<"counter">>, Data) ->
     Bytes =
         case lists:keyfind(1, 1, Data) of
             {1, <<B:64/big>>} -> B;
@@ -139,30 +173,30 @@ decode_expr(<<"counter">>, Data) ->
             _ -> 0
         end,
     #{type => counter, packets => Pkts, bytes => Bytes};
-decode_expr(<<"ct">>, Data) ->
+decode_expr_inner(<<"ct">>, Data) ->
     Key =
         case lists:keyfind(2, 1, Data) of
             {2, <<K:32/big>>} -> ct_key_name(K);
             _ -> <<"?">>
         end,
     #{type => ct, key => Key};
-decode_expr(<<"bitwise">>, _Data) ->
+decode_expr_inner(<<"bitwise">>, _Data) ->
     #{type => bitwise};
-decode_expr(<<"lookup">>, Data) ->
+decode_expr_inner(<<"lookup">>, Data) ->
     Set =
         case lists:keyfind(1, 1, Data) of
             {1, S} -> strip_null(S);
             _ -> <<"?">>
         end,
     #{type => lookup, set => Set};
-decode_expr(<<"log">>, Data) ->
+decode_expr_inner(<<"log">>, Data) ->
     Prefix =
         case lists:keyfind(2, 1, Data) of
             {2, P} -> strip_null(P);
             _ -> <<>>
         end,
     #{type => log, prefix => Prefix};
-decode_expr(Name, _Data) ->
+decode_expr_inner(Name, _Data) ->
     #{type => unknown, name => Name}.
 
 -spec decode_verdict([tuple()]) -> map().

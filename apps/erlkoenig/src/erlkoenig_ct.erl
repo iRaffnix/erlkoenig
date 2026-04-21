@@ -46,6 +46,7 @@ States:
          stop_container/1,
          kill/2,
          get_info/1,
+         dns_filter_state/1,
          list/0,
          attach/2,
          send_input/2,
@@ -109,11 +110,14 @@ States:
     firewall      = #{}        :: map() | skip_firewall,
     extra_opts    = #{}        :: map(),
     sig_path      = undefined  :: binary() | undefined,
+    signature_required = false :: boolean(),
     sig_verified  = false      :: boolean(),
     sig_meta      = undefined  :: map() | undefined,
     fuse_mount    = undefined  :: binary() | undefined,
     tmpfs_mounts  = []         :: [map()],
     volumes       = []         :: [map()],
+    requires      = []         :: [atom()],
+    dns_allowlist = undefined  :: [binary()] | undefined,
     pod_supervised = false     :: boolean(),
     publish       = []         :: [map()],
     stats_timers  = []         :: [reference()],
@@ -157,6 +161,30 @@ kill(Pid, Signal) ->
 -spec get_info(pid()) -> map().
 get_info(Pid) ->
     gen_statem:call(Pid, get_info).
+
+%% Narrow recovery read: returns the container's IP + declared
+%% dns_allowlist, or `undefined` if the container does not have
+%% one. Used by `erlkoenig_dns_filter` after a restart to reseed
+%% its ETS without going through the broader `get_info` API and
+%% without needing a new gen_statem call in every lifecycle state.
+%%
+%% Implementation uses `sys:get_state` with a short timeout. This
+%% is deliberately "peek into the gen_statem's guts" territory —
+%% acceptable because the shape of `#ct_data{}` is stable within
+%% the app and this path is only used during supervisor-initiated
+%% filter recovery, not in steady-state hot code.
+-spec dns_filter_state(pid()) ->
+    {inet:ip4_address(), [binary()]} | undefined.
+dns_filter_state(Pid) ->
+    try sys:get_state(Pid, 250) of
+        {running, #ct_data{ip = Ip,
+                            dns_allowlist = Hosts}}
+          when is_list(Hosts), Hosts =/= [], Ip =/= undefined ->
+            {Ip, Hosts};
+        _ -> undefined
+    catch
+        _:_ -> undefined
+    end.
 
 %% Return info maps for every container currently in the erlkoenig_cts
 %% process group. Mirrors erlkoenig:list/0 but is exported directly so
@@ -234,6 +262,30 @@ init({normal, BinaryPath, Opts}) ->
     %% at 0; every later init/1 under the same name bumps the stored
     %% count by one.
     InitRestartCount = initial_restart_count(Name),
+    %% Pod-supervised containers have their IP pre-computed in
+    %% `erlkoenig_config:flatten_containers` and baked into Opts.
+    %% On supervisor-driven restart the SAME Opts are reused —
+    %% including the old IP.  But the old IPVLAN slave in the dying
+    %% container's netns still holds that IP on the parent dummy
+    %% (kernel cleanup is asynchronous to gen_statem exit), so
+    %% `ip addr add` on the new slave trips `EADDRINUSE (-98)`.
+    %%
+    %% Workaround: on ANY restart (restart_count > 0) of a
+    %% pod-supervised container, drop the baked-in IP so
+    %% `setup_container_net` allocates a fresh one from the zone
+    %% pool.  The old IP will return via the cooldown + free-list
+    %% once the kernel has reaped the old netns.
+    PodSupervised = maps:get(pod_supervised, Opts, false),
+    ForcedIp = maps:get(ip, Opts, undefined),
+    InitIp =
+        case {PodSupervised, InitRestartCount} of
+            {true, N} when N > 0 ->
+                logger:info("[erlkoenig_ct] pod-supervised ~p restart #~p — "
+                            "dropping baked-in ip ~p for fresh pool alloc",
+                            [Name, N, ForcedIp]),
+                undefined;
+            _ -> ForcedIp
+        end,
     Data = #ct_data{
         id          = Id,
         binary_path = BinaryPath,
@@ -241,7 +293,7 @@ init({normal, BinaryPath, Opts}) ->
         env         = maps:get(env, Opts, []),
         uid         = maps:get(uid, Opts, 0),
         gid         = maps:get(gid, Opts, 0),
-        ip          = maps:get(ip, Opts, undefined),
+        ip          = InitIp,
         zone        = maps:get(zone, Opts, default),
         restart     = Restart,
         restart_count = InitRestartCount,
@@ -254,8 +306,11 @@ init({normal, BinaryPath, Opts}) ->
         pty         = maps:get(pty, Opts, false),
         firewall    = maps:get(firewall, Opts, #{}),
         sig_path    = maps:get(sig_path, Opts, undefined),
+        signature_required = maps:get(signature_required, Opts, false),
         volumes     = merge_socket_mounts(maps:get(volumes, Opts, []),
                                           maps:get(socket_mounts, Opts, [])),
+        requires    = maps:get(requires, Opts, []),
+        dns_allowlist = maps:get(dns_allowlist, Opts, undefined),
         pod_supervised = maps:get(pod_supervised, Opts, false),
         publish     = maps:get(publish, Opts, []),
         stream      = maps:get(stream, Opts, undefined),
@@ -263,7 +318,7 @@ init({normal, BinaryPath, Opts}) ->
                                     limits, seccomp, caps, output, name,
                                     files, zone, pty, firewall, sig_path,
                                     signature_required, volumes, socket_mounts,
-                                    requires,
+                                    requires, dns_allowlist,
                                     pod_supervised, publish, stream], Opts)
     },
     {ok, creating, Data};
@@ -410,7 +465,7 @@ creating_do_spawn_gated(#ct_data{id = ContainerId} = Data) ->
 
 creating_send_spawn(Data) ->
     DiskMB = disk_limit_mb(Data#ct_data.limits),
-    DnsIp  = zone_dns_ip(Data#ct_data.zone),
+    DnsIp  = effective_dns_ip(Data),
     Flags  = case Data#ct_data.pty of
                  true  -> erlkoenig_proto:spawn_flag_pty();
                  false -> 0
@@ -565,6 +620,7 @@ running(enter, _OldState, Data) ->
     erlkoenig_events:notify({container_started, Data#ct_data.id,
                              Data#ct_data.name, self()}),
     dns_register(Data),
+    dns_filter_register(Data),
     dets_register(Data),
     audit_volumes_mounted(Data),
     %% The spawn is complete — release the admission token so another
@@ -733,6 +789,7 @@ stopped(enter, _OldState, Data) ->
     safe_sock_close(Data#ct_data.sock),
     cleanup_socket_file(Data#ct_data.socket_path),
     dns_unregister(Data),
+    dns_filter_unregister(Data),
     dets_unregister(Data),
     audit_volumes_released(Data),
     cleanup_ephemeral_volumes(Data),
@@ -859,6 +916,7 @@ failed(enter, _OldState, Data) ->
     safe_sock_close(Data#ct_data.sock),
     cleanup_socket_file(Data#ct_data.socket_path),
     dns_unregister(Data),
+    dns_filter_unregister(Data),
     dets_unregister(Data),
     cleanup_ephemeral_volumes(Data),
     release_admission_token(Data),
@@ -1228,10 +1286,14 @@ do_container_net_setup(#ct_data{id = Id, ip = Ip,
     Handle = rt_io_handle(Data),
     ok = maybe_set_active(Data, false),
     Name = Data#ct_data.name,
-    NetResult = case Ip of
-        undefined -> erlkoenig_net:setup_container_net(Handle, Id, OsPid, Zone);
-        _         -> erlkoenig_net:setup_container_net(Handle, Id, OsPid, Ip, Zone, Name)
-    end,
+    %% Retry-on-EADDRINUSE:  when a :one_for_all / :rest_for_one pod
+    %% member dies and the supervisor respawns it, the dying
+    %% container's IPVLAN slave may still be live in the dying netns
+    %% (kernel cleanup is asynchronous to gen_statem exit).  The new
+    %% slave's `ip addr add` then trips EADDRINUSE (-98).  Bridge
+    %% the teardown window with a few short retries instead of
+    %% bubbling up and letting the pod-sup burn its restart budget.
+    NetResult = try_net_setup_with_retry(Handle, Id, OsPid, Ip, Zone, Name, 12),
     ok = maybe_set_active(Data, true),
     case NetResult of
         {ok, NetInfo} ->
@@ -1397,6 +1459,39 @@ dns_unregister(#ct_data{name = Name, id = Id, zone = Zone}) ->
         gen_server:call(DnsPid, {unregister, DnsName})
     catch Class:Reason ->
         logger:warning("container ~s: DNS unregister failed: ~p:~p",
+                       [Id, Class, Reason])
+    end,
+    ok.
+
+%% -- DNS egress allowlist (SPEC-AS-009) ---------------------------
+%%
+%% Container spawned with `requires :"dns.allowlist", hosts: [...]` →
+%% the DSL emits `dns_allowlist => [Host, ...]` in the spawn opts;
+%% we register that against the container's IP at `running` so the
+%% per-zone DNS can deny everything outside the list. Unregister at
+%% `stopped` so a recycled IP doesn't inherit the previous tenant's
+%% policy.
+
+-spec dns_filter_register(#ct_data{}) -> ok.
+dns_filter_register(#ct_data{dns_allowlist = undefined}) -> ok;
+dns_filter_register(#ct_data{ip = undefined}) -> ok;
+dns_filter_register(#ct_data{ip = Ip, dns_allowlist = Hosts, id = Id}) ->
+    try
+        ok = erlkoenig_dns_filter:register_allowlist(Ip, Hosts)
+    catch Class:Reason ->
+        logger:warning("container ~s: dns_filter register failed: ~p:~p",
+                       [Id, Class, Reason])
+    end,
+    ok.
+
+-spec dns_filter_unregister(#ct_data{}) -> ok.
+dns_filter_unregister(#ct_data{dns_allowlist = undefined}) -> ok;
+dns_filter_unregister(#ct_data{ip = undefined}) -> ok;
+dns_filter_unregister(#ct_data{ip = Ip, id = Id}) ->
+    try
+        ok = erlkoenig_dns_filter:unregister(Ip)
+    catch Class:Reason ->
+        logger:warning("container ~s: dns_filter unregister failed: ~p:~p",
                        [Id, Class, Reason])
     end,
     ok.
@@ -1668,7 +1763,7 @@ maybe_apply_container_nft(#ct_data{extra_opts = Opts} = Data) ->
             end,
             ok = maybe_set_active(Data, true),
             ok;
-        _ ->
+        error ->
             ok
     end.
 
@@ -1684,6 +1779,34 @@ teardown_veth(#ct_data{net_info = undefined}) ->
     ok;
 teardown_veth(#ct_data{net_info = NetInfo}) ->
     erlkoenig_net:teardown_container_veth(NetInfo).
+
+%% See do_container_net_setup for the rationale.
+try_net_setup_with_retry(Handle, Id, OsPid, Ip, Zone, Name, Attempts) ->
+    Call = fun() ->
+        case Ip of
+            undefined ->
+                erlkoenig_net:setup_container_net(Handle, Id, OsPid, Zone);
+            _ ->
+                erlkoenig_net:setup_container_net(Handle, Id, OsPid, Ip,
+                                                    Zone, Name)
+        end
+    end,
+    try_net_setup_loop(Call, Attempts, undefined).
+
+try_net_setup_loop(_Call, 0, LastErr) ->
+    LastErr;
+try_net_setup_loop(Call, N, _) ->
+    case Call() of
+        {ok, _} = Ok -> Ok;
+        {error, {net_setup_failed, -98, _}} = Err ->
+            timer:sleep(500),
+            try_net_setup_loop(Call, N - 1, Err);
+        {error, {net_setup_failed, {net_setup_failed, -98, _}}} = Err ->
+            timer:sleep(500),
+            try_net_setup_loop(Call, N - 1, Err);
+        {error, _} = Err ->
+            Err
+    end.
 
 -spec release_ip(#ct_data{}) -> #ct_data{}.
 release_ip(#ct_data{ip = undefined} = Data) ->
@@ -1714,6 +1837,45 @@ zone_dns_ip(ZoneName) ->
 -spec ip4_to_u32(inet:ip4_address()) -> non_neg_integer().
 ip4_to_u32({A, B, C, D}) ->
     (A bsl 24) bor (B bsl 16) bor (C bsl 8) bor D.
+
+%% Resolve the DNS resolver IP for this container.
+%%
+%% Strict capability mode (`strict_capabilities = true`):
+%%   * Container declared `requires :"dns.local"` → resolver IP from zone.
+%%   * Container did NOT declare it → resolver IP `0`. The C runtime
+%%     skips the `/etc/resolv.conf` write entirely, so the workload
+%%     cannot resolve names. Forces the operator to be explicit
+%%     about which workloads need DNS.
+%%
+%% Loose mode (default `false`): zone-derived IP regardless. Same
+%% behaviour as before the capability framework landed; existing
+%% deployments need no migration.
+-spec effective_dns_ip(#ct_data{}) -> non_neg_integer().
+effective_dns_ip(#ct_data{zone = Zone, requires = Requires,
+                          id = Id, name = Name}) ->
+    case application:get_env(erlkoenig, strict_capabilities, false) of
+        false ->
+            zone_dns_ip(Zone);
+        true ->
+            case lists:member('dns.local', Requires) of
+                true  ->
+                    zone_dns_ip(Zone);
+                false ->
+                    %% Strict opt-out — surface so operators can spot
+                    %% missing `requires :"dns.local"` declarations
+                    %% during the migration. Container will boot
+                    %% without /etc/resolv.conf; the action tag tells
+                    %% the dashboard exactly what was withheld.
+                    DisplayName = case Name of
+                        undefined -> Id;
+                        N -> N
+                    end,
+                    catch erlkoenig_events:notify(
+                            {capability_unmet, Id, DisplayName,
+                             'dns.local', no_resolv_conf}),
+                    0
+            end
+    end.
 
 %% Merge DSL-emitted `socket_mounts` (raw host-dir bind specs) into
 %% the regular volumes list as PRE-RESOLVED entries. The capability
@@ -1966,33 +2128,51 @@ check_build_dir() ->
 audit_volumes_mounted(#ct_data{volumes = []}) -> ok;
 audit_volumes_mounted(#ct_data{id = Id, name = Name, volumes = Volumes}) ->
     ContainerName = case Name of undefined -> Id; N -> N end,
-    lists:foreach(fun(#{host := Host, container := ContPath,
-                        persist := Persist, read_only := RO}) ->
-        erlkoenig_audit:log(#{
-            type => volume_mounted,
-            subject => ContainerName,
-            result => ok,
-            details => #{
-                persist => Persist,
-                host => Host,
-                container_path => ContPath,
-                read_only => RO
-            }
-        })
-    end, Volumes),
+    lists:foreach(fun(V) -> audit_one_volume(ContainerName, V) end, Volumes),
     ok.
+
+audit_one_volume(ContainerName, #{kind := socket_mount, host := Host,
+                                   container := ContPath,
+                                   read_only := RO}) ->
+    erlkoenig_audit:log(#{
+        type => socket_mount_bound,
+        subject => ContainerName,
+        result => ok,
+        details => #{kind => socket_mount,
+                     host => Host,
+                     container_path => ContPath,
+                     read_only => RO}
+    });
+audit_one_volume(ContainerName, #{host := Host, container := ContPath,
+                                   persist := Persist, read_only := RO}) ->
+    erlkoenig_audit:log(#{
+        type => volume_mounted,
+        subject => ContainerName,
+        result => ok,
+        details => #{
+            persist => Persist,
+            host => Host,
+            container_path => ContPath,
+            read_only => RO
+        }
+    }).
 
 -spec audit_volumes_released(#ct_data{}) -> ok.
 audit_volumes_released(#ct_data{volumes = []}) -> ok;
 audit_volumes_released(#ct_data{id = Id, name = Name, volumes = Volumes}) ->
     ContainerName = case Name of undefined -> Id; N -> N end,
-    lists:foreach(fun(#{persist := Persist}) ->
-        erlkoenig_audit:log(#{
-            type => volume_released,
-            subject => ContainerName,
-            result => ok,
-            details => #{persist => Persist}
-        })
+    lists:foreach(fun
+        (#{kind := socket_mount}) ->
+            %% Socket bind-mounts have no persistent state to release;
+            %% they live and die with the container's mount namespace.
+            ok;
+        (#{persist := Persist}) ->
+            erlkoenig_audit:log(#{
+                type => volume_released,
+                subject => ContainerName,
+                result => ok,
+                details => #{persist => Persist}
+            })
     end, Volumes),
     ok.
 
@@ -2320,7 +2500,17 @@ cleanup_fuse(#ct_data{id = ContainerId}) ->
 
 -spec maybe_verify_signature(#ct_data{}) -> {ok, #ct_data{}} | {error, term()}.
 maybe_verify_signature(Data) ->
-    case erlkoenig_pki:mode() of
+    %% Per-container `signature_required: true` promotes the effective
+    %% mode to `enforce` even if the global PKI mode is `off`.  This is
+    %% the Glasbox side of the SPEC-EK-017 contract: the operator says
+    %% "this workload must be signed" in the DSL, and the runtime
+    %% treats that as a hard gate — regardless of cluster-wide setting.
+    GlobalMode = erlkoenig_pki:mode(),
+    EffectiveMode = case {GlobalMode, Data#ct_data.signature_required} of
+        {off, true} -> enforce;
+        _           -> GlobalMode
+    end,
+    case EffectiveMode of
         off ->
             {ok, Data};
         Mode ->

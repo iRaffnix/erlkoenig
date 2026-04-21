@@ -33,7 +33,8 @@ on symbol mangling patterns and embedded string artifacts.
 -export([
     is_rust/1,
     parse/1,
-    crates/1
+    crates/1,
+    parse_crate_version/1
 ]).
 
 -export_type([

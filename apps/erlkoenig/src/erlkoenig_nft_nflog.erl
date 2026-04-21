@@ -35,6 +35,10 @@ Events are broadcast via pg group `nflog_events`:
 
 -export([start_link/1, stop/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
+%% Exposed for fuzzing / property tests.  Pure functions — no side
+%% effects.  Do not call from production code; use the gen_server
+%% interface instead.
+-export([parse_packet/1, parse_ip_packet/2, process_messages/1]).
 
 -include("nft_constants.hrl").
 
@@ -134,9 +138,14 @@ process_messages(
             case {Subsys, MsgType} of
                 {?NFNL_SUBSYS_ULOG, ?NFULNL_MSG_PACKET} ->
                     <<_:4/binary, AttrBin/binary>> = Payload,
-                    Attrs = nfnl_attr:decode(AttrBin),
-                    Event = parse_packet(Attrs),
-                    erlkoenig_nft_events:notify_nflog({nflog_event, Event});
+                    %% nfnl_attr:decode may raise on malformed NLA.
+                    %% Skip the individual message and keep draining.
+                    try
+                        Attrs = nfnl_attr:decode(AttrBin),
+                        Event = parse_packet(Attrs),
+                        erlkoenig_nft_events:notify_nflog({nflog_event, Event})
+                    catch _:_ -> ok
+                    end;
                 _ ->
                     ok
             end,

@@ -57,6 +57,8 @@ Reference: man 7 netlink, man 7 rtnetlink
 
 %% Response parsing
 -export([recv_ifindex/1]).
+%% Exposed for fuzzing — pure parsers, no side effects.
+-export([parse_ack/1, parse_newlink_ifindex/1]).
 
 %% Helpers
 -export([next_seq/0]).

@@ -108,6 +108,34 @@ single bit you need for raw sockets; anything you don't list is dropped
 before `execve()`. This is the primary Linux security lever; the chapter
 on runtime internals (→ Chapter 12) covers the drop sequence.
 
+## Service capabilities — `requires`
+
+Linux capabilities (`caps:`) gate kernel privileges. **Service
+capabilities** are a separate concept: they declare which node-local
+runtime services a workload depends on. Add them inside the container
+block with the `requires` macro:
+
+```elixir
+container "api", binary: "...", zone: "dmz", replicas: 1, restart: :permanent do
+  requires :"dns.local"        # network kind — declarative, runtime always-on
+  requires :"journal.local"    # socket kind — auto-mount + env injection
+end
+```
+
+The macro looks up the capability in the registry
+(`Erlkoenig.Capabilities`) and dispatches on its kind:
+
+  * **`:socket`** — bind-mounts `/run/erlkoenig/` into the container
+    and injects an env var pointing at the in-container socket
+    path (e.g. `JOURNAL_LOCAL_SOCK=/run/erlkoenig/journal.sock`).
+  * **`:network`** — declarative only; the runtime serves the
+    capability network-side regardless of declaration. Declaring it
+    surfaces the dependency in the container term (operators can
+    grep their stack to see who uses what).
+
+Unknown capability names fail at compile time. The full catalogue
+and the playable end-to-end walkthrough live in → Chapter 19.
+
 ## The state machine
 
 A container transitions through the following states:

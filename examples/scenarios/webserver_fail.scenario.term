@@ -1,5 +1,5 @@
 #{
-    config => "etc/firewall.term",
+    config => "examples/scenarios/firewall.term",
     chain => <<"inbound">>,
     policy => drop,
     packets => [

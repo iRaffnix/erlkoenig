@@ -81,19 +81,21 @@ allocate_exhausted(_Pid) ->
 %% =================================================================
 
 release_and_reuse(_Pid) ->
-    %% Allocate, release, allocate again -> same IP
+    %% Allocate, release, allocate again -> same IP.
+    %% The pool holds released IPs in a 500ms cooldown to avoid
+    %% racing the kernel's async ipvlan-slave teardown; wait past
+    %% that before expecting re-use.
     {ok, Ip} = erlkoenig_ip_pool:allocate(),
     erlkoenig_ip_pool:release(Ip),
-    %% Small delay for async cast to be processed
-    timer:sleep(10),
+    timer:sleep(600),
     ?_assertEqual({ok, Ip}, erlkoenig_ip_pool:allocate()).
 
 double_release_no_duplicate(_Pid) ->
-    %% Double release must not create duplicate in free list
+    %% Double release must not create duplicate in free list.
     {ok, Ip} = erlkoenig_ip_pool:allocate(),
     erlkoenig_ip_pool:release(Ip),
     erlkoenig_ip_pool:release(Ip),
-    timer:sleep(10),
+    timer:sleep(600),
     {ok, Ip1} = erlkoenig_ip_pool:allocate(),
     {ok, Ip2} = erlkoenig_ip_pool:allocate(),
     %% Ip1 should be the released IP, Ip2 should be a fresh one
@@ -121,7 +123,14 @@ used_count_after_release(_Pid) ->
     {ok, _Ip3} = erlkoenig_ip_pool:allocate(),
     erlkoenig_ip_pool:release(Ip1),
     timer:sleep(10),
-    ?_assertEqual(2, erlkoenig_ip_pool:used_count()).
+    %% Released IPs are in cooldown, still counted as "not available"
+    %% (the cooldown membership is part of used_count). The count
+    %% decrements only once the cooldown elapses AND allocate runs
+    %% through drain_cooldown. Check the stable end state:
+    timer:sleep(700),
+    %% One more allocate cycle triggers drain_cooldown:
+    _ = erlkoenig_ip_pool:allocate(),
+    ?_assertEqual(3, erlkoenig_ip_pool:used_count()).
 
 %% =================================================================
 %% Non-/24 prefixes — pool sizes itself based on netmask

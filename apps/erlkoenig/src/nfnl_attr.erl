@@ -106,6 +106,13 @@ Returns an empty list for empty input.
 -spec decode(binary()) -> [nla()].
 decode(<<>>) ->
     [];
+%% Short-but-nonempty tail: less than an NLA header.  Treated as
+%% garbage trailer and ignored — matches the kernel's own tolerance
+%% for trailing padding that some drivers emit.  Before this clause
+%% we crashed with function_clause on any stray byte, which turned
+%% a malformed kernel response into a nft-subsystem crash.
+decode(Bin) when is_binary(Bin), byte_size(Bin) < ?NLA_HEADER_SIZE ->
+    [];
 decode(<<Len:16/little, _Type:16/little, _/binary>> = Bin) when
     Len < ?NLA_HEADER_SIZE; Len > byte_size(Bin) + 0
 ->

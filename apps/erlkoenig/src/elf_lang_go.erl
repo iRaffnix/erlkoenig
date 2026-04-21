@@ -34,7 +34,8 @@ compiled with Go 1.13+.
     functions/1,
     deps/1,
     is_go/1,
-    function_package_map/1
+    function_package_map/1,
+    parse_mod_info/1
 ]).
 
 -export_type([

@@ -66,6 +66,13 @@ defmodule Tutorial do
       restart: :permanent,
       limits: %{memory: 128_000_000, pids: 64} do
 
+      # The container resolves names → declare its DNS dependency
+      # via the capability framework (→ Chapter 19). The host-side
+      # nft allow for udp/53 below mirrors this declaration; the
+      # strict-mode runtime hook will eventually drive both off the
+      # same line.
+      requires :"dns.local"
+
       publish interval: 2000 do
         metric :memory
         metric :cpu
@@ -100,6 +107,8 @@ defmodule Tutorial do
       replicas: 1,
       restart: :transient,
       limits: %{memory: 256_000_000, pids: 128} do
+
+      requires :"dns.local"
 
       publish interval: 2000 do
         metric :memory
@@ -148,9 +157,9 @@ defmodule Tutorial do
         nft_rule :accept, tcp_dport: 22222          # SSH
 
         # ── Runtime services ────────────────────────────────
-        # erlkoenig's per-zone DNS resolver listens on the
-        # gateway IP. Without this rule, every getaddrinfo()
-        # inside containers times out. → Chapter 6 explains.
+        # Mirrors the `requires :"dns.local"` declarations in the
+        # container blocks above. The capability framework lives
+        # in → Chapter 19; the host firewall side is → Chapter 6.
         nft_rule :accept, ip_saddr: {10, 99, 0, 0, 24}, udp_dport: 53
 
         nft_rule :drop, counter: "input_drop", log_prefix: "HOST-DROP: "

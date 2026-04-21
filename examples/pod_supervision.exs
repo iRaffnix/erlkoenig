@@ -72,6 +72,8 @@ defmodule PodSupervision do
       limits: %{memory: 268_435_456, pids: 100},
       zone: "compute", replicas: 1, restart: :permanent do
 
+      requires :"dns.local"
+
       publish interval: 2000 do
         metric :memory
         metric :cpu
@@ -88,6 +90,8 @@ defmodule PodSupervision do
       args: ["6379"],
       limits: %{memory: 134_217_728, pids: 50},
       zone: "compute", replicas: 1, restart: :permanent do
+
+      requires :"dns.local"
 
       publish interval: 2000 do
         metric :memory
@@ -114,6 +118,8 @@ defmodule PodSupervision do
       limits: %{memory: 268_435_456, pids: 100},
       zone: "compute", replicas: 1, restart: :permanent do
 
+      requires :"dns.local"
+
       publish interval: 5000 do
         metric :memory
         metric :cpu
@@ -135,6 +141,8 @@ defmodule PodSupervision do
       limits: %{memory: 536_870_912, pids: 200},
       zone: "compute", replicas: 1, restart: :permanent do
 
+      requires :"dns.local"
+
       publish interval: 5000 do
         metric :memory
         metric :cpu
@@ -150,6 +158,8 @@ defmodule PodSupervision do
       args: ["9003"],
       limits: %{memory: 268_435_456, pids: 100},
       zone: "compute", replicas: 1, restart: :permanent do
+
+      requires :"dns.local"
 
       publish interval: 5000 do
         metric :memory
@@ -173,6 +183,8 @@ defmodule PodSupervision do
       args: ["7000"],
       limits: %{memory: 134_217_728, pids: 50},
       zone: "compute", replicas: 2, restart: :transient do
+
+      requires :"dns.local"
 
       publish interval: 2000 do
         metric :memory

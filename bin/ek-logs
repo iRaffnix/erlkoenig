@@ -1,0 +1,180 @@
+#!/usr/bin/env escript
+%% -*- erlang -*-
+%% ek-logs — tail audit-chain entries for one container.
+%%
+%% Shows journal events (the `requires :"journal.local"` trail) for
+%% a container by name. Reads the configured audit_path on the
+%% target node via rpc, filters by subject substring, and renders a
+%% simple timeline.
+%%
+%% NOT raw stdout — for that use the `stream` AMQP binding directly
+%% with tools/stream_consumer.py erlkoenig.log.<name>. Audit entries
+%% are the compliance-relevant record and usually more useful for
+%% "what did this container do".
+%%
+%% Usage:
+%%   ek-logs <name>                 # all entries for that subject
+%%   ek-logs <name> tail=50         # last 50
+%%   ek-logs <name> follow=true     # -f, poll every 2s
+-mode(compile).
+
+main([]) ->
+    io:format(standard_error,
+              "usage: ek-logs <name-substr> [tail=N] [follow=true]~n", []),
+    halt(4);
+main([Name | Rest]) ->
+    NameBin = list_to_binary(Name),
+    {Target, Cookie, Tail, Follow} =
+        parse_opts(Rest, default_node(), 'ek-showcase', 100, false),
+    connect(Target, Cookie),
+
+    AuditPath = rpc:call(Target, application, get_env,
+                         [erlkoenig, audit_path], 3000),
+    case AuditPath of
+        {badrpc, R} ->
+            io:format(standard_error, "rpc failed: ~p~n", [R]),
+            halt(3);
+        undefined ->
+            io:format(standard_error,
+                "no audit_path configured on ~s~n", [Target]),
+            halt(3);
+        {ok, Path} ->
+            tail_loop(Target, to_str(Path), NameBin, Tail, Follow, 0)
+    end.
+
+tail_loop(Target, Path, Name, Tail, Follow, SeenCount) ->
+    %% Read file via rpc so we work over distributed erlang.
+    case rpc:call(Target, file, read_file, [Path], 10000) of
+        {ok, Bin} ->
+            Lines = [L || L <- binary:split(Bin, <<"\n">>, [global]),
+                          L =/= <<>>],
+            Matching = filter_by_subject(Lines, Name),
+            New = lists:sublist(Matching, SeenCount + 1, length(Matching)),
+            Shown = case Follow of
+                true  -> New;                         % only new lines
+                false -> last_n(Matching, Tail)       % initial batch
+            end,
+            lists:foreach(fun render/1, Shown),
+            case Follow of
+                true ->
+                    timer:sleep(2000),
+                    tail_loop(Target, Path, Name, Tail, Follow,
+                              length(Matching));
+                false -> halt(0)
+            end;
+        {error, enoent} ->
+            io:format(standard_error,
+                "audit log does not exist at ~s~n", [Path]),
+            halt(3);
+        Other ->
+            io:format(standard_error, "read failed: ~p~n", [Other]),
+            halt(3)
+    end.
+
+filter_by_subject(Lines, Name) ->
+    [L || L <- Lines,
+          case try_decode(L) of
+              {ok, M} ->
+                  Subj = maps:get(<<"subject">>, M, <<"">>),
+                  binary:match(Subj, Name) =/= nomatch;
+              error -> false
+          end].
+
+try_decode(Line) ->
+    try {ok, json:decode(Line)}
+    catch _:_ -> error
+    end.
+
+last_n(L, N) when length(L) =< N -> L;
+last_n(L, N) -> lists:nthtail(length(L) - N, L).
+
+render(Line) ->
+    case try_decode(Line) of
+        {ok, M} ->
+            Ts = maps:get(<<"ts">>, M, <<"">>),
+            Type = maps:get(<<"type">>, M, <<"?">>),
+            Msg = details_msg(M),
+            io:format("  ~-20ts  ~-20ts  ~ts~n", [Ts, Type, Msg]);
+        error -> ok
+    end.
+
+%% extract a short human-readable summary from the event details.
+%% Prefers `msg` (journal entry) then falls back to kv pairs.
+details_msg(M) ->
+    case maps:get(<<"msg">>, M, undefined) of
+        undefined ->
+            fmt_kvs(M);
+        <<>> ->
+            fmt_kvs(M);
+        Msg when is_binary(Msg) ->
+            case maps:get(<<"fields">>, M, #{}) of
+                #{} = Fields when map_size(Fields) == 0 -> Msg;
+                Fields when is_map(Fields) ->
+                    iolist_to_binary([Msg, "  ", fmt_kvs(Fields)]);
+                _ -> Msg
+            end
+    end.
+
+fmt_kvs(M) ->
+    Keep = maps:filter(fun(K, _) ->
+        not lists:member(K, [<<"prev_hash">>, <<"this_hash">>,
+                              <<"signature">>, <<"ts">>, <<"seq">>,
+                              <<"v">>, <<"type">>, <<"subject">>,
+                              <<"result">>, <<"level">>, <<"msg">>,
+                              <<"conn_id">>, <<"fields">>])
+    end, M),
+    case map_size(Keep) of
+        0 -> "";
+        _ ->
+            string:join(
+              [io_lib:format("~ts=~ts", [K, fmt_val(V)])
+               || {K, V} <- maps:to_list(Keep)],
+              " ")
+    end.
+
+fmt_val(V) when is_binary(V) -> binary_to_list(V);
+fmt_val(V) when is_integer(V) -> integer_to_list(V);
+fmt_val(V) when is_map(V) -> lists:flatten(io_lib:format("~p", [V]));
+fmt_val(V) -> lists:flatten(io_lib:format("~p", [V])).
+
+%% ── plumbing ─────────────────────────────────────────────────
+
+to_str(B) when is_binary(B) -> binary_to_list(B);
+to_str(L) when is_list(L)   -> L.
+
+parse_opts([], Node, Cookie, Tail, Follow) ->
+    {Node, Cookie, Tail, Follow};
+parse_opts(["node=" ++ N | Rest], _, Cookie, Tail, Follow) ->
+    parse_opts(Rest, list_to_atom(N), Cookie, Tail, Follow);
+parse_opts(["cookie=" ++ C | Rest], Node, _, Tail, Follow) ->
+    parse_opts(Rest, Node, list_to_atom(C), Tail, Follow);
+parse_opts(["tail=" ++ T | Rest], Node, Cookie, _, Follow) ->
+    parse_opts(Rest, Node, Cookie, list_to_integer(T), Follow);
+parse_opts(["follow=true" | Rest], Node, Cookie, Tail, _) ->
+    parse_opts(Rest, Node, Cookie, Tail, true);
+parse_opts(["follow=false" | Rest], Node, Cookie, Tail, _) ->
+    parse_opts(Rest, Node, Cookie, Tail, false);
+parse_opts([Unknown | _], _, _, _, _) ->
+    io:format(standard_error, "unknown arg: ~s~n", [Unknown]),
+    halt(4).
+
+default_node() ->
+    {ok, Host} = inet:gethostname(),
+    list_to_atom("showcase@" ++ Host).
+
+connect(Target, Cookie) ->
+    {ok, MyHost} = inet:gethostname(),
+    MyName = list_to_atom("ek-logs-" ++
+        integer_to_list(erlang:system_time(second)) ++ "@" ++ MyHost),
+    case net_kernel:start([MyName, shortnames]) of
+        {ok, _}                       -> ok;
+        {error, {already_started, _}} -> ok
+    end,
+    erlang:set_cookie(node(), Cookie),
+    case net_kernel:connect_node(Target) of
+        true -> ok;
+        _    ->
+            io:format(standard_error,
+                "cannot reach ~s (cookie ~p)~n", [Target, Cookie]),
+            halt(2)
+    end.

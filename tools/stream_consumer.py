@@ -17,9 +17,12 @@ import pika
 import sys
 import os
 
-HOST = os.environ.get("AMQP_HOST", "10.20.30.2")
-USER = os.environ.get("AMQP_USER", "erlkoenig")
-PASS = os.environ.get("AMQP_PASS", "erlkoenig")
+HOST = os.environ.get("AMQP_HOST")
+USER = os.environ.get("AMQP_USER")
+PASS = os.environ.get("AMQP_PASS")
+if not (HOST and USER and PASS):
+    print("error: set AMQP_HOST, AMQP_USER, AMQP_PASS", file=sys.stderr)
+    sys.exit(2)
 
 USE_COLOR = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
 

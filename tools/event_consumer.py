@@ -310,8 +310,12 @@ def fmt_bytes(n):
 def main():
     host = sys.argv[1] if len(sys.argv) > 1 else "localhost"
     pattern = sys.argv[2] if len(sys.argv) > 2 else "#"
-    user = os.environ.get("AMQP_USER", "erlkoenig")
-    passwd = os.environ.get("AMQP_PASS", "erlkoenig")
+    # No hardcoded credentials — broker login must come from env.
+    user = os.environ.get("AMQP_USER")
+    passwd = os.environ.get("AMQP_PASS")
+    if not user or not passwd:
+        print("error: set AMQP_USER and AMQP_PASS", file=sys.stderr)
+        sys.exit(2)
 
     creds = pika.PlainCredentials(user, passwd)
     params = pika.ConnectionParameters(host, credentials=creds)

@@ -68,7 +68,12 @@ All operations are pure file I/O on cgroupfs — no os:cmd.
          validate_beam_config/1,
          validate_containers_config/1,
          compute_containers_memory_max/3,
-         parse_memtotal/1]).
+         parse_memtotal/1,
+         parse_cpu_usage/1,
+         parse_oom_kill/1,
+         parse_pressure_some/1,
+         parse_cpu_stat_full/2,
+         parse_memory_events/2]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).

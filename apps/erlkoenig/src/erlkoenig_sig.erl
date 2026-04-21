@@ -39,6 +39,9 @@ The .sig file format:
 
 %% Internal (exported for testing)
 -export([encode_payload/1, decode_payload/1, hash_file/1]).
+%% Exposed for fuzzing.  parse_sig_file reads attacker-controlled
+%% PEM; parse_git_sha parses GIT_SHA env/metadata.
+-export([parse_sig_file/1, parse_git_sha/1]).
 
 -include_lib("public_key/include/public_key.hrl").
 
@@ -281,6 +284,15 @@ parse_sig_file(PemBin) ->
     maybe
         {ok, SigB64, CertPem} ?= split_sig_and_certs(PemBin),
         <<PayloadLen:32/big, Rest/binary>> ?= base64:decode(SigB64),
+        %% A malformed sig file can carry a PayloadLen larger than
+        %% the remaining bytes.  Guard explicitly — without this,
+        %% the pattern-match below crashes with badmatch, aborting
+        %% the container spawn with a confusing stacktrace instead
+        %% of a clean {error, invalid_sig_encoding}.
+        ok ?= case byte_size(Rest) >= PayloadLen of
+                  true  -> ok;
+                  false -> {error, invalid_sig_encoding}
+              end,
         <<Payload:PayloadLen/binary, Signature/binary>> = Rest,
         Certs = [Der || {'Certificate', Der, _} <- public_key:pem_decode(CertPem)],
         case Certs of
@@ -360,7 +372,12 @@ cert_entry_type(_) -> 'Certificate'.
 parse_git_sha(<<>>) ->
     <<0:160>>;
 parse_git_sha(Hex) when byte_size(Hex) =:= 40 ->
-    hex_to_bin(Hex);
+    %% `hex_to_bin` calls `binary_to_integer(<<H,L>>, 16)` which
+    %% raises badarg on non-hex bytes.  A 40-byte non-hex input
+    %% used to crash the caller; now we fall back to zeroes.
+    try hex_to_bin(Hex)
+    catch _:_ -> <<0:160>>
+    end;
 parse_git_sha(Raw) when byte_size(Raw) =:= 20 ->
     Raw;
 parse_git_sha(_) ->

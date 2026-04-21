@@ -352,17 +352,28 @@ sign_hash(HexHash, PrivKey) when is_binary(PrivKey) ->
     Signature = crypto:sign(eddsa, none, RawHash, [PrivKey, ed25519]),
     hex(Signature).
 
--doc "Decode a lowercase hex binary into the corresponding raw bytes.".
+-doc """
+Decode a lowercase hex binary into the corresponding raw bytes.
+
+Raises `error({bad_hex, Byte})` on non-hex input rather than
+silently returning garbage.  Callers that expect operator- or
+attacker-controlled bytes (e.g. verify_chain reading a tampered
+log line) wrap this in try/catch and turn the crash into a
+structured `{chain_break, LineNo, Reason}` error.
+""".
 -spec hex_to_bin(binary()) -> binary().
+hex_to_bin(Hex) when is_binary(Hex), byte_size(Hex) rem 2 =:= 0 ->
+    <<<<(decode_hex_pair(A, B))>> || <<A, B>> <= Hex>>;
 hex_to_bin(Hex) when is_binary(Hex) ->
-    <<<<(decode_hex_pair(A, B))>> || <<A, B>> <= Hex>>.
+    error({bad_hex, odd_length, byte_size(Hex)}).
 
 decode_hex_pair(A, B) ->
     (decode_hex_nibble(A) bsl 4) bor decode_hex_nibble(B).
 
 decode_hex_nibble(C) when C >= $0, C =< $9 -> C - $0;
 decode_hex_nibble(C) when C >= $a, C =< $f -> C - $a + 10;
-decode_hex_nibble(C) when C >= $A, C =< $F -> C - $A + 10.
+decode_hex_nibble(C) when C >= $A, C =< $F -> C - $A + 10;
+decode_hex_nibble(C) -> error({bad_hex, C}).
 
 -doc """
 Compute the SHA-256 hex digest of an event map (excluding `this_hash`).

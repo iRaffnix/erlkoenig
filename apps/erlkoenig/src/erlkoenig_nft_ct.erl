@@ -60,6 +60,7 @@ Public API:
     kill_by_src/1
 ]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
+-export([parse_ct_event/1]).
 -export_type([ct_key/0, ct_event/0]).
 
 -include("nft_constants.hrl").
@@ -372,15 +373,20 @@ process_messages(_, State) ->
 
 handle_ct_msg(MsgType, Payload, State) when byte_size(Payload) >= 4 ->
     <<_NfGenMsg:4/binary, AttrBin/binary>> = Payload,
-    Attrs = nfnl_attr:decode(AttrBin),
-    Event = parse_ct_event(Attrs),
-    case MsgType of
-        ?IPCTNL_MSG_CT_NEW ->
-            handle_new(Event, State);
-        ?IPCTNL_MSG_CT_DELETE ->
-            handle_destroy(Event, State);
-        _ ->
-            State
+    %% nfnl_attr:decode may raise on malformed NLA — skip the
+    %% individual event rather than kill the CT gen_server.
+    try
+        Attrs = nfnl_attr:decode(AttrBin),
+        Event = parse_ct_event(Attrs),
+        case MsgType of
+            ?IPCTNL_MSG_CT_NEW ->
+                handle_new(Event, State);
+            ?IPCTNL_MSG_CT_DELETE ->
+                handle_destroy(Event, State);
+            _ ->
+                State
+        end
+    catch _:_ -> State
     end;
 handle_ct_msg(_, _, State) ->
     State.
@@ -552,8 +558,15 @@ find_nested(Type, Attrs) ->
         {_, nested, Children} ->
             {ok, Children};
         {_, Bin} when is_binary(Bin), byte_size(Bin) >= 4 ->
-            %% Kernel sent without NLA_F_NESTED, decode the blob
-            {ok, nfnl_attr:decode(Bin)};
+            %% Kernel sent without NLA_F_NESTED, decode the blob.
+            %% nfnl_attr:decode/1 may raise on malformed NLA — treat
+            %% as "no such nested attr" rather than letting it bubble
+            %% up and kill the CT event parser.
+            try
+                {ok, nfnl_attr:decode(Bin)}
+            catch
+                _:_ -> error
+            end;
         _ ->
             error
     end.

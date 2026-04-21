@@ -195,9 +195,14 @@ default() ->
 -doc "Parse a mount-options string. Returns `{error, Reason}` on bad input.".
 -spec parse(iodata() | binary()) -> {ok, opts()} | {error, term()}.
 parse(Input) ->
-    Bin = iolist_to_binary(Input),
-    Tokens = split_tokens(Bin),
-    parse_tokens(Tokens, default(), flag_table(), propagation_table(), []).
+    try
+        Bin = iolist_to_binary(Input),
+        Tokens = split_tokens(Bin),
+        parse_tokens(Tokens, default(), flag_table(), propagation_table(), [])
+    catch
+        error:badarg -> {error, bad_input};
+        error:{badarg, _} -> {error, bad_input}
+    end.
 
 -doc """
 Format an opts() map back to the canonical mount-options string.

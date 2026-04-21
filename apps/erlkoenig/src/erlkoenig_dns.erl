@@ -29,6 +29,9 @@ Container names are registered/unregistered via `register/2` and
 
 -behaviour(gen_server).
 
+%% Exposed for fuzzing.  Pure parsers, no side effects.
+-export([decode_query/1, decode_name/2]).
+
 -export([start_link/0, start_link/1,
          register/2,
          unregister/1,
@@ -232,11 +235,48 @@ handle_dns_query(SrcIp, SrcPort, Packet, State) ->
                     _ = gen_udp:send(State#state.socket, SrcIp, SrcPort, Reply),
                     State;
                 false ->
-                    forward_upstream(Id, SrcIp, SrcPort, Packet, State)
+                    %% L7 egress allowlist (SPEC-AS-009). Only IPv4
+                    %% container sources can be scoped — loopback
+                    %% queries (default-zone) are not filtered.
+                    case check_egress_filter(SrcIp, Name) of
+                        {deny, Reason} ->
+                            audit_dns_deny(SrcIp, Name, Reason),
+                            Reply = encode_nxdomain(Id, Packet),
+                            _ = gen_udp:send(State#state.socket, SrcIp,
+                                              SrcPort, Reply),
+                            State;
+                        _Pass ->
+                            forward_upstream(Id, SrcIp, SrcPort, Packet, State)
+                    end
             end;
         {error, _} ->
             State
     end.
+
+%% Dispatch helper so the hot path of `handle_dns_query/4` stays flat.
+%% Non-IPv4 sources (unlikely today but possible via AAAA queries or
+%% legacy config) fall through as `no_filter`.
+-spec check_egress_filter(inet:ip_address(), binary()) ->
+          no_filter | allow | {deny, not_in_allowlist}.
+check_egress_filter({_, _, _, _} = Ip, Name) ->
+    erlkoenig_dns_filter:check(Ip, Name);
+check_egress_filter(_Ip, _Name) ->
+    no_filter.
+
+%% Best-effort audit write; never raise here — DNS must keep working
+%% even if the audit chain is down.
+-spec audit_dns_deny(inet:ip4_address(), binary(), atom()) -> ok.
+audit_dns_deny({A, B, C, D}, Name, Reason) ->
+    SrcBin = iolist_to_binary(
+               io_lib:format("~b.~b.~b.~b", [A, B, C, D])),
+    _ = (catch erlkoenig_audit:log(#{
+              type    => dns_filter,
+              subject => SrcBin,
+              result  => deny,
+              details => #{<<"query">>  => Name,
+                           <<"reason">> => atom_to_binary(Reason)}
+          })),
+    ok.
 
 -spec resolve_internal(non_neg_integer(), binary(), non_neg_integer(), binary(), #state{}) -> binary().
 resolve_internal(Id, Name, ?TYPE_A, Packet, #state{tab = Tab, ttl = TTL}) ->
@@ -319,27 +359,46 @@ decode_query(_) ->
 
 -spec decode_name(binary(), binary()) -> {ok, binary(), binary()} | {error, term()}.
 decode_name(Bin, FullPacket) ->
-    decode_name(Bin, FullPacket, []).
+    %% RFC 1035 §4.1.4 allows compression pointers.  Following a
+    %% pointer that loops back to itself (or any cycle) without a
+    %% depth limit yields an infinite-recursion DoS.  10 jumps is
+    %% well above what legitimate traffic needs (max one pointer in
+    %% practice); a cycle bottoms out quickly.
+    decode_name(Bin, FullPacket, [], 10).
 
-decode_name(<<0, Rest/binary>>, _Packet, Acc) ->
+decode_name(<<0, Rest/binary>>, _Packet, Acc, _PtrBudget) ->
     Name = lists:join(<<".">>, lists:reverse(Acc)),
     {ok, iolist_to_binary(Name), Rest};
-decode_name(<<3:2, Offset:14, Rest/binary>>, Packet, Acc) ->
+decode_name(<<3:2, Offset:14, Rest/binary>>, Packet, Acc, PtrBudget)
+  when PtrBudget > 0 ->
     %% Pointer (compression)
     case Packet of
         _ when byte_size(Packet) > Offset ->
             <<_:Offset/binary, Pointed/binary>> = Packet,
-            case decode_name(Pointed, Packet, Acc) of
+            case decode_name(Pointed, Packet, Acc, PtrBudget - 1) of
                 {ok, Name, _} -> {ok, Name, Rest};
                 Error         -> Error
             end;
         _ ->
             {error, bad_pointer}
     end;
-decode_name(<<Len, Label:Len/binary, Rest/binary>>, Packet, Acc) when Len > 0, Len =< 63 ->
-    decode_name(Rest, Packet, [string:lowercase(Label) | Acc]);
-decode_name(_, _, _) ->
+decode_name(<<3:2, _:14, _/binary>>, _, _, 0) ->
+    {error, pointer_budget_exhausted};
+decode_name(<<Len, Label:Len/binary, Rest/binary>>, Packet, Acc, PtrBudget)
+  when Len > 0, Len =< 63 ->
+    %% `string:lowercase/1` raises badarg on invalid UTF-8.  DNS
+    %% labels are bytes, not UTF-8 — a container that sends a query
+    %% with high-bit-set label bytes used to crash the resolver.
+    %% Lowercase ASCII only; leave other bytes verbatim.
+    decode_name(Rest, Packet, [ascii_lowercase(Label) | Acc], PtrBudget);
+decode_name(_, _, _, _) ->
     {error, bad_name}.
+
+%% Byte-safe ASCII lowercase.  Does not validate UTF-8; maps A-Z
+%% → a-z and leaves every other byte unchanged.
+-spec ascii_lowercase(binary()) -> binary().
+ascii_lowercase(Bin) ->
+    << <<(if C >= $A, C =< $Z -> C + 32; true -> C end)>> || <<C>> <= Bin >>.
 
 -spec encode_name(binary()) -> binary().
 encode_name(Name) ->

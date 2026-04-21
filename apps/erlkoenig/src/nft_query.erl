@@ -37,6 +37,8 @@ get responses contain data, not just ACK/error codes.
     get_ruleset/2, get_ruleset/3,
     list_set_elems/4, list_set_elems/5
 ]).
+%% Exposed for fuzzing — pure parser, consumes kernel dumps.
+-export([parse_dump/2]).
 
 -include("nft_constants.hrl").
 
@@ -206,20 +208,27 @@ parse_dump(
         Rest/binary>>,
     Acc
 ) when
-    Len >= 20
+    %% Len upper bound = header (16) + Rest.  Without this, a lying
+    %% Len field blows up the slice below with badmatch.
+    Len >= 20, Len - 16 =< byte_size(Rest)
 ->
     Subsys = Type bsr 8,
     PayloadLen = Len - 16,
     <<Payload:PayloadLen/binary, Tail/binary>> = Rest,
     case Subsys of
-        ?NFNL_SUBSYS_NFTABLES ->
+        ?NFNL_SUBSYS_NFTABLES when byte_size(Payload) >= 4 ->
             <<_NfGenMsg:4/binary, AttrBin/binary>> = Payload,
-            Attrs = nfnl_attr:decode(AttrBin),
-            parse_dump(Tail, [Attrs | Acc]);
+            %% nfnl_attr:decode raises on malformed NLA — treat as
+            %% skip rather than propagate out of a dump parser.
+            try nfnl_attr:decode(AttrBin) of
+                Attrs -> parse_dump(Tail, [Attrs | Acc])
+            catch _:_ -> parse_dump(Tail, Acc)
+            end;
         _ ->
             parse_dump(Tail, Acc)
     end;
-parse_dump(<<Len:32/little, _/binary>> = Bin, Acc) when Len >= 16 ->
+parse_dump(<<Len:32/little, _/binary>> = Bin, Acc)
+  when Len >= 16, Len =< byte_size(Bin) ->
     <<_:Len/binary, Tail/binary>> = Bin,
     parse_dump(Tail, Acc);
 parse_dump(_, Acc) ->
@@ -267,13 +276,15 @@ parse_rule_attrs(Attrs) ->
             {_, <<H:64/big>>} -> M1#{handle => H};
             _ -> M1
         end,
-    %% NFTA_RULE_EXPRESSIONS may come without NLA_F_NESTED from kernel
+    %% NFTA_RULE_EXPRESSIONS may come without NLA_F_NESTED from kernel.
+    %% nfnl_attr:decode raises on malformed NLA; return [] so the
+    %% rest of the rule attrs still populate the returned map.
     ExprList =
         case lists:keyfind(?NFTA_RULE_EXPRESSIONS, 1, Attrs) of
             {?NFTA_RULE_EXPRESSIONS, nested, EL} ->
                 EL;
             {?NFTA_RULE_EXPRESSIONS, ExprBin} when is_binary(ExprBin) ->
-                nfnl_attr:decode(ExprBin);
+                try nfnl_attr:decode(ExprBin) catch _:_ -> [] end;
             _ ->
                 []
         end,
@@ -300,7 +311,8 @@ extract_counters(ExprList) ->
             ExprAttrs =
                 case Elem of
                     {_, nested, A} -> A;
-                    {_, Bin} when is_binary(Bin) -> nfnl_attr:decode(Bin);
+                    {_, Bin} when is_binary(Bin) ->
+                        try nfnl_attr:decode(Bin) catch _:_ -> [] end;
                     _ -> []
                 end,
             case lists:keyfind(1, 1, ExprAttrs) of
@@ -308,7 +320,8 @@ extract_counters(ExprList) ->
                     CtrData =
                         case lists:keyfind(2, 1, ExprAttrs) of
                             {2, nested, D} -> D;
-                            {2, D} when is_binary(D) -> nfnl_attr:decode(D);
+                            {2, D} when is_binary(D) ->
+                                try nfnl_attr:decode(D) catch _:_ -> [] end;
                             _ -> []
                         end,
                     Bytes =
@@ -430,7 +443,8 @@ extract_set_elems(Attrs) ->
         {_, nested, ElemList} ->
             lists:filtermap(fun extract_one_elem/1, ElemList);
         {_, ElemBin} when is_binary(ElemBin) ->
-            lists:filtermap(fun extract_one_elem/1, nfnl_attr:decode(ElemBin));
+            Decoded = try nfnl_attr:decode(ElemBin) catch _:_ -> [] end,
+            lists:filtermap(fun extract_one_elem/1, Decoded);
         _ ->
             []
     end.
@@ -439,7 +453,7 @@ extract_set_elems(Attrs) ->
 extract_one_elem({_, nested, ElemAttrs}) ->
     extract_key(ElemAttrs);
 extract_one_elem({_, Bin}) when is_binary(Bin) ->
-    extract_key(nfnl_attr:decode(Bin));
+    try extract_key(nfnl_attr:decode(Bin)) catch _:_ -> false end;
 extract_one_elem(_) ->
     false.
 
@@ -452,9 +466,12 @@ extract_key(ElemAttrs) ->
                 _ -> false
             end;
         {_, KeyBin} when is_binary(KeyBin) ->
-            Inner = nfnl_attr:decode(KeyBin),
-            case lists:keyfind(?NFTA_DATA_VALUE, 1, Inner) of
-                {_, Val} -> {true, format_set_val(Val)};
+            case (catch nfnl_attr:decode(KeyBin)) of
+                Inner when is_list(Inner) ->
+                    case lists:keyfind(?NFTA_DATA_VALUE, 1, Inner) of
+                        {_, Val} -> {true, format_set_val(Val)};
+                        _ -> false
+                    end;
                 _ -> false
             end;
         _ ->

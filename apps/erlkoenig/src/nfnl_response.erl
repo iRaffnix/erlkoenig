@@ -89,11 +89,17 @@ parse_with_seq(Bin) when is_binary(Bin) ->
 -spec parse_messages(binary(), response()) -> response().
 parse_messages(<<>>, Acc) ->
     lists:reverse(Acc);
+%% IMPORTANT: every `Len >= X` guard MUST be paired with
+%% `Len =< byte_size(Bin)`.  Without the upper bound a lying Len
+%% field (Len > actual bytes) drops through the match and then
+%% crashes with badmatch at `<<_:Len/binary, Tail/binary>> = Bin`.
+%% Netlink responses are attacker-adjacent (conntrack/nflog events),
+%% so this is a DoS primitive — fuzz caught three instances.
 parse_messages(
     <<Len:32/little, ?NLMSG_ERROR:16/little, _Flags:16/little, _Seq:32/little, _Pid:32/little,
         Error:32/signed-little, _Rest/binary>> = Bin,
     Acc
-) when Len >= 20 ->
+) when Len >= 20, Len =< byte_size(Bin) ->
     Result =
         case Error of
             0 -> ok;
@@ -102,12 +108,12 @@ parse_messages(
     <<_:Len/binary, Tail/binary>> = Bin,
     parse_messages(Tail, [Result | Acc]);
 parse_messages(<<Len:32/little, ?NLMSG_DONE:16/little, _/binary>> = Bin, Acc) when
-    Len >= 16
+    Len >= 16, Len =< byte_size(Bin)
 ->
     <<_:Len/binary, Tail/binary>> = Bin,
     parse_messages(Tail, Acc);
 parse_messages(<<Len:32/little, _Type:16/little, _/binary>> = Bin, Acc) when
-    Len >= 16
+    Len >= 16, Len =< byte_size(Bin)
 ->
     <<_:Len/binary, Tail/binary>> = Bin,
     parse_messages(Tail, Acc);
@@ -117,11 +123,12 @@ parse_messages(_Other, Acc) ->
 -spec parse_messages_seq(binary(), seq_response()) -> seq_response().
 parse_messages_seq(<<>>, Acc) ->
     lists:reverse(Acc);
+%% See parse_messages/2 header comment — same Len-field DoS.
 parse_messages_seq(
     <<Len:32/little, ?NLMSG_ERROR:16/little, _Flags:16/little, Seq:32/little, _Pid:32/little,
         Error:32/signed-little, _Rest/binary>> = Bin,
     Acc
-) when Len >= 20 ->
+) when Len >= 20, Len =< byte_size(Bin) ->
     Result =
         case Error of
             0 -> ok;
@@ -130,12 +137,12 @@ parse_messages_seq(
     <<_:Len/binary, Tail/binary>> = Bin,
     parse_messages_seq(Tail, [{Seq, Result} | Acc]);
 parse_messages_seq(<<Len:32/little, ?NLMSG_DONE:16/little, _/binary>> = Bin, Acc) when
-    Len >= 16
+    Len >= 16, Len =< byte_size(Bin)
 ->
     <<_:Len/binary, Tail/binary>> = Bin,
     parse_messages_seq(Tail, Acc);
 parse_messages_seq(<<Len:32/little, _Type:16/little, _/binary>> = Bin, Acc) when
-    Len >= 16
+    Len >= 16, Len =< byte_size(Bin)
 ->
     <<_:Len/binary, Tail/binary>> = Bin,
     parse_messages_seq(Tail, Acc);

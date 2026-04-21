@@ -47,6 +47,9 @@ jobs:
           elixir-version: '1.18'
           rebar3-version: '3.24'
 
+      - name: Fetch deps
+        run: cd dsl && mix deps.get
+
       - name: DSL tests
         run: cd dsl && mix test
 

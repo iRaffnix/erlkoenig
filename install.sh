@@ -3,7 +3,7 @@
 # ===============================
 #
 # Usage:
-#   sudo sh install.sh --version v0.3.0          # download from GitHub
+#   sudo sh install.sh --version v0.9.0          # download from GitHub
 #   sudo sh install.sh --local /path/to/artifacts # install from local dir
 #
 # Installs to /opt/erlkoenig (customizable with --prefix).
@@ -39,7 +39,7 @@ usage() {
     echo "  --help              Show this help"
     echo ""
     echo "Examples:"
-    echo "  sudo sh install.sh --version v0.3.0"
+    echo "  sudo sh install.sh --version v0.9.0"
     echo "  sudo sh install.sh --local /tmp/artifacts"
     echo "  gh run download <run-id> -D /tmp/artifacts"
     echo "  sudo sh install.sh --local /tmp/artifacts"

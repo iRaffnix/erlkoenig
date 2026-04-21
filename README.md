@@ -1,8 +1,8 @@
 # Erlkoenig — Speed and Control
 
-Container Runtime auf Erlang/OTP 28. Ein 168KB C-Binary spawnt Linux-Namespaces, der BEAM orchestriert den Rest: Netzwerk via Netlink, Firewall via nftables (pure Erlang, kein CLI), cgroups v2 mit PSI-Metriken, Ed25519-Signaturen, AMQP-Events. Elixir DSL kompiliert zu Erlang-Termen, kein YAML. 50ms pro Container.
+Container Runtime auf Erlang/OTP 28. Ein 168KB static-musl C-Binary spawnt Linux-Namespaces, der BEAM orchestriert alles drumherum: Netzwerk via Netlink, Firewall via nftables (pure Erlang, kein CLI), cgroups v2 mit PSI-Metriken, Ed25519-Binärsignaturen, tamper-evidenter Audit-Chain, AMQP-Events. Elixir-DSL kompiliert direkt zu Erlang-Termen — kein YAML, keine JSON-Schema-Gymnastik. 50ms Spawn pro Container, 23ms im Batch.
 
-**Documentation:** https://iraffnix.github.io/erlkoenig/
+**Documentation:** https://iraffnix.github.io/erlkoenig/ — 23-Kapitel Book + API-Reference
 
 ## Example
 
@@ -41,10 +41,23 @@ defmodule ThreeTier do
       limits: %{memory: 268_435_456, pids: 100},
       restart: :permanent do
 
+      # Declare what the workload needs from the platform.
+      # No magic inject — operator wires the bind-mounts explicitly.
+      requires :"dns.local"
+      requires :"journal.local"
+
       nft do
         output do
           nft_rule :accept, ct_state: [:established, :related]
           nft_rule :accept, ip_daddr: {10, 0, 1, 0, 24}, tcp_dport: 4000
+          nft_rule :drop
+        end
+
+        # Rate-limit incoming SYN per source IP + cap concurrent conns.
+        input do
+          conn_limit per_ip: 50, global: 500
+          nft_rule :accept, ct_state: [:established, :related]
+          ip_allow [{1, 2, 3, 0, 24}, {10, 0, 0, 0, 8}]
           nft_rule :drop
         end
       end
@@ -58,10 +71,7 @@ defmodule ThreeTier do
   end
 
   pod "app", strategy: :one_for_all do
-    container "api",
-      binary: "/opt/api",
-      args: ["4000"],
-      restart: :permanent
+    container "api", binary: "/opt/api", args: ["4000"], restart: :permanent
   end
 
   attach "web", to: "dmz", replicas: 3
@@ -70,57 +80,99 @@ end
 ```
 
 ```bash
-# Compile + deploy
-erlkoenig compile stack.exs -o stack.term
-erlkoenig eval 'erlkoenig_config:load("/opt/stack.term").'
+ek dsl compile stack.exs -o stack.term
+ek config load /opt/stack.term
 ```
 
 ## What It Does
 
-- **Containers**: Linux namespaces (PID, NET, MNT, UTS, IPC, CGROUP), 50ms spawn, OTP supervision per pod
-- **Firewall**: nftables via pure Erlang Netlink — egress chains, counters, NFLOG, NAT, conntrack
-- **cgroups v2**: Memory, CPU, PIDs limits + PSI pressure metrics + OOM detection
-- **Observability**: 28 event types over AMQP (container lifecycle, stats, firewall, conntrack, guard, security)
-- **PKI**: Ed25519 binary signing, X.509 chain validation, reject unsigned containers
-- **ELF Analysis**: Syscall extraction, seccomp-BPF generation, language detection (Go/Rust/Zig/C)
-- **Guard**: Conntrack-based threat detection, automatic IP banning
+- **Containers** — Linux namespaces (PID, NET, MNT, UTS, IPC, CGROUP), 50ms spawn, OTP supervision per pod, three strategies (`:one_for_one`, `:one_for_all`, `:rest_for_one`)
+- **Firewall** — nftables via pure Erlang Netlink, kein `nft`-CLI-Fork. Egress- und Ingress-Chains, Counters, NFLOG, NAT, Conntrack, `conn_limit`, `ip_allow`, `rate_limit`, JHash-basiertes DNAT-Loadbalancing
+- **cgroups v2** — Memory, CPU, PIDs Limits + PSI-Pressure-Metriken + OOM-Detection + Cgroup-Devices-Filter
+- **Observability** — 40+ Event-Typen über AMQP (Container-Lifecycle, Stats, Firewall, Conntrack, Guard, Security, Audit, Capabilities)
+- **Audit Chain** — SHA-256 Hash-Chain über alle Security-relevanten Events, Ed25519-Signatur pro Eintrag, täglicher HMAC-Seal. Offline-Verifier in Go (`tools/audit-verifier`) rekonstruiert den ganzen Chain unabhängig vom Producer
+- **PKI** — Ed25519-Binärsignaturen, X.509-Cert-Chain-Validation, Reject-unsigned-Policy
+- **ELF Analysis** — Syscall-Extraktion aus `.text`, Seccomp-BPF-Profil-Generierung, Sprachdetection (Go/Rust/C via DWARF/Buildinfo)
+- **Service Capabilities** — Deklarative Platform-Services: `:dns.local`, `:journal.local`, `:postgres.local`. Kein auto-inject — Operator mounted explizit (Glasbox-Prinzip)
+- **Threat Detection** — Conntrack-basierter Per-IP Threat-Actor (gen_statem), Threat-Mesh für multi-node Ban-Convergence, automatischer nft-Set-Ban mit Timeout
+- **Property-Based Testing** — PropEr-Fuzz auf jeden Binär-Parser (NLA, DWARF, ELF-Syscalls, TLV-Proto, Sig-Files, Audit-Chain), ~13k random inputs pro `rebar3 eunit`-Run
+
+## Install
+
+```bash
+# From GitHub release (production):
+sudo sh install.sh --version v0.8.0
+
+# Oder von lokalem Build:
+sudo sh install.sh --local /path/to/artifacts
+sudo make install          # aus dem source-tree
+
+# Oder bauen + installieren in einem Rutsch:
+git clone https://github.com/iRaffnix/erlkoenig.git
+cd erlkoenig
+make                       # full build
+sudo make install          # nach /opt/erlkoenig
+sudo systemctl start erlkoenig
+```
+
+Requires: Linux 6.x, Erlang/OTP 28+, Elixir 1.18+, musl-gcc (für C-Runtime), nftables, cgroups v2.
 
 ## Build
 
 ```bash
-make              # full build (Erlang + C runtime + tests + release)
-make check        # eunit + dialyzer + DSL tests (no root)
-make release      # OTP release tarball
-make integration  # integration tests (needs sudo)
+make              # full build: C-Runtime + Erlang + Tests + Release-Tarball
+make check        # lint + eunit + dialyzer + DSL tests (non-root)
+make release      # OTP-Release-Tarball (inkl. bundled Elixir)
+make integration  # integration tests (braucht sudo)
+make docs         # ExDoc HTML generieren (23 Book-Kapitel)
+make verifier     # Go audit-verifier statisch bauen
 ```
 
-Requires: Linux, Erlang/OTP 28+, Elixir 1.18+, musl-gcc (for C runtime).
+## Operator CLI (`ek`)
 
-## CLI
+Shell-Wrapper plus escript. Wird mit dem Release ausgeliefert.
 
 ```bash
-erlkoenig compile <file.exs> -o <out.term>   # compile DSL
-erlkoenig validate <file.exs>                # check for errors
-erlkoenig ps                                 # list containers
-erlkoenig stop <id>                          # stop container
-erlkoenig status                             # firewall status
-erlkoenig counters                           # drop counter rates
+ek ps                          # list pods + containers
+ek inspect <name-or-id>        # per-container field dump
+ek logs <name> [--follow]      # tail journal for a container
+ek top                         # cgroup usage live view
 
-erlkoenig sign <binary> --cert <pem> --key <key>
-erlkoenig verify <binary>
-erlkoenig pki create-root-ca --cn <name> --out <cert> --key-out <key>
+ek dsl compile <file.exs> -o <out.term>
+ek config load /opt/stack.term
+
+ek sign <binary> --cert <pem> --key <key>
+ek verify <binary>
+ek pki create-root-ca --cn <name> --out <cert> --key-out <key>
 ```
 
 ## Performance
 
-| Containers | Time | Per Container |
-|------------|------|---------------|
-| 10 | 335ms | 33ms |
-| 50 | 1.2s | 24ms |
-| 200 | 4.7s | 23ms |
-| 500 | 31s | 62ms |
+| Containers | Spawn-Zeit | Pro Container |
+|------------|-----------|---------------|
+| 10         | 335ms     | 33ms          |
+| 50         | 1.2s      | 24ms          |
+| 200        | 4.7s      | 23ms          |
+| 500        | 31s       | 62ms          |
 
-Measured on Hetzner CX22 (2 vCPU, 4 GB RAM).
+Gemessen auf Hetzner CX22 (2 vCPU, 4 GB RAM). 500er-Wert durch BPF-Device-Filter-Ceiling auf kleinen Hosts — grössere VMs skalieren linear.
+
+## Project Layout
+
+```
+apps/erlkoenig/           OTP-App (124+ Module, merged nft)
+  src/                    Erlang-Source
+  test/                   eunit + PropEr-Fuzz (~13 Properties)
+c-runtime/                168KB static-musl C-Container-Spawner
+dsl/                      Elixir-DSL (Erlkoenig.Stack)
+examples/                 DSL-Beispiele + tutorials + scenarios
+  tutorial/               6-stufige hands-on Tutorial-Serie
+  agents/                 Go-Demo-Workloads (case_mgmt, deadline_worker)
+  scenarios/              nft-VM-Scenarios für Simulation
+tests/integration/        Integration-Test-Escripts (brauchen sudo)
+tools/audit-verifier/     Offline Go-Verifier für Audit-Chain
+doc/book/                 23-Kapitel Book (Markdown → ExDoc HTML)
+```
 
 ## License
 

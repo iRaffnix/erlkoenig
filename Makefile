@@ -1,12 +1,14 @@
 # Erlkoenig Makefile
 # ==================
 #
+# The C runtime (erlkoenig_rt) lives in its own repo. Build it there or
+# download a release tarball; point RT_BIN at the resulting binary if you
+# want `make install` to pick it up:
+#   make install RT_BIN=../erlkoenig_rt/build/release/erlkoenig_rt
+#
 # Build:
-#   make              — Alles: bauen, testen, Release
+#   make              — BEAM compile, tests, and OTP release tarball
 #   make check        — Alle Tests ohne Root (eunit + dialyzer + dsl)
-#   make rt           — C-Runtime (static musl)
-#   make rt-san       — C-Runtime mit ASan+UBSan (Entwicklung)
-#   make test-rt      — C-Runtime Unit Tests (braucht libcheck, sudo fuer alle)
 #   make erl          — Erlang kompilieren
 #   make test         — eunit Tests (kein Root)
 #   make dialyzer     — Dialyzer Typanalyse
@@ -19,7 +21,7 @@
 # Install:
 #   sudo sh install.sh --version vX.Y.Z
 #   sudo sh install.sh --local /tmp/artifacts
-#   sudo make install     — Install from local build
+#   sudo make install [RT_BIN=/path/to/erlkoenig_rt]
 #   sudo make uninstall   — Remove installation
 #   make fetch-artifacts  — Download CI artifacts via gh
 #
@@ -28,77 +30,29 @@
 #
 #   make clean        — Alles aufraeumen
 
-.PHONY: all check rt rt-san erl test test-rt dialyzer integration release \
+.PHONY: all check erl test dialyzer integration release \
         dsl dsl-escript test-dsl docs go-demos \
         fmt fmt-check xref lint \
         install uninstall fetch-artifacts \
-        tag clean clean-rt clean-erl clean-dsl
+        tag clean clean-erl clean-dsl
 
 PREFIX          ?= /opt/erlkoenig
 SERVICE_USER    ?= erlkoenig
 
+# Path to the pre-built C runtime binary (produced by the erlkoenig_rt
+# repo's `cmake --build` target). Override on the command line or via env
+# if your checkout lives elsewhere. Only consulted by `install`.
+RT_BIN          ?= ../erlkoenig_rt/build/release/erlkoenig_rt
 BUILD_DIR       := build/release
-BUILD_SAN       := build/san
-RT_BIN          := $(BUILD_DIR)/erlkoenig_rt
-RT_BIN_SAN      := $(BUILD_SAN)/erlkoenig_rt
 INT_TESTS       := tests/integration
 
 # ── Hauptziel ─────────────────────────────────────────────
 
-all: rt erl check release
+all: erl check release
 
 # ── Alle Tests (kein Root) ──────────────────────────────
 
 check: lint test dialyzer test-dsl
-
-# ── C-Runtime (static musl) ──────────────────────────────
-
-rt: $(RT_BIN)
-
-$(RT_BIN): $(BUILD_DIR)/Makefile $(wildcard c-runtime/*.c c-runtime/*.h)
-	cmake --build $(BUILD_DIR) -j$$(nproc)
-
-$(BUILD_DIR)/Makefile:
-	CC=musl-gcc cmake -B $(BUILD_DIR) \
-		-DERLKOENIG_BUILD_DEMOS=ON \
-		-DCMAKE_BUILD_TYPE=Release
-
-# ── C-Runtime (Sanitizer) ────────────────────────────────
-
-rt-san: $(RT_BIN_SAN)
-
-$(RT_BIN_SAN): $(BUILD_SAN)/Makefile $(wildcard c-runtime/*.c c-runtime/*.h)
-	cmake --build $(BUILD_SAN) -j$$(nproc)
-
-$(BUILD_SAN)/Makefile:
-	cmake -B $(BUILD_SAN) \
-		-DERLKOENIG_SANITIZE=ON \
-		-DERLKOENIG_BUILD_DEMOS=ON \
-		-DCMAKE_BUILD_TYPE=Debug
-
-# ── C-Runtime Unit Tests (libcheck) ─────────────────────
-#
-# Tests mit echten Kernel-Ops (minijail-Stil).
-# Ohne Root laufen nur die unprivilegierten Tests (rlimits, seccomp, signals).
-# Mit sudo laufen alle 12 Tests (namespaces, mounts, pivot_root, caps).
-
-BUILD_TEST      := build/test
-TEST_BIN        := $(BUILD_TEST)/test/test_container_setup
-
-test-rt: $(TEST_BIN)
-	@echo ""
-	@echo "==> C-Runtime Unit Tests"
-	@echo ""
-	$(TEST_BIN)
-
-$(TEST_BIN): $(BUILD_TEST)/Makefile $(wildcard c-runtime/*.c c-runtime/*.h c-runtime/test/*.c)
-	cmake --build $(BUILD_TEST) -j$$(nproc)
-
-$(BUILD_TEST)/Makefile:
-	cmake -B $(BUILD_TEST) \
-		-DERLKOENIG_BUILD_TESTS=ON \
-		-DERLKOENIG_BUILD_DEMOS=OFF \
-		-DCMAKE_BUILD_TYPE=Debug
 
 # ── Quality ──────────────────────────────────────────────
 
@@ -253,7 +207,13 @@ $(BUILD_DIR)/api-server: demos/api-server/main.go
 # Installs from a local build. For production, use install.sh
 # which handles downloads, upgrades, and architecture detection.
 
-install: release rt
+install: release
+	@if [ ! -x "$(RT_BIN)" ]; then \
+	    echo "ERROR: RT_BIN=$(RT_BIN) not found or not executable."; \
+	    echo "  Build erlkoenig_rt separately (cmake --build) or pass"; \
+	    echo "  RT_BIN=/path/to/erlkoenig_rt on the command line."; \
+	    exit 1; \
+	fi
 	@echo "Installing to $(PREFIX) ..."
 	@# Service user (idempotent)
 	id -u $(SERVICE_USER) >/dev/null 2>&1 || \
@@ -347,11 +307,8 @@ endif
 
 # ── Clean ────────────────────────────────────────────────
 
-clean: clean-rt clean-erl clean-dsl
-	rm -rf dist
-
-clean-rt:
-	rm -rf build
+clean: clean-erl clean-dsl
+	rm -rf build dist
 
 clean-erl:
 	rebar3 clean

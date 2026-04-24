@@ -13,20 +13,21 @@
 Golden-vector regression harness for the BEAM <-> C runtime wire
 protocol.
 
-Pulls `.bin` frames (the exact bytes an `erlkoenig_rt::send_reply_*`
-path would write) and the matching `.expected.term` files from an
-external vector tree — the architecture repo at
-`erlkoenigin/specs/protocol/vectors/v1/`.
+Reads `.bin` frames (the exact bytes an `erlkoenig_rt::send_reply_*`
+path would write) and the matching `.expected.term` files from the
+in-tree vector directory at
+`apps/erlkoenig/test/protocol_vectors/v1/`.
 
-The tree path is injected via the `ERLKOENIG_PROTOCOL_VECTORS` env
-variable (per SPEC-PROTO-001 + ADR-0021). When unset the test
-generator returns an empty list and logs a skip notice. CI jobs that
-touch the wire protocol MUST set the variable.
+The path is derived from the compiled test module's own location
+(`code:which/1`) so the tests work identically under `rebar3 eunit`,
+under an unpacked release, or when the repo is relocated.
+`ERLKOENIG_PROTOCOL_VECTORS` is respected as an override for ad-hoc
+testing against an alternative vector tree.
 
-Spike scope (SPEC-PROTO-001 Phase B): only the two drifts that
-motivated the spec — REPLY_STATUS TLV decode and the adjacent
-handshake-reconnect invariant. Broader coverage arrives with
-SPEC-RT-006 once libekproto's emit tooling lands.
+Spec reference: SPEC-PROTO-001 (vectors) + ADR-0021 (wire contract).
+The in-tree vectors were vendored from erlkoenigin/specs/protocol/
+vectors/v1/ — the spec repo remains the design-time source, the
+code repo carries the runtime-consumed copies.
 """.
 
 -include_lib("eunit/include/eunit.hrl").
@@ -36,21 +37,27 @@ SPEC-RT-006 once libekproto's emit tooling lands.
 %% =================================================================
 
 replies_golden_test_() ->
+    Dir = vectors_dir(),
+    [
+        {"reply_status_alive",
+         ?_test(golden_reply(Dir, "replies/reply_status_alive"))},
+        {"reply_status_stopped",
+         ?_test(golden_reply(Dir, "replies/reply_status_stopped"))}
+    ].
+
+%% Resolution order:
+%%   1. ERLKOENIG_PROTOCOL_VECTORS env — explicit override
+%%   2. Next to the test module's .beam file — rebar3 copies the
+%%      `test/` tree into _build/test/lib/erlkoenig/test/, so
+%%      `<beam-dir>/protocol_vectors/v1` is the in-tree path.
+vectors_dir() ->
     case os:getenv("ERLKOENIG_PROTOCOL_VECTORS") of
         false ->
-            io:format(user,
-                      "[skip] ERLKOENIG_PROTOCOL_VECTORS not set — "
-                      "golden reply tests skipped. Point it at "
-                      "erlkoenigin/specs/protocol/vectors to enable.~n",
-                      []),
-            [];
-        Dir ->
-            [
-                {"reply_status_alive",
-                 ?_test(golden_reply(Dir, "replies/reply_status_alive"))},
-                {"reply_status_stopped",
-                 ?_test(golden_reply(Dir, "replies/reply_status_stopped"))}
-            ]
+            BeamPath = code:which(?MODULE),
+            filename:join(filename:dirname(BeamPath),
+                          "protocol_vectors/v1");
+        Override ->
+            Override
     end.
 
 golden_reply(Dir, Stem) ->

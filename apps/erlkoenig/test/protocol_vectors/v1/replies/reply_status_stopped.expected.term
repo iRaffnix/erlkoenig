@@ -1,0 +1,5 @@
+%% Semantic expectation for reply_status_stopped.bin.
+%% Represents a container that reports state=0, pid=0, uptime=0 — the
+%% shape a reconnecting BEAM must interpret as "container died during
+%% disconnect" (recovering -> stopped transition in erlkoenig_ct).
+{ok, reply_status, #{state => 0, child_pid => 0, uptime_ms => 0}}.

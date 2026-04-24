@@ -1,0 +1,9 @@
+%% Semantic expectation for reply_status_alive.bin.
+%% Consumed by erlkoenig_proto_golden_tests:replies_golden_test_/0 via
+%% file:consult/1. Must parse as a single Erlang term.
+%%
+%% reply_status_alive.bin is the exact wire output of the C runtime's
+%% send_reply_status(state=1, pid=1234, uptime_ms=5000) — a regression
+%% reproducer for the REPLY_STATUS TLV-vs-positional decode drift
+%% that silently broke BEAM-crash recovery.
+{ok, reply_status, #{state => 1, child_pid => 1234, uptime_ms => 5000}}.

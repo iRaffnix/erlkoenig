@@ -55,12 +55,6 @@ States:
 
 %% gen_statem callbacks
 -export([callback_mode/0, init/1, terminate/3]).
-%% Runtime-optional sibling modules (erlkoenig_fuse).
--dialyzer({no_missing_calls, [save_manifest/2, start_fuse_mount/3, cleanup_fuse/1]}).
-%% erlkoenig_sig:verify uses throw() internally — dialyzer can't infer success path.
--dialyzer({no_match, [maybe_verify_signature/1]}).
-%% build_info return type is extended dynamically by maybe_add_optional_fields.
--dialyzer({no_contracts, [build_info/2, maybe_add_optional_fields/3]}).
 
 -export([creating/3, namespace_ready/3, starting/3,
          running/3, stopping/3, stopped/3, restarting/3,
@@ -78,58 +72,17 @@ States:
 %% Exponential backoff: 1s, 2s, 4s, 8s, 16s, 30s (cap).
 %% The Erlang PID and container IP stay stable across restarts.
 
--record(ct_data, {
-    id            :: binary(),
-    binary_path   :: binary(),
-    args          = [] :: [binary()],
-    env           = [] :: [{binary(), binary()}],
-    uid           = 0  :: non_neg_integer(),
-    gid           = 0  :: non_neg_integer(),
-    ip            :: inet:ip4_address() | undefined,
-    zone          = default :: atom(),
-    sock          :: gen_tcp:socket() | undefined,
-    socket_path   :: binary() | undefined,
-    os_pid        :: non_neg_integer() | undefined,
-    netns_path    :: binary() | undefined,
-    net_info      :: map() | undefined,
-    started_at    :: integer() | undefined,
-    exit_info     :: map() | undefined,
-    error_reason  :: term() | undefined,
-    from          :: gen_statem:from() | undefined,
-    restart       = no_restart :: term(),
-    restart_count = 0          :: non_neg_integer(),
-    user_stopped  = false      :: boolean(),
-    limits        = #{}        :: map(),
-    seccomp       = 0          :: non_neg_integer(),
-    caps_keep     = 0          :: non_neg_integer(),
-    output        = undefined  :: pid() | undefined,
-    name          = undefined  :: binary() | undefined,
-    files         = #{}        :: #{binary() => binary()},
-    handshake     = false      :: boolean(),
-    pty           = false      :: boolean(),
-    firewall      = #{}        :: map() | skip_firewall,
-    extra_opts    = #{}        :: map(),
-    sig_path      = undefined  :: binary() | undefined,
-    signature_required = false :: boolean(),
-    sig_verified  = false      :: boolean(),
-    sig_meta      = undefined  :: map() | undefined,
-    fuse_mount    = undefined  :: binary() | undefined,
-    tmpfs_mounts  = []         :: [map()],
-    volumes       = []         :: [map()],
-    requires      = []         :: [atom()],
-    dns_allowlist = undefined  :: [binary()] | undefined,
-    pod_supervised = false     :: boolean(),
-    publish       = []         :: [map()],
-    stats_timers  = []         :: [reference()],
-    last_cpu_usec = undefined  :: non_neg_integer() | undefined,
-    stream        = undefined  :: map() | undefined,
-    log_publisher = undefined  :: {pid(), atomics:atomics_ref()} | undefined,
-    admission_token = undefined :: reference() | undefined
-}).
+%% The `#ct_data{}' record lives in `erlkoenig_ct_state.hrl' so the
+%% extracted helper modules can match on the same shape without
+%% accessor round-trips. Include here so every state-callback clause
+%% keeps pattern-matching on fields exactly as before.
+-include("erlkoenig_ct_state.hrl").
 
 -define(SPAWN_TIMEOUT, application:get_env(erlkoenig, spawn_timeout, 30_000)).
 -define(GO_TIMEOUT,    application:get_env(erlkoenig, go_timeout,    10_000)).
 -define(STOP_TIMEOUT,  application:get_env(erlkoenig, stop_timeout,   5_000)).
+-define(RECONNECT_MAX_ATTEMPTS,
+        application:get_env(erlkoenig, reconnect_max_attempts, 30)).
 
 %% =================================================================
 %% API
@@ -254,7 +207,7 @@ callback_mode() -> [state_functions, state_enter].
 init({normal, BinaryPath, Opts}) ->
     Id = make_id(),
     proc_lib:set_label({erlkoenig_ct, Id}),
-    Restart = validate_restart(maps:get(restart, Opts, no_restart)),
+    Restart = erlkoenig_ct_opts:validate_restart(maps:get(restart, Opts, no_restart)),
     Name = maps:get(name, Opts, undefined),
     %% Restart counter survives gen_statem reincarnations (pod-supervisor
     %% respawn, drift-reconcile teardown/re-spawn) by living in
@@ -298,8 +251,8 @@ init({normal, BinaryPath, Opts}) ->
         restart     = Restart,
         restart_count = InitRestartCount,
         limits      = maps:get(limits, Opts, #{}),
-        seccomp     = seccomp_profile_id(maps:get(seccomp, Opts, none)),
-        caps_keep   = caps_to_mask(maps:get(caps, Opts, [])),
+        seccomp     = erlkoenig_ct_opts:seccomp_profile_id(maps:get(seccomp, Opts, none)),
+        caps_keep   = erlkoenig_ct_opts:caps_to_mask(maps:get(caps, Opts, [])),
         output      = maps:get(output, Opts, undefined),
         name        = Name,
         files       = maps:get(files, Opts, #{}),
@@ -307,8 +260,9 @@ init({normal, BinaryPath, Opts}) ->
         firewall    = maps:get(firewall, Opts, #{}),
         sig_path    = maps:get(sig_path, Opts, undefined),
         signature_required = maps:get(signature_required, Opts, false),
-        volumes     = merge_socket_mounts(maps:get(volumes, Opts, []),
-                                          maps:get(socket_mounts, Opts, [])),
+        volumes     = erlkoenig_ct_opts:merge_socket_mounts(
+                        maps:get(volumes, Opts, []),
+                        maps:get(socket_mounts, Opts, [])),
         requires    = maps:get(requires, Opts, []),
         dns_allowlist = maps:get(dns_allowlist, Opts, undefined),
         pod_supervised = maps:get(pod_supervised, Opts, false),
@@ -334,10 +288,10 @@ init({recover, ContainerId, #{socket_path := SocketPath, os_pid := OsPid} = Info
         os_pid      = OsPid,
         ip          = maps:get(ip, Config, undefined),
         zone        = maps:get(zone, Config, default),
-        restart     = validate_restart(maps:get(restart, Config, no_restart)),
+        restart     = erlkoenig_ct_opts:validate_restart(maps:get(restart, Config, no_restart)),
         limits      = maps:get(limits, Config, #{}),
-        seccomp     = seccomp_profile_id(maps:get(seccomp, Config, none)),
-        caps_keep   = caps_to_mask(maps:get(caps, Config, [])),
+        seccomp     = erlkoenig_ct_opts:seccomp_profile_id(maps:get(seccomp, Config, none)),
+        caps_keep   = erlkoenig_ct_opts:caps_to_mask(maps:get(caps, Config, [])),
         name        = maps:get(name, Config, undefined),
         firewall    = maps:get(firewall, Config, #{}),
         volumes     = maps:get(volumes, Config, []),
@@ -350,8 +304,8 @@ init({BinaryPath, Opts}) when is_binary(BinaryPath), is_map(Opts) ->
     init({normal, BinaryPath, Opts}).
 
 terminate(_Reason, _State, #ct_data{sock = Sock, socket_path = SockPath}) ->
-    safe_sock_close(Sock),
-    cleanup_socket_file(SockPath),
+    erlkoenig_ct_resources:safe_sock_close(Sock),
+    erlkoenig_ct_resources:cleanup_socket_file(SockPath),
     ok.
 
 %% =================================================================
@@ -365,7 +319,7 @@ creating(enter, _OldState, Data) ->
     {keep_state, Data};
 
 creating(info, do_spawn, Data) ->
-    Data2 = resolve_volumes(Data),
+    Data2 = erlkoenig_ct_volume:resolve_volumes(Data),
     creating_do_spawn(Data2);
 
 creating(info, {tcp, Sock, Reply}, #ct_data{sock = Sock,
@@ -394,7 +348,7 @@ creating_do_spawn(#ct_data{id = ContainerId,
                             zone = Zone} = Data) ->
     %% Pre-spawn gates — both must pass before any expensive work
     %% (socket creation, namespace setup, nft installation).
-    case admission_then_quarantine(Zone, BinaryPath) of
+    case erlkoenig_ct_security:admission_then_quarantine(Zone, BinaryPath) of
         {ok, AdmissionToken} ->
             creating_do_spawn_gated(Data#ct_data{admission_token = AdmissionToken});
         {error, admission_timeout} ->
@@ -407,11 +361,11 @@ creating_do_spawn(#ct_data{id = ContainerId,
              Data#ct_data{error_reason = admission_queue_full}};
         {error, {quarantined, Hash, Since}} ->
             logger:warning("container ~s: binary quarantined (~s since ~p)",
-                           [ContainerId, format_hash_prefix(Hash), Since]),
+                           [ContainerId, erlkoenig_ct_security:format_hash_prefix(Hash), Since]),
             erlkoenig_error:emit(
               ?EK_ERROR(runtime, binary_quarantined,
                         "spawn refused by quarantine",
-                        #{hash_prefix => format_hash_prefix(Hash),
+                        #{hash_prefix => erlkoenig_ct_security:format_hash_prefix(Hash),
                           since_ms => Since}),
               ContainerId),
             {next_state, failed,
@@ -419,19 +373,31 @@ creating_do_spawn(#ct_data{id = ContainerId,
     end.
 
 creating_do_spawn_gated(#ct_data{id = ContainerId} = Data) ->
-    SocketPath = make_socket_path(ContainerId),
+    SocketPath = erlkoenig_ct_rt:make_socket_path(ContainerId),
     ok = filelib:ensure_dir(binary_to_list(SocketPath)),
     %% Pre-create the container cgroup so the C runtime starts in it
     %% instead of the beam cgroup. This prevents erlkoenig_rt processes
     %% from counting against beam_memory_max.
+    %%
+    %% The fallback to `undefined' (rt runs in beam cgroup instead)
+    %% is intentional — a cgroup setup failure shouldn't block spawn
+    %% outright. But it used to be silent: operators had no way to
+    %% see that beam_memory_max was being depleted by spawn traffic,
+    %% and cgroup-setup issues (permission drifts, missing controllers,
+    %% persistent_term not yet populated) were invisible. Log on the
+    %% fallback so the drift is at least auditable.
     CgroupProcs = case erlkoenig_cgroup:ensure_container_dir(ContainerId) of
         {ok, ProcsPath} -> ProcsPath;
-        _               -> undefined
+        {error, CgroupReason} ->
+            logger:warning("container ~s: cgroup dir setup failed (~p), "
+                           "rt will start in beam cgroup",
+                           [ContainerId, CgroupReason]),
+            undefined
     end,
     %% Start C runtime via setsid in a background Erlang process.
     %% If cgroup is available, write the shell's PID into the container
     %% cgroup before exec — so erlkoenig_rt inherits it.
-    RtBin = rt_path(),
+    RtBin = erlkoenig_ct_rt_discover:rt_path(),
     SockStr = binary_to_list(SocketPath),
     IdStr = binary_to_list(ContainerId),
     CgFlag = case CgroupProcs of
@@ -443,7 +409,7 @@ creating_do_spawn_gated(#ct_data{id = ContainerId} = Data) ->
         [RtBin, SockStr, IdStr, CgFlag])),
     erlang:spawn(fun() -> os:cmd(ShCmd) end),
     %% Wait for C runtime to bind the socket, then connect
-    case wait_and_connect(SocketPath, 10000) of
+    case erlkoenig_ct_rt:wait_and_connect(SocketPath, 10000) of
         {ok, Sock} ->
             ok = inet:setopts(Sock, [binary, {packet, 4}, {active, true}]),
             %% Protocol handshake via socket
@@ -464,8 +430,8 @@ creating_do_spawn_gated(#ct_data{id = ContainerId} = Data) ->
     end.
 
 creating_send_spawn(Data) ->
-    DiskMB = disk_limit_mb(Data#ct_data.limits),
-    DnsIp  = effective_dns_ip(Data),
+    DiskMB = erlkoenig_ct_opts:disk_limit_mb(Data#ct_data.limits),
+    DnsIp  = erlkoenig_ct_net:effective_dns_ip(Data),
     Flags  = case Data#ct_data.pty of
                  true  -> erlkoenig_proto:spawn_flag_pty();
                  false -> 0
@@ -490,13 +456,16 @@ creating_send_spawn(Data) ->
         image_path => maps:get(image_path, ExtraOpts, <<>>)
     },
     Cmd = erlkoenig_proto:encode_cmd_spawn(SpawnOpts),
-    send_to_rt(Cmd, Data).
+    %% If send fails here the state machine will catch the tcp_closed
+    %% and transition creating -> failed; no further reply needed.
+    _ = erlkoenig_ct_rt:send_to_rt(Cmd, Data),
+    ok.
 
 creating_handle_rt_data(Reply, false = _Handshake, Data) ->
     %% First message: protocol handshake reply
     case erlkoenig_proto:check_handshake_reply(Reply) of
         ok ->
-            case maybe_verify_signature(Data) of
+            case erlkoenig_ct_security:maybe_verify_signature(Data) of
                 {ok, Data2} ->
                     creating_send_spawn(Data2),
                     {keep_state, Data2#ct_data{handshake = true}};
@@ -545,7 +514,7 @@ namespace_ready(enter, _OldState, _Data) ->
     keep_state_and_data;
 
 namespace_ready(info, do_container_setup, Data) ->
-    do_container_setup(Data);
+    erlkoenig_ct_cgroup:do_container_setup(Data);
 
 namespace_ready(info, {tcp, Sock, Reply}, #ct_data{sock = Sock} = Data) ->
     namespace_ready_handle_data(Reply, Data);
@@ -558,7 +527,7 @@ namespace_ready({call, _From}, stop_container, _Data) ->
     {keep_state_and_data, [postpone]};
 
 namespace_ready({call, From}, get_info, Data) ->
-    {keep_state_and_data, [{reply, From, build_info(namespace_ready, Data)}]};
+    {keep_state_and_data, [{reply, From, erlkoenig_ct_info:build_info(namespace_ready, Data)}]};
 
 namespace_ready(info, {tcp_closed, Sock}, #ct_data{sock = Sock} = Data) ->
     {next_state, failed,
@@ -615,25 +584,31 @@ starting(info, check_restart, _Data) -> keep_state_and_data.
 %% running - Container executing
 %% =================================================================
 
+%% First entry into running for this gen_statem lifetime.
+%%   - Normal spawn: entered from `starting` with first_running_entry_done=false
+%%   - Init-recover after daemon crash: entered from `recovering` with the same
+%%     false flag (init({recover, _}) uses the record default)
+%% Both paths need the full registrations (pg, events, dns/dets/audit, token).
+running(enter, _OldState, #ct_data{first_running_entry_done = false} = Data) ->
+    running_first_entry(Data);
+%% Same-session reconnect (`running → disconnected → recovering → running'):
+%% the one-shot registrations already fired; firing them again would
+%%   - pg:join a second time (pg is NOT idempotent — broadcasts
+%%     would be delivered twice to self())
+%%   - emit a duplicate `container_started' event, skewing ek output,
+%%     metrics counters, and the event log
+%%   - write a duplicate `volume_mounted' audit entry, making the
+%%     mounted/released reconcile on audit trails go negative
+%% Only the transient process/timer pair needs to be refreshed — stats
+%% timers and the log publisher were orphaned by the disconnect window
+%% and must be cancelled + restarted with fresh refs.
 running(enter, _OldState, Data) ->
-    pg:join(erlkoenig_pg, erlkoenig_cts, self()),
-    erlkoenig_events:notify({container_started, Data#ct_data.id,
-                             Data#ct_data.name, self()}),
-    dns_register(Data),
-    dns_filter_register(Data),
-    dets_register(Data),
-    audit_volumes_mounted(Data),
-    %% The spawn is complete — release the admission token so another
-    %% waiter can proceed. The container is now using its long-lived
-    %% resources (cgroup, netns, firewall) which don't count against
-    %% the bounded-concurrency spawn gate.
-    release_admission_token(Data),
-    Timers = start_stats_timers(Data#ct_data.publish),
-    LogPub = maybe_start_log_publisher(Data),
-    {keep_state, Data#ct_data{started_at = erlang:monotonic_time(millisecond),
-                              stats_timers = Timers,
-                              log_publisher = LogPub,
-                              admission_token = undefined}};
+    erlkoenig_ct_observe:cancel_stats_timers(Data#ct_data.stats_timers),
+    erlkoenig_ct_observe:maybe_stop_log_publisher(Data#ct_data.log_publisher),
+    Timers = erlkoenig_ct_observe:start_stats_timers(Data#ct_data.publish),
+    LogPub = erlkoenig_ct_observe:maybe_start_log_publisher(Data),
+    {keep_state, Data#ct_data{stats_timers = Timers,
+                              log_publisher = LogPub}};
 
 running(info, {tcp, Sock, Reply}, #ct_data{sock = Sock} = Data) ->
     running_handle_data(Reply, Data);
@@ -650,42 +625,83 @@ running(info, {tcp_error, Sock, Reason}, #ct_data{sock = Sock} = Data) ->
     {next_state, disconnected, Data#ct_data{sock = undefined}};
 
 running({call, From}, stop_container, Data) ->
-    send_to_rt(erlkoenig_proto:encode_cmd_kill(15), Data),
-    {next_state, stopping, Data#ct_data{from = From, user_stopped = true}};
+    case erlkoenig_ct_rt:send_to_rt(erlkoenig_proto:encode_cmd_kill(15), Data) of
+        ok ->
+            {next_state, stopping,
+             Data#ct_data{from = From, user_stopped = true}};
+        {error, not_connected} = Err ->
+            %% Socket was torn down under us — fail loud instead of
+            %% transitioning to stopping and hanging the caller on a
+            %% stop-timeout reply that will never fire.
+            {keep_state_and_data, [{reply, From, Err}]}
+    end;
 
 running({call, From}, {kill, Signal}, Data) ->
-    send_to_rt(erlkoenig_proto:encode_cmd_kill(Signal), Data),
-    {next_state, stopping, Data,
-     [{reply, From, ok}]};
+    case erlkoenig_ct_rt:send_to_rt(erlkoenig_proto:encode_cmd_kill(Signal), Data) of
+        ok ->
+            {next_state, stopping, Data, [{reply, From, ok}]};
+        {error, not_connected} = Err ->
+            {keep_state_and_data, [{reply, From, Err}]}
+    end;
 
 running({call, From}, {attach, OutputPid}, Data) ->
     {keep_state, Data#ct_data{output = OutputPid}, [{reply, From, ok}]};
 
 running({call, From}, {resize, Rows, Cols}, #ct_data{pty = true} = Data) ->
-    send_to_rt(erlkoenig_proto:encode_cmd_resize(Rows, Cols), Data),
-    {keep_state_and_data, [{reply, From, ok}]};
+    Reply = erlkoenig_ct_rt:send_to_rt(
+              erlkoenig_proto:encode_cmd_resize(Rows, Cols), Data),
+    {keep_state_and_data, [{reply, From, Reply}]};
 
 running({call, From}, {resize, _Rows, _Cols}, _Data) ->
     {keep_state_and_data, [{reply, From, {error, not_pty}}]};
 
 running({call, From}, get_info, Data) ->
-    {keep_state_and_data, [{reply, From, build_info(running, Data)}]};
+    {keep_state_and_data, [{reply, From, erlkoenig_ct_info:build_info(running, Data)}]};
 
 running(info, {poll_stats, Interval, Metrics}, Data) ->
-    Data2 = poll_and_publish_stats(Metrics, Data),
+    Data2 = erlkoenig_ct_observe:poll_and_publish_stats(Metrics, Data),
     _Ref = erlang:send_after(Interval, self(), {poll_stats, Interval, Metrics}),
     {keep_state, Data2};
 
 running(cast, {send_input, InputData}, Data) ->
-    send_to_rt(erlkoenig_proto:encode_cmd_stdin(InputData), Data),
+    %% Cast: no reply path. send_to_rt already logs a warning on
+    %% not_connected — there's nobody to hand the error to.
+    _ = erlkoenig_ct_rt:send_to_rt(
+          erlkoenig_proto:encode_cmd_stdin(InputData), Data),
     keep_state_and_data.
+
+%% Shared first-entry init. Fires on normal spawn (`starting → running`)
+%% and on init-recover (daemon restart reconnecting to an already-running
+%% C runtime); both paths need the fresh ecosystem to learn about the
+%% container. `first_running_entry_done` is set so same-session
+%% reconnects take the refresh-only clause.
+running_first_entry(Data) ->
+    pg:join(erlkoenig_pg, erlkoenig_cts, self()),
+    erlkoenig_events:notify({container_started, Data#ct_data.id,
+                             Data#ct_data.name, self()}),
+    erlkoenig_ct_resources:dns_register(Data),
+    erlkoenig_ct_resources:dns_filter_register(Data),
+    erlkoenig_ct_resources:dets_register(Data),
+    erlkoenig_ct_resources:audit_volumes_mounted(Data),
+    %% The spawn is complete — release the admission token so another
+    %% waiter can proceed. The container is now using its long-lived
+    %% resources (cgroup, netns, firewall) which don't count against
+    %% the bounded-concurrency spawn gate.
+    erlkoenig_ct_security:release_admission_token(Data),
+    Timers = erlkoenig_ct_observe:start_stats_timers(Data#ct_data.publish),
+    LogPub = erlkoenig_ct_observe:maybe_start_log_publisher(Data),
+    {keep_state, Data#ct_data{started_at = erlang:monotonic_time(millisecond),
+                              stats_timers = Timers,
+                              log_publisher = LogPub,
+                              admission_token = undefined,
+                              first_running_entry_done = true}}.
 
 %% =================================================================
 %% stopping - SIGTERM sent, waiting for exit
 %% =================================================================
 
 stopping(enter, _OldState, Data) ->
-    cancel_stats_timers(Data#ct_data.stats_timers),
+    erlkoenig_ct_observe:cancel_stats_timers(Data#ct_data.stats_timers),
     {keep_state, Data#ct_data{stats_timers = []},
      [{state_timeout, ?STOP_TIMEOUT, force_kill}]};
 
@@ -704,7 +720,9 @@ stopping(info, {tcp_error, Sock, _Reason}, #ct_data{sock = Sock} = Data) ->
     {next_state, stopped, Data2#ct_data{sock = undefined}};
 
 stopping(state_timeout, force_kill, Data) when Data#ct_data.sock =/= undefined ->
-    send_to_rt(erlkoenig_proto:encode_cmd_kill(9), Data),
+    %% Best effort — if the socket went away between the guard and
+    %% the send, the give_up timeout below will trip.
+    _ = erlkoenig_ct_rt:send_to_rt(erlkoenig_proto:encode_cmd_kill(9), Data),
     {keep_state_and_data, [{state_timeout, ?STOP_TIMEOUT, give_up}]};
 
 stopping(state_timeout, give_up, Data) ->
@@ -731,10 +749,10 @@ starting_handle_data(Reply, Data) ->
             {next_state, failed,
              Data2#ct_data{error_reason = {go_failed, Code, ErrMsg}}};
         {ok, reply_stdout, #{data := Chunk}} ->
-            forward_output(stdout, Chunk, Data),
+            erlkoenig_ct_observe:forward_output(stdout, Chunk, Data),
             keep_state_and_data;
         {ok, reply_stderr, #{data := Chunk}} ->
-            forward_output(stderr, Chunk, Data),
+            erlkoenig_ct_observe:forward_output(stderr, Chunk, Data),
             keep_state_and_data;
         Other ->
             {next_state, failed,
@@ -746,10 +764,10 @@ running_handle_data(Reply, Data) ->
         {ok, reply_exited, ExitInfo} ->
             {next_state, stopped, Data#ct_data{exit_info = ExitInfo}};
         {ok, reply_stdout, #{data := Chunk}} ->
-            forward_output(stdout, Chunk, Data),
+            erlkoenig_ct_observe:forward_output(stdout, Chunk, Data),
             keep_state_and_data;
         {ok, reply_stderr, #{data := Chunk}} ->
-            forward_output(stderr, Chunk, Data),
+            erlkoenig_ct_observe:forward_output(stderr, Chunk, Data),
             keep_state_and_data;
         {ok, reply_metrics_event, Event} ->
             erlkoenig_events:notify({container_metrics,
@@ -766,10 +784,10 @@ stopping_handle_data(Reply, Data) ->
             Data2 = maybe_reply_stop(Data, ok),
             {next_state, stopped, Data2#ct_data{exit_info = ExitInfo}};
         {ok, reply_stdout, #{data := Chunk}} ->
-            forward_output(stdout, Chunk, Data),
+            erlkoenig_ct_observe:forward_output(stdout, Chunk, Data),
             keep_state_and_data;
         {ok, reply_stderr, #{data := Chunk}} ->
-            forward_output(stderr, Chunk, Data),
+            erlkoenig_ct_observe:forward_output(stderr, Chunk, Data),
             keep_state_and_data;
         _Other ->
             keep_state_and_data
@@ -781,23 +799,23 @@ stopping_handle_data(Reply, Data) ->
 
 stopped(enter, _OldState, Data) ->
     pg:leave(erlkoenig_pg, erlkoenig_cts, self()),
-    cancel_stats_timers(Data#ct_data.stats_timers),
-    maybe_stop_log_publisher(Data#ct_data.log_publisher),
-    firewall_remove(Data#ct_data.id),
-    cleanup_fuse(Data),
+    erlkoenig_ct_observe:cancel_stats_timers(Data#ct_data.stats_timers),
+    erlkoenig_ct_observe:maybe_stop_log_publisher(Data#ct_data.log_publisher),
+    erlkoenig_ct_net:firewall_remove(Data#ct_data.id),
+    erlkoenig_ct_volume:cleanup_fuse(Data),
 
-    safe_sock_close(Data#ct_data.sock),
-    cleanup_socket_file(Data#ct_data.socket_path),
-    dns_unregister(Data),
-    dns_filter_unregister(Data),
-    dets_unregister(Data),
-    audit_volumes_released(Data),
-    cleanup_ephemeral_volumes(Data),
+    erlkoenig_ct_resources:safe_sock_close(Data#ct_data.sock),
+    erlkoenig_ct_resources:cleanup_socket_file(Data#ct_data.socket_path),
+    erlkoenig_ct_resources:dns_unregister(Data),
+    erlkoenig_ct_resources:dns_filter_unregister(Data),
+    erlkoenig_ct_resources:dets_unregister(Data),
+    erlkoenig_ct_resources:audit_volumes_released(Data),
+    erlkoenig_ct_resources:cleanup_ephemeral_volumes(Data),
     %% Release the admission token if we're stopping before `running`
     %% fired (early failure path). No-op if the token was already
     %% returned.
-    release_admission_token(Data),
-    notify_stopped(Data),
+    erlkoenig_ct_security:release_admission_token(Data),
+    erlkoenig_ct_observe:notify_stopped(Data),
     Data2 = Data#ct_data{sock = undefined, fuse_mount = undefined,
                          stats_timers = [], log_publisher = undefined},
     case Data2#ct_data.pod_supervised of
@@ -805,10 +823,10 @@ stopped(enter, _OldState, Data) ->
             %% Pod supervisor handles restart — propagate exit reason.
             %% Full cleanup: veth, cgroup, IP — so fresh resources
             %% are allocated on supervisor restart.
-            _ = teardown_veth(Data2),
-            _ = destroy_cgroup(Data2),
-            Data3 = release_ip(Data2#ct_data{net_info = undefined}),
-            ExitReason = pod_exit_reason(Data3),
+            _ = erlkoenig_ct_net:teardown_veth(Data2),
+            _ = erlkoenig_ct_cgroup:destroy_cgroup(Data2),
+            Data3 = erlkoenig_ct_resources:release_ip(Data2#ct_data{net_info = undefined}),
+            ExitReason = erlkoenig_ct_opts:pod_exit_reason(Data3),
             {stop, ExitReason, Data3};
         false ->
             self() ! check_restart,
@@ -816,16 +834,19 @@ stopped(enter, _OldState, Data) ->
     end;
 
 stopped(info, check_restart, Data) ->
-    case handle_check_restart(Data) of
-        {keep_state, Data2} ->
-            %% Terminal state for a standalone container that will not
-            %% restart (user stop or exhausted retries). Shut down the
-            %% gen_statem so the process doesn't linger as a zombie in
-            %% supervisor:which_children/1.
-            {stop, normal, Data2};
-        Other ->
-            Other
-    end;
+    %% handle_check_restart returns either `{next_state, restarting, _}'
+    %% (will restart) or `{keep_state, Data2}' (terminal).  The
+    %% terminal path used to `{stop, normal, Data2}' the gen_statem to
+    %% avoid a lingering "zombie" in `supervisor:which_children/1'.
+    %% That broke post-mortem inspection: integration tests 01
+    %% (Natural exit), 08 (File injection), 20 (BEAM survives OOM)
+    %% spawn a container, wait for it to exit, then call
+    %% `erlkoenig:inspect/1' to verify final state — which requires
+    %% the gen_statem to still be alive in `stopped'.
+    %% Keep the state machine running; callers that want hard
+    %% teardown can `erlkoenig:stop/1' explicitly, which transitions
+    %% through the same cleanup path again as a no-op.
+    handle_check_restart(Data);
 %% Stats poll / TCP events may already be in the mailbox when we enter
 %% this state — cancel_timer/1 removes the scheduled send but cannot
 %% pull back messages that already made it through. Ignore them.
@@ -839,7 +860,7 @@ stopped(info, {tcp, _, _}, _Data) ->
     keep_state_and_data;
 
 stopped({call, From}, get_info, Data) ->
-    {keep_state_and_data, [{reply, From, build_info(stopped, Data)}]};
+    {keep_state_and_data, [{reply, From, erlkoenig_ct_info:build_info(stopped, Data)}]};
 
 stopped({call, From}, stop_container, Data) ->
     {keep_state, Data#ct_data{user_stopped = true}, [{reply, From, ok}]};
@@ -852,7 +873,7 @@ stopped({call, From}, _, _Data) ->
 %% =================================================================
 
 restarting(enter, _OldState, Data) ->
-    Backoff = backoff_ms(Data#ct_data.restart_count),
+    Backoff = erlkoenig_ct_opts:backoff_ms(Data#ct_data.restart_count),
     erlkoenig_events:notify({container_restarting, Data#ct_data.id,
                              Data#ct_data.name,
                              Data#ct_data.restart_count}),
@@ -862,6 +883,11 @@ restarting(enter, _OldState, Data) ->
 
 restarting(state_timeout, do_restart, Data) ->
     %% Reset transient state, keep identity + config + restart count.
+    %% first_running_entry_done MUST reset to false so the new incarnation
+    %% of the container fires its one-shot registrations (pg, events,
+    %% dns, audit) at running(enter). Leaving it true would make
+    %% subscribers miss the restart — no container_started event, no
+    %% audit `volume_mounted', no pg membership for broadcasts.
     {next_state, creating, Data#ct_data{
         os_pid       = undefined,
         netns_path   = undefined,
@@ -874,18 +900,19 @@ restarting(state_timeout, do_restart, Data) ->
         sock         = undefined,
         socket_path  = undefined,
         fuse_mount   = undefined,
-        tmpfs_mounts = []
+        tmpfs_mounts = [],
+        first_running_entry_done = false
     }};
 
 restarting({call, From}, stop_container, Data) ->
     %% User stops during backoff: release IP, go to final stopped.
-    Data2 = release_ip(Data),
+    Data2 = erlkoenig_ct_resources:release_ip(Data),
     {next_state, stopped,
      Data2#ct_data{user_stopped = true, net_info = undefined},
      [{reply, From, ok}]};
 
 restarting({call, From}, get_info, Data) ->
-    {keep_state_and_data, [{reply, From, build_info(restarting, Data)}]};
+    {keep_state_and_data, [{reply, From, erlkoenig_ct_info:build_info(restarting, Data)}]};
 
 restarting({call, From}, _, _Data) ->
     {keep_state_and_data, [{reply, From, {error, restarting}}]};
@@ -909,17 +936,30 @@ restarting(info, check_restart, _Data) ->
 
 failed(enter, _OldState, Data) ->
     pg:leave(erlkoenig_pg, erlkoenig_cts, self()),
-    cancel_stats_timers(Data#ct_data.stats_timers),
-    firewall_remove(Data#ct_data.id),
-    cleanup_fuse(Data),
+    erlkoenig_ct_observe:cancel_stats_timers(Data#ct_data.stats_timers),
+    %% Stop the log publisher if it was started — `stopping → failed`
+    %% (e.g. kill_timeout) reaches this state AFTER `running(enter, _)`
+    %% has already spawned a publisher. Without this call the publisher
+    %% stays alive as a process with a dead container attached to it,
+    %% leaking one process per crash-under-kill on long-lived nodes.
+    %% Mirrors `stopped(enter, _)`.
+    erlkoenig_ct_observe:maybe_stop_log_publisher(Data#ct_data.log_publisher),
+    erlkoenig_ct_net:firewall_remove(Data#ct_data.id),
+    erlkoenig_ct_volume:cleanup_fuse(Data),
 
-    safe_sock_close(Data#ct_data.sock),
-    cleanup_socket_file(Data#ct_data.socket_path),
-    dns_unregister(Data),
-    dns_filter_unregister(Data),
-    dets_unregister(Data),
-    cleanup_ephemeral_volumes(Data),
-    release_admission_token(Data),
+    erlkoenig_ct_resources:safe_sock_close(Data#ct_data.sock),
+    erlkoenig_ct_resources:cleanup_socket_file(Data#ct_data.socket_path),
+    erlkoenig_ct_resources:dns_unregister(Data),
+    erlkoenig_ct_resources:dns_filter_unregister(Data),
+    erlkoenig_ct_resources:dets_unregister(Data),
+    %% Audit volume release here too — a failed container still held
+    %% volumes while alive, so the audit trail needs the release event
+    %% to balance the earlier volume_mounted entries. Previously only
+    %% `stopped` emitted these, so crash-path containers left unbalanced
+    %% audit records.
+    erlkoenig_ct_resources:audit_volumes_released(Data),
+    erlkoenig_ct_resources:cleanup_ephemeral_volumes(Data),
+    erlkoenig_ct_security:release_admission_token(Data),
     %% Record the crash against the binary's hash so the quarantine
     %% circuit breaker can spot crashloops. Quarantine failures caused
     %% by quarantine itself (error_reason = {quarantined, _}) don't
@@ -927,18 +967,19 @@ failed(enter, _OldState, Data) ->
     %% would keep driving its own quarantine deeper.
     case Data#ct_data.error_reason of
         {quarantined, _} -> ok;
-        _ -> _ = safe_record_crash(Data#ct_data.binary_path)
+        _ -> _ = erlkoenig_ct_security:safe_record_crash(Data#ct_data.binary_path)
     end,
     erlkoenig_events:notify({container_failed, Data#ct_data.id,
                              Data#ct_data.name,
                              Data#ct_data.error_reason}),
     logger:error("container ~s failed: ~p",
                  [Data#ct_data.id, Data#ct_data.error_reason]),
-    Data2 = Data#ct_data{sock = undefined, fuse_mount = undefined},
+    Data2 = Data#ct_data{sock = undefined, fuse_mount = undefined,
+                         stats_timers = [], log_publisher = undefined},
     case Data2#ct_data.pod_supervised of
         true ->
-            _ = teardown_veth(Data2),
-            _ = destroy_cgroup(Data2),
+            _ = erlkoenig_ct_net:teardown_veth(Data2),
+            _ = erlkoenig_ct_cgroup:destroy_cgroup(Data2),
             Reason = case Data2#ct_data.error_reason of
                 undefined -> {container_failed, unknown, 0};
                 R -> {container_failed, R, 0}
@@ -956,7 +997,7 @@ failed(info, check_restart, Data) ->
     handle_check_restart(Data);
 
 failed({call, From}, get_info, Data) ->
-    {keep_state_and_data, [{reply, From, build_info(failed, Data)}]};
+    {keep_state_and_data, [{reply, From, erlkoenig_ct_info:build_info(failed, Data)}]};
 
 failed({call, From}, stop_container, Data) ->
     {keep_state, Data#ct_data{user_stopped = true}, [{reply, From, ok}]};
@@ -968,16 +1009,26 @@ failed({call, From}, _, _Data) ->
 %% recovering - Reconnecting to still-running container after crash
 %% =================================================================
 
+%% Entry from `disconnected' — that state already opened a socket,
+%% sent query_status and flipped it active, so the reply is in flight.
+%% Opening a second socket here would leak the first one (its messages
+%% would arrive with the old Sock and fail pattern-match against the
+%% new one stored in #ct_data, then be dropped by gen_statem's default
+%% info handler). Just wait for the reply.
+recovering(enter, disconnected, _Data) ->
+    keep_state_and_data;
+%% Entry from init({recover, _}) — fresh gen_statem after daemon crash
+%% reconnecting to an already-running C runtime. No sock yet.
 recovering(enter, _OldState, Data) ->
-    %% Try to connect to the C runtime's socket
-    case connect_to_runtime(Data) of
+    case erlkoenig_ct_rt:connect_to_runtime(Data) of
         {ok, Sock} ->
-            %% Connected! Query status.
             NewData = Data#ct_data{sock = Sock},
             ok = gen_tcp:send(Sock, erlkoenig_proto:encode_cmd_query_status()),
             {keep_state, NewData};
         {error, _} ->
-            %% Can't connect — C runtime is probably dead
+            %% Can't connect — C runtime is probably dead; the
+            %% 5000ms recovery_timeout set at init will transition
+            %% us to `failed'.
             keep_state_and_data
     end;
 
@@ -987,9 +1038,12 @@ recovering(info, {tcp, Sock, Reply}, #ct_data{sock = Sock} = Data) ->
         {ok, reply_status, #{state := State, child_pid := ChildPid}} when
                 State > 0, ChildPid > 0 ->
             %% Container is still running! Transition to running.
+            %% Note: pg:join was done at the first running(enter, starting, _)
+            %% and self() is still in erlkoenig_cts (we never went through
+            %% stopped, which is the only state that leaves). Joining again
+            %% would double-subscribe us to broadcasts.
             logger:info("container ~s recovered successfully (pid ~p)",
                         [Data#ct_data.id, ChildPid]),
-            pg:join(erlkoenig_pg, erlkoenig_cts, self()),
             ok = inet:setopts(Sock, [{active, true}]),
             {next_state, running, Data#ct_data{
                 os_pid = ChildPid,
@@ -1026,11 +1080,11 @@ recovering(state_timeout, recovery_timeout, Data) ->
     {next_state, failed, Data#ct_data{error_reason = recovery_timeout}};
 
 recovering({call, From}, get_info, Data) ->
-    {keep_state_and_data, [{reply, From, build_info(recovering, Data)}]};
+    {keep_state_and_data, [{reply, From, erlkoenig_ct_info:build_info(recovering, Data)}]};
 
 recovering({call, From}, stop_container, Data) ->
     %% Kill via OS if possible
-    kill_os_pid(Data#ct_data.os_pid),
+    erlkoenig_ct_rt:kill_os_pid(Data#ct_data.os_pid),
     {next_state, stopped,
      Data#ct_data{user_stopped = true}, [{reply, From, ok}]};
 
@@ -1045,33 +1099,54 @@ recovering(info, check_restart, _Data) -> keep_state_and_data.
 %% =================================================================
 
 disconnected(enter, _OldState, Data) ->
-    %% Start reconnect timer
+    %% Start reconnect timer. Reset attempt counter so a subsequent
+    %% disconnect (e.g. after a successful recovery + new socket drop)
+    %% gets a fresh retry budget.
     logger:info("container ~s: disconnected, will attempt reconnect",
                 [Data#ct_data.id]),
-    {keep_state, Data, [{state_timeout, 1000, try_reconnect}]};
+    {keep_state, Data#ct_data{reconnect_attempts = 0},
+     [{state_timeout, 1000, try_reconnect}]};
 
 disconnected(state_timeout, try_reconnect, Data) ->
-    case connect_to_runtime(Data) of
+    case erlkoenig_ct_rt:connect_to_runtime(Data) of
         {ok, Sock} ->
-            NewData = Data#ct_data{sock = Sock},
+            %% connect_to_runtime now does the sync handshake AND leaves
+            %% the socket in {active, true}, so query_status can go out
+            %% directly and the reply arrives as an info message.
+            NewData = Data#ct_data{sock = Sock, reconnect_attempts = 0},
             ok = gen_tcp:send(Sock, erlkoenig_proto:encode_cmd_query_status()),
-            ok = inet:setopts(Sock, [{active, true}]),
             {next_state, recovering, NewData,
              [{state_timeout, 5000, recovery_timeout}]};
         {error, _} ->
-            %% Retry in 1 second (up to 30 retries = 30s)
-            {keep_state, Data, [{state_timeout, 1000, try_reconnect}]}
+            %% Bounded retry — 30 × 1s = 30s. The original comment
+            %% claimed this budget existed; no counter did. A dead
+            %% runtime now produces a clean transition to `failed'
+            %% instead of a zombie gen_statem retrying forever.
+            NewAttempts = Data#ct_data.reconnect_attempts + 1,
+            case NewAttempts >= ?RECONNECT_MAX_ATTEMPTS of
+                true ->
+                    logger:warning("container ~s: reconnect exhausted "
+                                   "after ~p attempts",
+                                   [Data#ct_data.id, NewAttempts]),
+                    {next_state, failed,
+                     Data#ct_data{reconnect_attempts = NewAttempts,
+                                  error_reason = reconnect_exhausted}};
+                false ->
+                    {keep_state,
+                     Data#ct_data{reconnect_attempts = NewAttempts},
+                     [{state_timeout, 1000, try_reconnect}]}
+            end
     end;
 
 
 disconnected({call, From}, stop_container, Data) ->
     %% Can't send SIGTERM via socket, use kill directly
-    kill_os_pid(Data#ct_data.os_pid),
+    erlkoenig_ct_rt:kill_os_pid(Data#ct_data.os_pid),
     {next_state, stopped,
      Data#ct_data{user_stopped = true}, [{reply, From, ok}]};
 
 disconnected({call, From}, get_info, Data) ->
-    {keep_state_and_data, [{reply, From, build_info(disconnected, Data)}]};
+    {keep_state_and_data, [{reply, From, erlkoenig_ct_info:build_info(disconnected, Data)}]};
 
 disconnected({call, From}, _, _Data) ->
     {keep_state_and_data, [{reply, From, {error, disconnected}}]};
@@ -1083,985 +1158,77 @@ disconnected(info, check_restart, _Data) -> keep_state_and_data.
 %% Internal
 %% =================================================================
 
-%% -- Stats timers (SPEC-EK-007) -----------------------------------
-
--spec start_stats_timers([map()]) -> [reference()].
-start_stats_timers(PublishBlocks) ->
-    lists:map(fun(#{interval := Interval, metrics := Metrics}) ->
-        erlang:send_after(Interval, self(), {poll_stats, Interval, Metrics})
-    end, PublishBlocks).
-
--spec cancel_stats_timers([reference()]) -> ok.
-cancel_stats_timers(Timers) ->
-    lists:foreach(fun(Ref) -> erlang:cancel_timer(Ref) end, Timers),
-    ok.
-
--spec poll_and_publish_stats([atom()], #ct_data{}) -> #ct_data{}.
-poll_and_publish_stats(Metrics, #ct_data{id = Id, name = Name} = Data) ->
-    case erlkoenig_cgroup:read_metrics(Id, Metrics) of
-        {ok, Raw} ->
-            publish_each_metric(Metrics, Raw, Id, Name, Data);
-        {error, _} ->
-            Data
-    end.
-
--spec publish_each_metric([atom()], map(), binary(), binary() | undefined, #ct_data{}) ->
-    #ct_data{}.
-publish_each_metric([], _Raw, _Id, _Name, Data) ->
-    Data;
-publish_each_metric([memory | Rest], Raw, Id, Name, Data) ->
-    Current = maps:get(memory_bytes, Raw, 0),
-    Peak = maps:get(memory_peak, Raw, 0),
-    Max = maps:get(memory_max, Raw, max),
-    Swap = maps:get(memory_swap, Raw, 0),
-    Pct = case Max of
-        max -> 0.0;
-        0   -> 0.0;
-        M   -> Current / M * 100
-    end,
-    erlkoenig_events:notify({container_stats, Id, Name, memory, #{
-        current => Current, peak => Peak, max => Max,
-        pct => round_2(Pct), swap => Swap
-    }}),
-    publish_each_metric(Rest, Raw, Id, Name, Data);
-publish_each_metric([cpu | Rest], Raw, Id, Name, Data) ->
-    Usec = maps:get(cpu_usec, Raw, 0),
-    Throttled = maps:get(cpu_throttled_usec, Raw, 0),
-    NrThrottled = maps:get(cpu_nr_throttled, Raw, 0),
-    DeltaUsec = case Data#ct_data.last_cpu_usec of
-        undefined -> 0;
-        Last      -> Usec - Last
-    end,
-    erlkoenig_events:notify({container_stats, Id, Name, cpu, #{
-        usec => Usec, delta_usec => DeltaUsec,
-        throttled_usec => Throttled, nr_throttled => NrThrottled
-    }}),
-    publish_each_metric(Rest, Raw, Id, Name, Data#ct_data{last_cpu_usec = Usec});
-publish_each_metric([pids | Rest], Raw, Id, Name, Data) ->
-    Current = maps:get(pids_current, Raw, 0),
-    Max = maps:get(pids_max, Raw, max),
-    erlkoenig_events:notify({container_stats, Id, Name, pids, #{
-        current => Current, max => Max
-    }}),
-    publish_each_metric(Rest, Raw, Id, Name, Data);
-publish_each_metric([pressure | Rest], Raw, Id, Name, Data) ->
-    CpuP = maps:get(cpu_pressure, Raw, #{}),
-    MemP = maps:get(memory_pressure, Raw, #{}),
-    IoP = maps:get(io_pressure, Raw, #{}),
-    erlkoenig_events:notify({container_stats, Id, Name, pressure, #{
-        cpu_some_avg10 => maps:get(avg10, CpuP, 0.0),
-        cpu_some_avg60 => maps:get(avg60, CpuP, 0.0),
-        memory_some_avg10 => maps:get(avg10, MemP, 0.0),
-        io_some_avg10 => maps:get(avg10, IoP, 0.0)
-    }}),
-    publish_each_metric(Rest, Raw, Id, Name, Data);
-publish_each_metric([oom_events | Rest], Raw, Id, Name, Data) ->
-    Events = maps:get(memory_events, Raw, #{}),
-    erlkoenig_events:notify({container_stats, Id, Name, oom, #{
-        kills => maps:get(oom_kill, Events, 0),
-        events => maps:get(oom, Events, 0),
-        high => maps:get(high, Events, 0),
-        max => maps:get(max, Events, 0)
-    }}),
-    publish_each_metric(Rest, Raw, Id, Name, Data);
-publish_each_metric([_ | Rest], Raw, Id, Name, Data) ->
-    publish_each_metric(Rest, Raw, Id, Name, Data).
-
--spec round_2(float()) -> float().
-round_2(F) ->
-    round(F * 100) / 100.
-
-%% -- Log publisher (SPEC-EK-011) ----------------------------------
-
--spec maybe_start_log_publisher(#ct_data{}) ->
-    {pid(), atomics:atomics_ref()} | undefined.
-maybe_start_log_publisher(#ct_data{stream = undefined}) -> undefined;
-maybe_start_log_publisher(#ct_data{stream = #{channels := Channels} = StreamCfg,
-                                    id = Id, name = Name}) ->
-    RetentionDays = maps:get(retention_days, StreamCfg, 7),
-    InFlight = atomics:new(1, []),
-    case erlkoenig_log_publisher:start_link(Id, Name, Channels, RetentionDays, InFlight) of
-        {ok, Pid} ->
-            {Pid, InFlight};
-        {error, Reason} ->
-            logger:warning("container ~s: log publisher failed: ~p", [Name, Reason]),
-            undefined
-    end.
-
--spec maybe_stop_log_publisher({pid(), atomics:atomics_ref()} | undefined) -> ok.
-maybe_stop_log_publisher(undefined) -> ok;
-maybe_stop_log_publisher({Pid, _InFlight}) ->
-    try erlkoenig_log_publisher:stop(Pid)
-    catch _:_ -> ok
-    end.
-
-%% -- Output forwarding --------------------------------------------
-
--define(LOG_HIGH_WATERMARK, 2000).
-
--spec forward_output(stdout | stderr, binary(), #ct_data{}) -> ok.
-forward_output(Stream, Chunk, #ct_data{output = OutputPid,
-                                        log_publisher = LogPub} = Data) ->
-    %% 1. Attached pid (interactive consumer)
-    _ = case OutputPid of
-        undefined -> ok;
-        Pid ->
-            Tag = case Stream of
-                      stdout -> container_stdout;
-                      stderr -> container_stderr
-                  end,
-            Pid ! {Tag, self(), Data#ct_data.id, Chunk}
-    end,
-    %% 2. Log publisher (stream to RabbitMQ, if configured)
-    case LogPub of
-        undefined -> ok;
-        {Pub, InFlight} ->
-            case atomics:get(InFlight, 1) >= ?LOG_HIGH_WATERMARK of
-                true ->
-                    ok; %% drop — admission control before message alloc
-                false ->
-                    atomics:add(InFlight, 1, 1),
-                    gen_server:cast(Pub, {log, Stream, Chunk})
-            end
-    end,
-    ok.
+%% Stats-polling timers, per-metric publishers, log-publisher
+%% start/stop, stdout/stderr forwarding, and `notify_stopped/1'
+%% live in erlkoenig_ct_observe. `build_info/2' stayed here because
+%% every `get_info' state-callback calls it directly — pulling it
+%% out would buy less than it costs.
 
 %% -- Restart logic ------------------------------------------------
 
-%% -- Container setup (namespace_ready) --------------------------------
+%% `do_container_setup/1' lives in erlkoenig_ct_cgroup — it is the
+%% cgroup-first orchestrator called from `namespace_ready(enter, _)'.
 
--spec do_container_setup(#ct_data{}) ->
-    {next_state, atom(), #ct_data{}}.
-do_container_setup(#ct_data{id = Id, os_pid = OsPid,
-                            limits = Limits} = Data) ->
-    %% Step 1: cgroup (before GO so the app process inherits it).
-    HasCgroup = case setup_cgroup(Id, OsPid, Limits) of
-        ok ->
-            true;
-        {error, CgReason} ->
-            logger:warning("container ~s: cgroup setup failed: ~p "
-                           "(continuing without limits)",
-                           [Id, CgReason]),
-            false
-    end,
-    %% Step 1b: eBPF device filter (defense-in-depth).
-    %% Restricts which devices the container can access at kernel level,
-    %% even if it somehow escapes the filesystem isolation.
-    case HasCgroup of
-        true ->
-            setup_device_filter(Data, Id),
-            case maps:get(observe, Data#ct_data.extra_opts, undefined) of
-                undefined -> ok;
-                _Metrics  ->
-                    setup_metrics(Data, Id),
-                    %% Register policy if defined
-                    case maps:get(policy, Data#ct_data.extra_opts, undefined) of
-                        undefined -> ok;
-                        Policy    -> erlkoenig_policy:register_policy(Id, Policy)
-                    end
-            end;
-        false ->
-            ok
-    end,
-    %% Step 2: FUSE rootfs (if rootfs config present in extra_opts).
-    case maybe_setup_rootfs(Data) of
-        {ok, Data2} ->
-            %% Step 3: network + files + GO.
-            %% Note: uid_map/gid_map is written by the C runtime (erlkoenig_ns.c)
-            %% immediately after clone, before replying with container_pid.
-            %% By the time we get here, the child already has capabilities.
-            do_container_net_setup(Data2);
-        {error, FuseReason} ->
-            _ = erlkoenig_cgroup:destroy(Id),
-            {next_state, failed,
-             Data#ct_data{error_reason = {rootfs_setup_failed, FuseReason}}}
-    end.
-
--spec do_container_net_setup(#ct_data{}) ->
-    {next_state, atom(), #ct_data{}}.
-do_container_net_setup(#ct_data{id = Id, ip = Ip,
-                                os_pid = OsPid, zone = Zone} = Data) ->
-    %% erlkoenig_net needs a handle to send CMD_NET_SETUP to the C runtime.
-    %% In socket mode, we temporarily set active=false for synchronous recv.
-    Handle = rt_io_handle(Data),
-    ok = maybe_set_active(Data, false),
-    Name = Data#ct_data.name,
-    %% Retry-on-EADDRINUSE:  when a :one_for_all / :rest_for_one pod
-    %% member dies and the supervisor respawns it, the dying
-    %% container's IPVLAN slave may still be live in the dying netns
-    %% (kernel cleanup is asynchronous to gen_statem exit).  The new
-    %% slave's `ip addr add` then trips EADDRINUSE (-98).  Bridge
-    %% the teardown window with a few short retries instead of
-    %% bubbling up and letting the pod-sup burn its restart budget.
-    NetResult = try_net_setup_with_retry(Handle, Id, OsPid, Ip, Zone, Name, 12),
-    ok = maybe_set_active(Data, true),
-    case NetResult of
-        {ok, NetInfo} ->
-            firewall_add(Id, NetInfo, Data#ct_data.firewall, Data#ct_data.name),
-            maybe_apply_container_nft(Data),
-            write_container_files(Data, Data#ct_data.files),
-            send_to_rt(erlkoenig_proto:encode_cmd_go(), Data),
-            Data2 = case Ip of
-                undefined -> Data#ct_data{net_info = NetInfo,
-                                          ip = maps:get(ip, NetInfo)};
-                _         -> Data#ct_data{net_info = NetInfo}
-            end,
-            {next_state, starting, Data2};
-        {error, Reason} ->
-            _ = erlkoenig_cgroup:destroy(Id),
-            erlkoenig_error:emit(
-              ?EK_ERROR(network, net_setup_failed,
-                        "erlkoenig_net:setup_container_net failed",
-                        #{zone  => Data#ct_data.zone,
-                          reason => Reason}),
-              Id),
-            {next_state, failed,
-             Data#ct_data{error_reason = {net_setup_failed, Reason}}}
-    end.
+%% `do_container_net_setup/1' lives in erlkoenig_ct_net.
 
 %% -- Restart logic ------------------------------------------------
 
 -spec handle_check_restart(#ct_data{}) ->
     {next_state, atom(), #ct_data{}} | {keep_state, #ct_data{}}.
 handle_check_restart(Data) ->
-    _ = teardown_veth(Data),
-    _ = destroy_cgroup(Data),
+    _ = erlkoenig_ct_net:teardown_veth(Data),
+    _ = erlkoenig_ct_cgroup:destroy_cgroup(Data),
     Data2 = Data#ct_data{net_info = undefined},
-    case should_restart(Data2) of
+    case erlkoenig_ct_opts:should_restart(Data2) of
         true ->
             NewCount = Data2#ct_data.restart_count + 1,
             persist_restart_count(Data2#ct_data.name, NewCount),
             {next_state, restarting,
              Data2#ct_data{restart_count = NewCount}};
         false ->
-            Data3 = release_ip(Data2),
+            Data3 = erlkoenig_ct_resources:release_ip(Data2),
             {keep_state, Data3}
     end.
 
--spec should_restart(#ct_data{}) -> boolean().
-should_restart(#ct_data{user_stopped = true}) -> false;
-should_restart(#ct_data{restart = no_restart}) -> false;
-should_restart(Data) ->
-    {Strategy, Max} = normalize_restart(Data#ct_data.restart),
-    WithinLimit = case Max of
-        infinity -> true;
-        N        -> Data#ct_data.restart_count < N
-    end,
-    case Strategy of
-        always     -> WithinLimit;
-        on_failure -> WithinLimit andalso is_failure_exit(Data)
-    end.
+%% Restart policy (validate_restart/1, normalize_restart/1,
+%% should_restart/1, is_failure_exit/1, pod_exit_reason/1,
+%% backoff_ms/1) lives in erlkoenig_ct_opts — pure, side-effect
+%% free, easier to unit-test.
 
--spec normalize_restart(term()) -> {always | on_failure | no_restart, infinity | non_neg_integer()}.
-normalize_restart(always)          -> {always, infinity};
-normalize_restart(on_failure)      -> {on_failure, infinity};
-normalize_restart({always, N})     -> {always, N};
-normalize_restart({on_failure, N}) -> {on_failure, N};
-normalize_restart(_)               -> {no_restart, 0}.
+%% `notify_stopped/1' lives in erlkoenig_ct_observe.
 
--spec is_failure_exit(#ct_data{}) -> boolean().
-is_failure_exit(#ct_data{exit_info = #{exit_code := 0, term_signal := 0}}) ->
-    false;
-is_failure_exit(_) ->
-    true.
+%% `write_container_files/2' lives in erlkoenig_ct_net (it's part of
+%% the pre-GO sequence, right before `send_to_rt(CMD_GO)').
 
-%% Exit reason for pod-supervised containers.
-%% normal/shutdown → supervisor does NOT restart (transient).
-%% Anything else → supervisor restarts the group.
--spec pod_exit_reason(#ct_data{}) -> term().
-pod_exit_reason(#ct_data{user_stopped = true}) ->
-    shutdown;
-pod_exit_reason(Data) ->
-    case is_failure_exit(Data) of
-        false -> normal;
-        true ->
-            ExitCode = case Data#ct_data.exit_info of
-                #{exit_code := C} -> C;
-                _ -> unknown
-            end,
-            Signal = case Data#ct_data.exit_info of
-                #{term_signal := S} -> S;
-                _ -> 0
-            end,
-            {container_failed, ExitCode, Signal}
-    end.
-
--spec validate_restart(term()) -> erlkoenig:restart_policy().
-%% OTP-style aliases (preferred by the DSL, normalized to legacy internal).
-validate_restart(permanent)                             -> always;
-validate_restart(transient)                             -> on_failure;
-validate_restart(temporary)                             -> no_restart;
-%% Legacy names (still used internally throughout the runtime).
-validate_restart(no_restart)                            -> no_restart;
-validate_restart(always)                                -> always;
-validate_restart(on_failure)                            -> on_failure;
-validate_restart({always, N}) when is_integer(N), N > 0 -> {always, N};
-validate_restart({on_failure, N}) when is_integer(N), N > 0 -> {on_failure, N};
-validate_restart(Other) -> error({invalid_restart_policy, Other}).
-
--spec backoff_ms(integer()) -> pos_integer().
-backoff_ms(N) when N =< 0 -> 1000;
-backoff_ms(N)              -> min(30_000, 1000 bsl min(N - 1, 4)).
-
-%% -- Event notifications ------------------------------------------
-
--spec notify_stopped(#ct_data{}) -> ok.
-notify_stopped(#ct_data{id = Id, name = Name, exit_info = ExitInfo}) ->
-    erlkoenig_events:notify({container_stopped, Id, Name, ExitInfo}),
-    %% Detect OOM-Kill via cgroup memory.events (authoritative).
-    %% Fallback to signal heuristic if cgroup check fails.
-    OOM = case erlkoenig_cgroup:was_oom_killed(Id) of
-        true  -> true;
-        false -> maps:get(term_signal, ExitInfo, 0) =:= 9
-    end,
-    case OOM of
-        true  -> erlkoenig_events:notify({container_oom, Id, Name});
-        false -> ok
-    end.
-
-%% -- Container files ----------------------------------------------
-
--spec write_container_files(#ct_data{}, #{binary() => binary()}) -> ok.
-write_container_files(_Data, Files) when map_size(Files) =:= 0 -> ok;
-write_container_files(CtData, Files) ->
-    maps:foreach(fun(Path, FileContent) ->
-        Cmd = erlkoenig_proto:encode_cmd_write_file(Path, 8#644, FileContent),
-        send_to_rt(Cmd, CtData)
-    end, Files).
-
-%% -- DNS registration ---------------------------------------------
-
--spec dns_register(#ct_data{}) -> ok.
-dns_register(#ct_data{ip = undefined}) -> ok;
-dns_register(#ct_data{name = Name, id = Id, ip = Ip, zone = Zone}) ->
-    DnsName = case Name of
-        undefined -> Id;
-        _         -> Name
-    end,
-    try
-        DnsPid = erlkoenig_zone:dns(Zone),
-        gen_server:call(DnsPid, {register, DnsName, Ip})
-    catch Class:Reason ->
-        logger:warning("container ~s: DNS register failed: ~p:~p",
-                       [Id, Class, Reason])
-    end,
-    ok.
-
--spec dns_unregister(#ct_data{}) -> ok.
-dns_unregister(#ct_data{ip = undefined}) -> ok;
-dns_unregister(#ct_data{name = Name, id = Id, zone = Zone}) ->
-    DnsName = case Name of
-        undefined -> Id;
-        _         -> Name
-    end,
-    try
-        DnsPid = erlkoenig_zone:dns(Zone),
-        gen_server:call(DnsPid, {unregister, DnsName})
-    catch Class:Reason ->
-        logger:warning("container ~s: DNS unregister failed: ~p:~p",
-                       [Id, Class, Reason])
-    end,
-    ok.
-
-%% -- DNS egress allowlist (SPEC-AS-009) ---------------------------
+%% DNS register/unregister, DNS egress allowlist register/unregister,
+%% DETS register/unregister, topology helpers (netns_path,
+%% zone_bridge_name, cgroup_path_for_id), and socket cleanup
+%% (safe_sock_close, cleanup_socket_file) live in
+%% erlkoenig_ct_resources — they are the counterpart of the setup
+%% flow and are all called from `stopped(enter, _)' /
+%% `failed(enter, _)' as a cleanup checklist.
 %%
-%% Container spawned with `requires :"dns.allowlist", hosts: [...]` →
-%% the DSL emits `dns_allowlist => [Host, ...]` in the spawn opts;
-%% we register that against the container's IP at `running` so the
-%% per-zone DNS can deny everything outside the list. Unregister at
-%% `stopped` so a recycled IP doesn't inherit the previous tenant's
-%% policy.
+%% Socket I/O (send_to_rt/2, rt_io_handle/1, maybe_set_active/2,
+%% socket_dir/0, make_socket_path/1, wait_and_connect/{2,3},
+%% connect_to_runtime/1, kill_os_pid/1, sync_rt_command/3,
+%% handle_setup_reply/3) lives in erlkoenig_ct_rt.
 
--spec dns_filter_register(#ct_data{}) -> ok.
-dns_filter_register(#ct_data{dns_allowlist = undefined}) -> ok;
-dns_filter_register(#ct_data{ip = undefined}) -> ok;
-dns_filter_register(#ct_data{ip = Ip, dns_allowlist = Hosts, id = Id}) ->
-    try
-        ok = erlkoenig_dns_filter:register_allowlist(Ip, Hosts)
-    catch Class:Reason ->
-        logger:warning("container ~s: dns_filter register failed: ~p:~p",
-                       [Id, Class, Reason])
-    end,
-    ok.
-
--spec dns_filter_unregister(#ct_data{}) -> ok.
-dns_filter_unregister(#ct_data{dns_allowlist = undefined}) -> ok;
-dns_filter_unregister(#ct_data{ip = undefined}) -> ok;
-dns_filter_unregister(#ct_data{ip = Ip, id = Id}) ->
-    try
-        ok = erlkoenig_dns_filter:unregister(Ip)
-    catch Class:Reason ->
-        logger:warning("container ~s: dns_filter unregister failed: ~p:~p",
-                       [Id, Class, Reason])
-    end,
-    ok.
-
-%% -- DETS state persistence ----------------------------------------
-
--spec dets_register(#ct_data{}) -> ok.
-dets_register(#ct_data{id = Id, os_pid = OsPid, socket_path = SocketPath,
-                        ip = Ip, zone = Zone, binary_path = BinaryPath,
-                        net_info = NetInfo,
-                        firewall = Firewall, restart = Restart,
-                        limits = Limits, seccomp = Seccomp,
-                        caps_keep = CapsKeep, name = Name,
-                        args = Args, env = Env, uid = Uid, gid = Gid,
-                        extra_opts = ExtraOpts, volumes = Volumes} = _Data) ->
-    case whereis(erlkoenig_node_state) of
-        undefined -> ok;
-        _ ->
-            VethHost = case NetInfo of
-                #{host_veth := VH} -> VH;
-                _ -> undefined
-            end,
-            VethContainer = case NetInfo of
-                #{container_veth := VC} -> VC;
-                _ -> undefined
-            end,
-            Bridge = zone_bridge_name(Zone),
-            CgroupPath = cgroup_path_for_id(Id),
-            Config = #{
-                args => Args,
-                env => Env,
-                uid => Uid,
-                gid => Gid,
-                zone => Zone,
-                restart => Restart,
-                limits => Limits,
-                seccomp => Seccomp,
-                caps_keep => CapsKeep,
-                name => Name,
-                firewall => Firewall,
-                extra_opts => ExtraOpts,
-                volumes => Volumes
-            },
-            Info = #{
-                os_pid => OsPid,
-                socket_path => SocketPath,
-                ip => Ip,
-                netns => netns_path(OsPid),
-                cgroup => CgroupPath,
-                veth_host => VethHost,
-                veth_container => VethContainer,
-                bridge => Bridge,
-                zone => Zone,
-                binary_path => BinaryPath,
-                config => Config,
-                started_at => erlang:system_time(second)
-            },
-            try erlkoenig_node_state:register_container(Id, Info)
-            catch _:_ -> ok
-            end
-    end,
-    ok.
-
--spec dets_unregister(#ct_data{}) -> ok.
-dets_unregister(#ct_data{id = Id}) ->
-    case whereis(erlkoenig_node_state) of
-        undefined -> ok;
-        _ ->
-            try erlkoenig_node_state:unregister_container(Id)
-            catch _:_ -> ok
-            end
-    end,
-    ok.
-
--spec netns_path(non_neg_integer() | undefined) -> binary() | undefined.
-netns_path(undefined) -> undefined;
-netns_path(Pid) when is_integer(Pid), Pid > 0 ->
-    list_to_binary("/proc/" ++ integer_to_list(Pid) ++ "/ns/net");
-netns_path(_) -> undefined.
-
--spec zone_bridge_name(atom()) -> binary().
-zone_bridge_name(default) ->
-    case application:get_env(erlkoenig, bridge_name, <<"erlkoenig_br0">>) of
-        Bin when is_binary(Bin) -> Bin;
-        Str when is_list(Str) -> list_to_binary(Str)
-    end;
-zone_bridge_name(_ZoneName) ->
-    %% ADR-0020: IPVLAN-only, no bridges. Kept for DETS compat.
-    undefined.
-
--spec cgroup_path_for_id(binary()) -> binary().
-cgroup_path_for_id(Id) ->
-    try
-        case erlkoenig_cgroup:path(Id) of
-            {ok, Path} -> list_to_binary(Path);
-            _ -> <<>>
-        end
-    catch _:_ ->
-        <<>>
-    end.
-
-%% -- Socket cleanup -----------------------------------------------
-
--spec safe_sock_close(gen_tcp:socket() | undefined) -> ok.
-safe_sock_close(undefined) -> ok;
-safe_sock_close(Sock) ->
-    gen_tcp:close(Sock),
-    ok.
-
--spec cleanup_socket_file(binary() | undefined) -> ok.
-cleanup_socket_file(undefined) -> ok;
-cleanup_socket_file(Path) ->
-    _ = file:delete(Path),
-    ok.
-
-%% -- Communication abstraction ------------------------------------
-
--doc "Send data to C runtime via socket.".
--spec send_to_rt(iodata(), #ct_data{}) -> ok.
-send_to_rt(Bin, #ct_data{sock = Sock}) when Sock =/= undefined ->
-    ok = gen_tcp:send(Sock, Bin),
-    ok;
-send_to_rt(_Bin, _Data) ->
-    ok.
-
--doc "Return the I/O handle for external modules (e.g. erlkoenig_net).".
--spec rt_io_handle(#ct_data{}) -> {socket, gen_tcp:socket()} | undefined.
-rt_io_handle(#ct_data{sock = Sock}) when Sock =/= undefined ->
-    {socket, Sock};
-rt_io_handle(_) ->
-    undefined.
-
--doc "Temporarily toggle socket active mode. No-op for port mode.".
--spec maybe_set_active(#ct_data{}, boolean()) -> ok.
-maybe_set_active(#ct_data{sock = Sock}, Active)
-  when Sock =/= undefined ->
-    ok = inet:setopts(Sock, [{active, Active}]);
-maybe_set_active(_, _) ->
-    ok.
-
-%% -- Socket helpers -----------------------------------------------
-
--doc "Get the socket directory from application config.".
--spec socket_dir() -> binary().
-socket_dir() ->
-    case application:get_env(erlkoenig, socket_dir, "/run/erlkoenig/") of
-        Path when is_list(Path) -> list_to_binary(Path);
-        Path when is_binary(Path) -> Path
-    end.
-
--doc "Generate the socket path for a container. Must match erlkoenig-rt@.service.".
--spec make_socket_path(binary()) -> binary().
-make_socket_path(ContainerId) ->
-    Dir = socket_dir(),
-    filename:join(Dir, <<ContainerId/binary, ".sock">>).
-
--doc "Wait for a Unix socket to appear and connect.".
-%% Polls every 50ms until the socket is connectable or timeout.
--spec wait_and_connect(binary(), non_neg_integer()) ->
-    {ok, gen_tcp:socket()} | {error, term()}.
-wait_and_connect(SocketPath, Timeout) ->
-    wait_and_connect(SocketPath, Timeout, 50).
-
--spec wait_and_connect(binary(), integer(), pos_integer()) ->
-    {ok, gen_tcp:socket()} | {error, term()}.
-wait_and_connect(_SocketPath, Timeout, _Interval) when Timeout =< 0 ->
-    {error, timeout};
-wait_and_connect(SocketPath, Timeout, Interval) ->
-    SockPathStr = binary_to_list(SocketPath),
-    case gen_tcp:connect({local, SockPathStr}, 0,
-                         [binary, {packet, 4}, {active, false}], 1000) of
-        {ok, Sock} ->
-            {ok, Sock};
-        {error, enoent} ->
-            timer:sleep(Interval),
-            wait_and_connect(SocketPath, Timeout - Interval, Interval);
-        {error, econnrefused} ->
-            timer:sleep(Interval),
-            wait_and_connect(SocketPath, Timeout - Interval, Interval);
-        {error, Reason} ->
-            logger:warning("wait_and_connect: ~s failed: ~p (retrying)",
-                          [SockPathStr, Reason]),
-            timer:sleep(Interval),
-            wait_and_connect(SocketPath, Timeout - Interval, Interval)
-    end.
-
--doc "Try to connect to a still-running C runtime's socket.".
--spec connect_to_runtime(#ct_data{}) ->
-    {ok, gen_tcp:socket()} | {error, term()}.
-connect_to_runtime(#ct_data{socket_path = undefined}) ->
-    {error, no_socket_path};
-connect_to_runtime(#ct_data{socket_path = SocketPath}) ->
-    SockPathStr = binary_to_list(SocketPath),
-    case gen_tcp:connect({local, SockPathStr}, 0,
-                         [binary, {packet, 4}, {active, true}], 3000) of
-        {ok, Sock} -> {ok, Sock};
-        {error, _} = Err -> Err
-    end.
-
--doc "Kill a process by OS PID (used when socket is unavailable).".
--spec kill_os_pid(non_neg_integer() | undefined) -> ok.
-kill_os_pid(undefined) -> ok;
-kill_os_pid(Pid) when is_integer(Pid), Pid > 0 ->
-    _ = os:cmd("kill -15 " ++ integer_to_list(Pid)),
-    ok;
-kill_os_pid(_) -> ok.
-
-%% -- Firewall (direct nft integration) ----------------------------
-
--spec firewall_add(binary(), map(), map() | skip_firewall, binary() | undefined) -> ok.
-firewall_add(_ContainerId, _NetInfo, skip_firewall, _Name) ->
-    %% nft_tables mode (ADR-0015): firewall defined in DSL, not auto-generated
-    ok;
-firewall_add(ContainerId, #{ip := Ip} = NetInfo, FwTerm, Name) ->
-    Veth = maps:get(host_veth, NetInfo, undefined),
-    Ports = [],  %% Port mappings handled via firewall term
-    case erlkoenig_firewall_nft:add_container(ContainerId, Ip, Veth, Ports, FwTerm, Name) of
-        ok -> ok;
-        {error, Reason} ->
-            logger:warning("firewall: failed to create chain for ~s: ~p",
-                           [ContainerId, Reason])
-    end,
-    ok.
-
-%% -- Per-container nft (SPEC-EK-023) ---------------------------------
-
--spec maybe_apply_container_nft(#ct_data{}) -> ok.
-maybe_apply_container_nft(#ct_data{extra_opts = Opts} = Data) ->
-    case maps:find(nft, Opts) of
-        {ok, NftConfig} when is_map(NftConfig) ->
-            TableName = <<"ct_", (Data#ct_data.name)/binary>>,
-            Batch = erlkoenig_nft_container:build_batch(
-                      NftConfig#{table => TableName}),
-            Handle = rt_io_handle(Data),
-            ok = maybe_set_active(Data, false),
-            Cmd = erlkoenig_proto:encode_cmd_nft_setup(Batch),
-            case Handle of
-                {socket, Sock} ->
-                    ok = gen_tcp:send(Sock, Cmd),
-                    case gen_tcp:recv(Sock, 0, 10000) of
-                        {ok, Reply} ->
-                            case erlkoenig_proto:decode(Reply) of
-                                {ok, reply_ok, _} ->
-                                    logger:info("container ~s: nft applied (~b bytes)",
-                                                [Data#ct_data.name, byte_size(Batch)]);
-                                {ok, reply_error, #{code := Code, message := Msg}} ->
-                                    logger:warning("container ~s: nft failed: ~p ~s",
-                                                   [Data#ct_data.name, Code, Msg])
-                            end;
-                        {error, Reason} ->
-                            logger:warning("container ~s: nft recv failed: ~p",
-                                           [Data#ct_data.name, Reason])
-                    end;
-                Port when is_port(Port) ->
-                    port_command(Port, Cmd),
-                    receive
-                        {Port, {data, Reply}} ->
-                            case erlkoenig_proto:decode(Reply) of
-                                {ok, reply_ok, _} ->
-                                    logger:info("container ~s: nft applied (~b bytes)",
-                                                [Data#ct_data.name, byte_size(Batch)]);
-                                {ok, reply_error, #{code := Code, message := Msg}} ->
-                                    logger:warning("container ~s: nft failed: ~p ~s",
-                                                   [Data#ct_data.name, Code, Msg])
-                            end
-                    after 10000 ->
-                        logger:warning("container ~s: nft timeout", [Data#ct_data.name])
-                    end
-            end,
-            ok = maybe_set_active(Data, true),
-            ok;
-        error ->
-            ok
-    end.
-
--spec firewall_remove(binary()) -> ok.
-firewall_remove(ContainerId) ->
-    _ = erlkoenig_firewall_nft:remove_container(ContainerId),
-    ok.
-
-%% -- Network teardown ---------------------------------------------
-
--spec teardown_veth(#ct_data{}) -> ok.
-teardown_veth(#ct_data{net_info = undefined}) ->
-    ok;
-teardown_veth(#ct_data{net_info = NetInfo}) ->
-    erlkoenig_net:teardown_container_veth(NetInfo).
-
-%% See do_container_net_setup for the rationale.
-try_net_setup_with_retry(Handle, Id, OsPid, Ip, Zone, Name, Attempts) ->
-    Call = fun() ->
-        case Ip of
-            undefined ->
-                erlkoenig_net:setup_container_net(Handle, Id, OsPid, Zone);
-            _ ->
-                erlkoenig_net:setup_container_net(Handle, Id, OsPid, Ip,
-                                                    Zone, Name)
-        end
-    end,
-    try_net_setup_loop(Call, Attempts, undefined).
-
-try_net_setup_loop(_Call, 0, LastErr) ->
-    LastErr;
-try_net_setup_loop(Call, N, _) ->
-    case Call() of
-        {ok, _} = Ok -> Ok;
-        {error, {net_setup_failed, -98, _}} = Err ->
-            timer:sleep(500),
-            try_net_setup_loop(Call, N - 1, Err);
-        {error, {net_setup_failed, {net_setup_failed, -98, _}}} = Err ->
-            timer:sleep(500),
-            try_net_setup_loop(Call, N - 1, Err);
-        {error, _} = Err ->
-            Err
-    end.
-
--spec release_ip(#ct_data{}) -> #ct_data{}.
-release_ip(#ct_data{ip = undefined} = Data) ->
-    Data;
-release_ip(#ct_data{ip = Ip} = Data) ->
-    erlkoenig_ip_pool:release(Ip),
-    Data#ct_data{ip = undefined}.
-
--spec disk_limit_mb(map()) -> non_neg_integer().
-disk_limit_mb(#{disk := Bytes}) when is_integer(Bytes), Bytes > 0 ->
-    max(1, Bytes div (1024 * 1024));
-disk_limit_mb(_) ->
-    0.
-
--doc "Get the DNS IP for a zone as a 32-bit network-order integer.".
-%% The DNS server runs on the zone's gateway IP.
--spec zone_dns_ip(atom()) -> non_neg_integer().
-zone_dns_ip(default) ->
-    ip4_to_u32(application:get_env(erlkoenig, gateway, {10, 0, 0, 1}));
-zone_dns_ip(ZoneName) ->
-    #{network := Net} = erlkoenig_zone:zone_config(ZoneName),
-    Gw = maps:get(gateway, Net, {10, 0, 0, 1}),
-    case Gw of
-        undefined -> ip4_to_u32({10, 0, 0, 1});
-        _         -> ip4_to_u32(Gw)
-    end.
-
--spec ip4_to_u32(inet:ip4_address()) -> non_neg_integer().
-ip4_to_u32({A, B, C, D}) ->
-    (A bsl 24) bor (B bsl 16) bor (C bsl 8) bor D.
-
-%% Resolve the DNS resolver IP for this container.
+%% firewall_add/4, firewall_remove/1, maybe_apply_container_nft/1,
+%% teardown_veth/1, try_net_setup_with_retry/7, try_net_setup_loop/3,
+%% zone_dns_ip/1, ip4_to_u32/1, and effective_dns_ip/1 live in
+%% erlkoenig_ct_net — grouped as the create/teardown pair of the
+%% container-side network + firewall lifecycle.
 %%
-%% Strict capability mode (`strict_capabilities = true`):
-%%   * Container declared `requires :"dns.local"` → resolver IP from zone.
-%%   * Container did NOT declare it → resolver IP `0`. The C runtime
-%%     skips the `/etc/resolv.conf` write entirely, so the workload
-%%     cannot resolve names. Forces the operator to be explicit
-%%     about which workloads need DNS.
-%%
-%% Loose mode (default `false`): zone-derived IP regardless. Same
-%% behaviour as before the capability framework landed; existing
-%% deployments need no migration.
--spec effective_dns_ip(#ct_data{}) -> non_neg_integer().
-effective_dns_ip(#ct_data{zone = Zone, requires = Requires,
-                          id = Id, name = Name}) ->
-    case application:get_env(erlkoenig, strict_capabilities, false) of
-        false ->
-            zone_dns_ip(Zone);
-        true ->
-            case lists:member('dns.local', Requires) of
-                true  ->
-                    zone_dns_ip(Zone);
-                false ->
-                    %% Strict opt-out — surface so operators can spot
-                    %% missing `requires :"dns.local"` declarations
-                    %% during the migration. Container will boot
-                    %% without /etc/resolv.conf; the action tag tells
-                    %% the dashboard exactly what was withheld.
-                    DisplayName = case Name of
-                        undefined -> Id;
-                        N -> N
-                    end,
-                    catch erlkoenig_events:notify(
-                            {capability_unmet, Id, DisplayName,
-                             'dns.local', no_resolv_conf}),
-                    0
-            end
-    end.
+%% `release_ip/1' lives in erlkoenig_ct_resources.
 
-%% Merge DSL-emitted `socket_mounts` (raw host-dir bind specs) into
-%% the regular volumes list as PRE-RESOLVED entries. The capability
-%% framework hands us absolute host paths that need no `persist:`
-%% lookup; the `kind => socket_mount` marker tells the volume
-%% resolver to pass them through untouched.
--spec merge_socket_mounts([map()], [map()]) -> [map()].
-merge_socket_mounts(Volumes, []) ->
-    Volumes;
-merge_socket_mounts(Volumes, SocketMounts) ->
-    Extra = [#{host      => to_bin(H),
-               container => to_bin(C),
-               read_only => maps:get(read_only, M, false),
-               kind      => socket_mount}
-             || #{host := H, container := C} = M <- SocketMounts],
-    Volumes ++ Extra.
+%% Seccomp profile name<->id, capability bit math, socket-mount
+%% merger, and `to_bin/1` live in erlkoenig_ct_opts. Pure functions,
+%% no gen_statem or ETS dependencies.
 
-to_bin(B) when is_binary(B) -> B;
-to_bin(L) when is_list(L)   -> list_to_binary(L).
-
--spec seccomp_profile_id(erlkoenig:seccomp_profile() | non_neg_integer()) -> non_neg_integer().
-seccomp_profile_id(none)    -> 0;
-seccomp_profile_id(default) -> 1;
-seccomp_profile_id(strict)  -> 2;
-seccomp_profile_id(network) -> 3;
-seccomp_profile_id(N) when is_integer(N), N >= 0, N =< 255 -> N;
-seccomp_profile_id(Other) -> error({invalid_seccomp_profile, Other}).
-
--spec seccomp_profile_name(non_neg_integer()) -> erlkoenig:seccomp_profile() | non_neg_integer().
-seccomp_profile_name(0) -> none;
-seccomp_profile_name(1) -> default;
-seccomp_profile_name(2) -> strict;
-seccomp_profile_name(3) -> network;
-seccomp_profile_name(N) -> N.
-
-%% =================================================================
-%% Capabilities: atom list <-> 64-bit bitmask
-%% =================================================================
-
--spec cap_bit(erlkoenig:capability()) -> 0..40.
-cap_bit(chown)              -> 0;
-cap_bit(dac_override)       -> 1;
-cap_bit(dac_read_search)    -> 2;
-cap_bit(fowner)             -> 3;
-cap_bit(fsetid)             -> 4;
-cap_bit(kill)               -> 5;
-cap_bit(setgid)             -> 6;
-cap_bit(setuid)             -> 7;
-cap_bit(setpcap)            -> 8;
-cap_bit(linux_immutable)    -> 9;
-cap_bit(net_bind_service)   -> 10;
-cap_bit(net_broadcast)      -> 11;
-cap_bit(net_admin)          -> 12;
-cap_bit(net_raw)            -> 13;
-cap_bit(ipc_lock)           -> 14;
-cap_bit(ipc_owner)          -> 15;
-cap_bit(sys_module)         -> 16;
-cap_bit(sys_rawio)          -> 17;
-cap_bit(sys_chroot)         -> 18;
-cap_bit(sys_ptrace)         -> 19;
-cap_bit(sys_pacct)          -> 20;
-cap_bit(sys_admin)          -> 21;
-cap_bit(sys_boot)           -> 22;
-cap_bit(sys_nice)           -> 23;
-cap_bit(sys_resource)       -> 24;
-cap_bit(sys_time)           -> 25;
-cap_bit(sys_tty_config)     -> 26;
-cap_bit(mknod)              -> 27;
-cap_bit(lease)              -> 28;
-cap_bit(audit_write)        -> 29;
-cap_bit(audit_control)      -> 30;
-cap_bit(setfcap)            -> 31;
-cap_bit(mac_override)       -> 32;
-cap_bit(mac_admin)          -> 33;
-cap_bit(syslog)             -> 34;
-cap_bit(wake_alarm)         -> 35;
-cap_bit(block_suspend)      -> 36;
-cap_bit(audit_read)         -> 37;
-cap_bit(perfmon)            -> 38;
-cap_bit(bpf)                -> 39;
-cap_bit(checkpoint_restore) -> 40;
-cap_bit(Other) -> error({unknown_capability, Other}).
-
--spec caps_to_mask([erlkoenig:capability()]) -> non_neg_integer().
-caps_to_mask([]) -> 0;
-caps_to_mask(Caps) when is_list(Caps) ->
-    lists:foldl(fun(Cap, Acc) ->
-        Acc bor (1 bsl cap_bit(Cap))
-    end, 0, Caps).
-
--spec mask_to_caps(non_neg_integer()) -> [erlkoenig:capability()].
-mask_to_caps(0) -> [];
-mask_to_caps(Mask) ->
-    AllCaps = [chown, dac_override, dac_read_search, fowner, fsetid,
-               kill, setgid, setuid, setpcap, linux_immutable,
-               net_bind_service, net_broadcast, net_admin, net_raw,
-               ipc_lock, ipc_owner, sys_module, sys_rawio, sys_chroot,
-               sys_ptrace, sys_pacct, sys_admin, sys_boot, sys_nice,
-               sys_resource, sys_time, sys_tty_config, mknod, lease,
-               audit_write, audit_control, setfcap, mac_override,
-               mac_admin, syslog, wake_alarm, block_suspend, audit_read,
-               perfmon, bpf, checkpoint_restore],
-    [Cap || Cap <- AllCaps, Mask band (1 bsl cap_bit(Cap)) =/= 0].
-
--spec destroy_cgroup(#ct_data{}) -> ok | {error, term()}.
-destroy_cgroup(#ct_data{id = Id}) ->
-    erlkoenig_cgroup:destroy(Id).
-
--spec setup_cgroup(binary(), non_neg_integer(), map()) -> ok | {error, term()}.
-setup_cgroup(Id, OsPid, Limits) ->
-    maybe
-        %% cgroup may already exist (pre-created in creating_do_spawn
-        %% so erlkoenig_rt starts in containers/ not beam/).
-        %% create is idempotent — returns ok if already exists.
-        ok ?= erlkoenig_cgroup:create(Id),
-        %% Attach the container's PID. If erlkoenig_rt already wrote
-        %% itself via echo $$ > cgroup.procs, this is a no-op (PID
-        %% is already in the right cgroup). But the child PID from
-        %% clone/fork may be different, so always attach.
-        ok ?= erlkoenig_cgroup:attach(Id, OsPid),
-        case map_size(Limits) =:= 0 of
-            true  -> ok;
-            false -> erlkoenig_cgroup:set_limits(Id, Limits)
-        end
-    else
-        {error, _} = Err ->
-            _ = erlkoenig_cgroup:destroy(Id),
-            Err
-    end.
-
--spec setup_device_filter(#ct_data{}, binary()) -> ok.
-setup_device_filter(Data, Id) ->
-    case erlkoenig_cgroup:path(Id) of
-        {ok, CgroupPath} ->
-            CgroupBin = list_to_binary(CgroupPath),
-            Cmd = erlkoenig_proto:encode_cmd_device_filter(CgroupBin),
-            case sync_rt_command(Data, Cmd, 5000) of
-                {ok, Reply} ->
-                    handle_setup_reply(Reply, Id, "device filter");
-                timeout ->
-                    logger:warning("container ~s: device filter timeout", [Id])
-            end;
-        {error, _} ->
-            ok
-    end,
-    ok.
-
--spec setup_metrics(#ct_data{}, binary()) -> ok.
-setup_metrics(Data, Id) ->
-    case erlkoenig_cgroup:path(Id) of
-        {ok, CgroupPath} ->
-            CgroupBin = list_to_binary(CgroupPath),
-            Cmd = erlkoenig_proto:encode_cmd_metrics_start(CgroupBin),
-            case sync_rt_command(Data, Cmd, 5000) of
-                {ok, Reply} ->
-                    handle_setup_reply(Reply, Id, "eBPF metrics");
-                timeout ->
-                    logger:warning("container ~s: eBPF metrics timeout", [Id])
-            end;
-        {error, _} ->
-            ok
-    end,
-    ok.
-
--doc "Send a command and synchronously wait for the reply.".
--spec sync_rt_command(#ct_data{}, iodata(), non_neg_integer()) ->
-    {ok, binary()} | timeout.
-sync_rt_command(#ct_data{sock = Sock}, Cmd, Timeout) when Sock =/= undefined ->
-    ok = inet:setopts(Sock, [{active, false}]),
-    ok = gen_tcp:send(Sock, Cmd),
-    Result = case gen_tcp:recv(Sock, 0, Timeout) of
-        {ok, Reply} -> {ok, Reply};
-        {error, _}  -> timeout
-    end,
-    ok = inet:setopts(Sock, [{active, true}]),
-    Result.
-
--spec handle_setup_reply(binary(), binary(), string()) -> ok.
-handle_setup_reply(Reply, Id, What) ->
-    case erlkoenig_proto:decode(Reply) of
-        {ok, reply_ok, _} ->
-            logger:debug("container ~s: ~s attached", [Id, What]);
-        {ok, reply_error, #{code := Code, message := Msg}} ->
-            logger:warning("container ~s: ~s failed: ~p ~s (continuing without)",
-                           [Id, What, Code, Msg])
-    end.
+%% destroy_cgroup/1, setup_cgroup/3, setup_device_filter/2, and
+%% setup_metrics/2 live in erlkoenig_ct_cgroup alongside
+%% do_container_setup/1 — they form the cgroup subsystem's
+%% create/destroy pair plus its two eBPF attachments.
 
 -spec make_id() -> erlkoenig:container_id().
 make_id() ->
@@ -2071,281 +1238,29 @@ make_id() ->
       [A, B, C band 16#0fff bor 16#4000,
        D band 16#3fff bor 16#8000, E])).
 
--spec rt_path() -> string().
-rt_path() ->
-    case application:get_env(erlkoenig, rt_path, auto) of
-        auto -> find_rt();
-        Path -> Path
-    end.
+%% C-runtime executable discovery (rt_path/0, find_rt/0,
+%% find_first/1, check_path/1, check_priv_dir/0, check_build_dir/0)
+%% lives in erlkoenig_ct_rt_discover — different change frequency
+%% from the socket-I/O helpers, isolated here.
 
--spec find_rt() -> string().
-find_rt() ->
-    Candidates = [
-        fun() -> os:find_executable("erlkoenig_rt") end,
-        fun() -> check_path("/usr/lib/erlkoenig/erlkoenig_rt") end,
-        fun() -> check_path("/opt/erlkoenig/rt/erlkoenig_rt") end,
-        fun() -> check_priv_dir() end,
-        fun() -> check_build_dir() end
-    ],
-    find_first(Candidates).
+%% `audit_volumes_mounted/1' and `audit_volumes_released/1' live in
+%% erlkoenig_ct_resources.
 
--spec find_first([fun(() -> false | string())]) -> string().
-find_first([]) ->
-    error(erlkoenig_rt_not_found);
-find_first([F | Rest]) ->
-    case F() of
-        false -> find_first(Rest);
-        Path  -> Path
-    end.
+%% Volume resolution, FUSE rootfs build/mount/cleanup live in
+%% erlkoenig_ct_volume. `cleanup_ephemeral_volumes/1' lives in
+%% erlkoenig_ct_resources.
 
--spec check_path(string()) -> false | string().
-check_path(Path) ->
-    case filelib:is_regular(Path) of
-        true  -> Path;
-        false -> false
-    end.
+%% Pre-spawn gates (admission_then_quarantine/2 + the safe_*
+%% wrappers + admission_scope/1 + release_admission_token/1 +
+%% safe_record_crash/1 + format_hash_prefix/1) live in
+%% erlkoenig_ct_security — security-policy boundary of the
+%% state machine.
 
--spec check_priv_dir() -> false | string().
-check_priv_dir() ->
-    try code:priv_dir(erlkoenig) of
-        Dir ->
-            Path = filename:join(Dir, "erlkoenig_rt"),
-            check_path(Path)
-    catch
-        error:bad_name -> false
-    end.
-
--spec check_build_dir() -> false | string().
-check_build_dir() ->
-    Ebin = filename:dirname(code:which(?MODULE)),
-    ProjectRoot = filename:join([Ebin, "..", "..", "..", "..", ".."]),
-    Path = filename:absname(filename:join(ProjectRoot, "build/release/erlkoenig_rt")),
-    check_path(Path).
-
-%% -- Volume audit -------------------------------------------------
-
--spec audit_volumes_mounted(#ct_data{}) -> ok.
-audit_volumes_mounted(#ct_data{volumes = []}) -> ok;
-audit_volumes_mounted(#ct_data{id = Id, name = Name, volumes = Volumes}) ->
-    ContainerName = case Name of undefined -> Id; N -> N end,
-    lists:foreach(fun(V) -> audit_one_volume(ContainerName, V) end, Volumes),
-    ok.
-
-audit_one_volume(ContainerName, #{kind := socket_mount, host := Host,
-                                   container := ContPath,
-                                   read_only := RO}) ->
-    erlkoenig_audit:log(#{
-        type => socket_mount_bound,
-        subject => ContainerName,
-        result => ok,
-        details => #{kind => socket_mount,
-                     host => Host,
-                     container_path => ContPath,
-                     read_only => RO}
-    });
-audit_one_volume(ContainerName, #{host := Host, container := ContPath,
-                                   persist := Persist, read_only := RO}) ->
-    erlkoenig_audit:log(#{
-        type => volume_mounted,
-        subject => ContainerName,
-        result => ok,
-        details => #{
-            persist => Persist,
-            host => Host,
-            container_path => ContPath,
-            read_only => RO
-        }
-    }).
-
--spec audit_volumes_released(#ct_data{}) -> ok.
-audit_volumes_released(#ct_data{volumes = []}) -> ok;
-audit_volumes_released(#ct_data{id = Id, name = Name, volumes = Volumes}) ->
-    ContainerName = case Name of undefined -> Id; N -> N end,
-    lists:foreach(fun
-        (#{kind := socket_mount}) ->
-            %% Socket bind-mounts have no persistent state to release;
-            %% they live and die with the container's mount namespace.
-            ok;
-        (#{persist := Persist}) ->
-            erlkoenig_audit:log(#{
-                type => volume_released,
-                subject => ContainerName,
-                result => ok,
-                details => #{persist => Persist}
-            })
-    end, Volumes),
-    ok.
-
-%% -- Volume resolution -------------------------------------------
-
--spec resolve_volumes(#ct_data{}) -> #ct_data{}.
-resolve_volumes(#ct_data{volumes = []} = Data) ->
-    Data;
-resolve_volumes(#ct_data{volumes = DslVolumes, name = Name, id = Id,
-                         uid = Uid, gid = Gid} = Data) ->
-    ContainerName = case Name of
-        undefined -> Id;
-        N -> N
-    end,
-    %% erlkoenig_volume_store:ensure/1 (called from resolve/4) handles
-    %% directory creation + chown under the volumes root. We don't
-    %% need the separate ensure_volume_dir step any more.
-    case erlkoenig_volume:resolve(ContainerName, DslVolumes, Uid, Gid) of
-        {ok, Resolved} ->
-            Data#ct_data{volumes = Resolved};
-        {error, Reason} ->
-            logger:error("container ~s: volume resolution failed: ~p",
-                         [Id, Reason]),
-            Data
-    end.
-
-%% Destroy ephemeral volumes belonging to this container. Called from
-%% the stopped/failed state entry actions. Persistent volumes are left
-%% alone — they outlive their container by design.
--spec cleanup_ephemeral_volumes(#ct_data{}) -> ok.
-cleanup_ephemeral_volumes(#ct_data{name = Name, id = Id}) ->
-    ContainerName = case Name of
-        undefined -> Id;
-        N -> N
-    end,
-    %% This runs during the `stopped`/`failed` state-entry callback,
-    %% which also fires in unit-test contexts where the volume store
-    %% hasn't been started. Treat a missing store as "nothing to do"
-    %% instead of propagating a noproc exit that would take the
-    %% gen_statem (and any linked test fixtures) down with it.
-    try erlkoenig_volume_store:cleanup_ephemeral(ContainerName) of
-        {ok, []} -> ok;
-        {ok, Destroyed} ->
-            logger:info("container ~s: cleaned up ~p ephemeral volume(s): ~p",
-                        [Id, length(Destroyed), Destroyed]),
-            ok;
-        {error, Reason} ->
-            logger:warning("container ~s: ephemeral cleanup failed: ~p",
-                           [Id, Reason]),
-            ok
-    catch
-        exit:{noproc, _} ->
-            %% volume_store not up (bare test VM) — no volumes to clean.
-            ok;
-        exit:{timeout, _} ->
-            logger:warning("container ~s: volume_store timeout on cleanup",
-                           [Id]),
-            ok
-    end.
-
-%% -- Pre-spawn gates ---------------------------------------------
-
--spec admission_then_quarantine(atom() | binary(), binary()) ->
-    {ok, reference()}
-  | {error, admission_timeout | admission_queue_full}
-  | {error, {quarantined, binary(), integer()}}.
-admission_then_quarantine(Zone, BinaryPath) ->
-    %% Quarantine check first — it's cheap, a hashmap lookup plus a
-    %% hash-file call, and rejecting a quarantined binary early means
-    %% we don't hold an admission token we'll just release anyway.
-    case safe_quarantine_check(BinaryPath) of
-        ok ->
-            Scope = admission_scope(Zone),
-            case safe_admission_acquire(Scope) of
-                {ok, Token}  -> {ok, Token};
-                {error, _} = E -> E
-            end;
-        {error, {quarantined, _, _}} = E -> E;
-        {error, _} = E -> E
-    end.
-
-safe_quarantine_check(BinaryPath) ->
-    try erlkoenig_quarantine:check(BinaryPath)
-    catch
-        %% Quarantine gen_server not running (isolated eunit contexts
-        %% that don't need it). Fail-open: if the gate itself is
-        %% missing, don't block spawns. The operational deployment
-        %% always has it; this branch is just for tests.
-        exit:{noproc, _} -> ok;
-        exit:{timeout, _} -> ok
-    end.
-
-safe_admission_acquire(Scope) ->
-    try erlkoenig_admission:acquire(Scope, admission_acquire_timeout_ms()) of
-        {ok, Token} -> {ok, Token};
-        {error, timeout}    -> {error, admission_timeout};
-        {error, queue_full} -> {error, admission_queue_full}
-    catch
-        %% Same rationale as quarantine: the admission gate is
-        %% supposed to be there, but tests don't always start it.
-        exit:{noproc, _}  -> {ok, undefined};
-        exit:{timeout, _} -> {error, admission_timeout}
-    end.
-
-admission_acquire_timeout_ms() ->
-    application:get_env(erlkoenig, admission_acquire_timeout_ms, 30_000).
-
-admission_scope(undefined) -> host;
-admission_scope(default)   -> host;
-admission_scope(Zone) when is_atom(Zone) -> atom_to_binary(Zone, utf8);
-admission_scope(Zone) when is_binary(Zone) -> Zone;
-admission_scope(_) -> host.
-
--spec release_admission_token(#ct_data{}) -> ok.
-release_admission_token(#ct_data{admission_token = undefined}) -> ok;
-release_admission_token(#ct_data{admission_token = Token}) ->
-    try erlkoenig_admission:release(Token)
-    catch _:_ -> ok
-    end.
-
--spec safe_record_crash(binary() | undefined) -> ok.
-safe_record_crash(undefined) -> ok;
-safe_record_crash(BinaryPath) ->
-    try erlkoenig_quarantine:record_crash(BinaryPath)
-    catch _:_ -> ok
-    end.
-
--spec format_hash_prefix(binary()) -> binary().
-format_hash_prefix(Hash) when is_binary(Hash), byte_size(Hash) >= 8 ->
-    <<Prefix:8/binary, _/binary>> = Hash,
-    Prefix;
-format_hash_prefix(Hash) -> Hash.
-
--spec build_info(atom(), #ct_data{}) -> erlkoenig:container_info().
-build_info(State, Data) ->
-    Info = #{
-        id            => Data#ct_data.id,
-        state         => State,
-        binary        => Data#ct_data.binary_path,
-        os_pid        => Data#ct_data.os_pid,
-        netns_path    => Data#ct_data.netns_path,
-        restart       => Data#ct_data.restart,
-        restart_count => Data#ct_data.restart_count,
-        limits        => Data#ct_data.limits,
-        seccomp       => seccomp_profile_name(Data#ct_data.seccomp),
-        caps          => mask_to_caps(Data#ct_data.caps_keep),
-        name          => Data#ct_data.name,
-        zone          => Data#ct_data.zone,
-        args          => Data#ct_data.args,
-        ports         => maps:get(ports, Data#ct_data.extra_opts, []),
-        volumes       => Data#ct_data.volumes
-    },
-    maybe_add_optional_fields(State, Data, Info).
-
--spec maybe_add_optional_fields(atom(), #ct_data{}, map()) -> erlkoenig:container_info().
-maybe_add_optional_fields(State, Data, Info0) ->
-    Info1 = maybe_put(net_info, Data#ct_data.net_info, Info0),
-    Info2 = maybe_put(exit_info, Data#ct_data.exit_info, Info1),
-    Info3 = maybe_put(error, Data#ct_data.error_reason, Info2),
-    maybe_add_stats(State, Data#ct_data.id, Info3).
-
--spec maybe_put(atom(), term(), map()) -> map().
-maybe_put(_Key, undefined, Map) -> Map;
-maybe_put(Key, Value, Map)      -> Map#{Key => Value}.
-
--spec maybe_add_stats(atom(), binary(), map()) -> map().
-maybe_add_stats(running, Id, Info) ->
-    case erlkoenig_cgroup:read_stats(Id) of
-        {ok, Stats} when map_size(Stats) > 0 -> Info#{stats => Stats};
-        _                                     -> Info
-    end;
-maybe_add_stats(_State, _Id, Info) ->
-    Info.
+%% `build_info/2' (+ its private helpers `maybe_add_optional_fields/3'
+%% and `maybe_put/3') lives in erlkoenig_ct_info. The state callbacks
+%% keep the `{reply, From, build_info(State, Data)}' shape; only the
+%% projection of `#ct_data{}' into the public map moved.
+%% `maybe_add_stats/3' lives in erlkoenig_ct_observe.
 
 -spec maybe_reply_go(#ct_data{}) -> #ct_data{}.
 maybe_reply_go(#ct_data{from = undefined} = Data) ->
@@ -2368,213 +1283,12 @@ maybe_reply_stop(#ct_data{from = From} = Data, Reply) ->
     gen_statem:reply(From, Reply),
     Data#ct_data{from = undefined}.
 
-%% --- FUSE rootfs setup / cleanup ---
+%% FUSE rootfs build/mount/cleanup lives in erlkoenig_ct_volume.
+%%
+%% (The stale definition block that used to live here — the
+%% private functions `setup_fuse_rootfs/1', `find_store_pid/0',
+%% `manifest_path/1', `fuse_mount_path/1', `save_manifest/2',
+%% `start_fuse_mount/3' — has moved intact.)
 
--doc "Build and mount FUSE rootfs if a rootfs config is present.".
-%% The rootfs config lives in extra_opts (put there by the DSL compiler).
-%% If no rootfs config → legacy mode (no FUSE), returns Data unchanged.
--spec maybe_setup_rootfs(#ct_data{}) -> {ok, #ct_data{}} | {error, term()}.
-maybe_setup_rootfs(Data) ->
-    case maps:get(rootfs, Data#ct_data.extra_opts, undefined) of
-        undefined ->
-            %% No rootfs spec → legacy mode (no FUSE)
-            {ok, Data};
-        _RootfsSpec ->
-            setup_fuse_rootfs(Data)
-    end.
-
--spec setup_fuse_rootfs(#ct_data{}) -> {ok, #ct_data{}} | {error, term()}.
-setup_fuse_rootfs(Data) ->
-    ContainerId = Data#ct_data.id,
-    ExtraOpts = Data#ct_data.extra_opts,
-    RootfsConfig = #{
-        rootfs => maps:get(rootfs, ExtraOpts, #{}),
-        binary => Data#ct_data.binary_path,
-        seccomp => maps:get(rootfs_seccomp, ExtraOpts, undefined)
-    },
-    case find_store_pid() of
-        undefined ->
-            logger:warning("erlkoenig_fuse_store not available, "
-                           "skipping FUSE rootfs for ~s", [ContainerId]),
-            {ok, Data};
-        Pid ->
-            BuildOpts = case Data#ct_data.name of
-                undefined -> #{};
-                Name      -> #{artifact_name => Name}
-            end,
-            maybe
-                {ok, #{manifest := Manifest,
-                       tmpfs_mounts := TmpfsMounts}} ?=
-                    case erlkoenig_rootfs_builder:build(RootfsConfig, Pid, BuildOpts) of
-                        {ok, _} = Ok -> Ok;
-                        {error, Reason1} ->
-                            logger:error("Failed to build rootfs for ~s: ~p",
-                                         [ContainerId, Reason1]),
-                            {error, {rootfs_build_failed, Reason1}}
-                    end,
-                %% Save manifest
-                ManifestPath = manifest_path(ContainerId),
-                save_manifest(Manifest, ManifestPath),
-                %% Start FUSE mount
-                MountPath = fuse_mount_path(ContainerId),
-                _ = filelib:ensure_path(MountPath),
-                {ok, _MountPid} ?=
-                    case start_fuse_mount(ContainerId, Manifest, MountPath) of
-                        {ok, _} = Ok2 -> Ok2;
-                        {error, Reason2} ->
-                            logger:error("Failed to mount FUSE for ~s: ~p",
-                                         [ContainerId, Reason2]),
-                            {error, {fuse_mount_failed, Reason2}}
-                    end,
-                MountBin = unicode:characters_to_binary(MountPath),
-                logger:info("FUSE rootfs mounted for ~s at ~s",
-                            [ContainerId, MountPath]),
-                {ok, Data#ct_data{
-                    fuse_mount = MountBin,
-                    tmpfs_mounts = TmpfsMounts
-                }}
-            else
-                {error, _} = Err -> Err
-            end
-    end.
-
--spec find_store_pid() -> pid() | undefined.
-find_store_pid() ->
-    whereis(erlkoenig_fuse_store).
-
--spec manifest_path(binary()) -> string().
-manifest_path(ContainerId) ->
-    Dir = application:get_env(erlkoenig, manifest_dir,
-                              "/var/lib/erlkoenig/manifests"),
-    _ = filelib:ensure_dir(filename:join(Dir, "x")),
-    filename:join(Dir, binary_to_list(ContainerId) ++ ".manifest").
-
--spec fuse_mount_path(binary()) -> string().
-fuse_mount_path(ContainerId) ->
-    Dir = application:get_env(erlkoenig, fuse_mount_dir,
-                              "/run/erlkoenig/mounts"),
-    _ = filelib:ensure_dir(filename:join(Dir, "x")),
-    filename:join(Dir, binary_to_list(ContainerId)).
-
--spec save_manifest(term(), string()) -> ok.
-save_manifest(Manifest, Path) ->
-    try
-        erlkoenig_fuse_manifest:save(Manifest, Path)
-    catch
-        error:undef ->
-            logger:warning("erlkoenig_fuse_manifest not available, "
-                           "skipping manifest save"),
-            ok;
-        _:Reason ->
-            logger:warning("manifest save failed: ~p", [Reason]),
-            ok
-    end.
-
--spec start_fuse_mount(binary(), term(), string()) ->
-    {ok, pid()} | {error, term()}.
-start_fuse_mount(ContainerId, Manifest, MountPath) ->
-    try
-        erlkoenig_fuse_mount_sup:start_mount(
-            ContainerId, Manifest,
-            #{mountpoint => MountPath})
-    catch
-        error:undef ->
-            {error, fuse_mount_sup_not_available};
-        _:Reason ->
-            {error, Reason}
-    end.
-
--doc "Cleanup FUSE mount when container stops or fails.".
--spec cleanup_fuse(#ct_data{}) -> ok.
-cleanup_fuse(#ct_data{fuse_mount = undefined}) ->
-    ok;
-cleanup_fuse(#ct_data{id = ContainerId}) ->
-    try
-        _ = erlkoenig_fuse_mount_sup:stop_mount(ContainerId)
-    catch
-        _:_ -> ok
-    end,
-    ok.
-
-%% --- Signature verification ---
-
--spec maybe_verify_signature(#ct_data{}) -> {ok, #ct_data{}} | {error, term()}.
-maybe_verify_signature(Data) ->
-    %% Per-container `signature_required: true` promotes the effective
-    %% mode to `enforce` even if the global PKI mode is `off`.  This is
-    %% the Glasbox side of the SPEC-EK-017 contract: the operator says
-    %% "this workload must be signed" in the DSL, and the runtime
-    %% treats that as a hard gate — regardless of cluster-wide setting.
-    GlobalMode = erlkoenig_pki:mode(),
-    EffectiveMode = case {GlobalMode, Data#ct_data.signature_required} of
-        {off, true} -> enforce;
-        _           -> GlobalMode
-    end,
-    case EffectiveMode of
-        off ->
-            {ok, Data};
-        Mode ->
-            SigPath = resolve_sig_path(Data),
-            case erlkoenig_sig:verify(Data#ct_data.binary_path, SigPath) of
-                {ok, Meta} ->
-                    erlkoenig_audit:log(#{
-                        type => binary_verify,
-                        subject => Data#ct_data.id,
-                        result => ok,
-                        details => maps:without([chain], Meta)
-                    }),
-                    case erlkoenig_pki:verify_chain(maps:get(chain, Meta)) of
-                        ok ->
-                            erlkoenig_events:notify({signature_verified,
-                                Data#ct_data.id, Data#ct_data.name, Meta}),
-                            {ok, Data#ct_data{sig_verified = true, sig_meta = Meta}};
-                        {error, ChainErr} when Mode =:= warn ->
-                            logger:warning("[~s] chain verification failed: ~p (warn mode)",
-                                          [Data#ct_data.id, ChainErr]),
-                            erlkoenig_audit:log(#{
-                                type => binary_verify,
-                                subject => Data#ct_data.id,
-                                result => {error, ChainErr},
-                                details => #{mode => warn}
-                            }),
-                            {ok, Data};
-                        {error, ChainErr} ->
-                            erlkoenig_events:notify({signature_rejected,
-                                Data#ct_data.id, Data#ct_data.name,
-                                {chain_invalid, ChainErr}}),
-                            erlkoenig_audit:log(#{
-                                type => binary_reject,
-                                subject => Data#ct_data.id,
-                                result => {error, ChainErr},
-                                details => #{binary => Data#ct_data.binary_path}
-                            }),
-                            {error, {chain_invalid, ChainErr}}
-                    end;
-                {error, Err} when Mode =:= warn ->
-                    logger:warning("[~s] signature verification failed: ~p (warn mode)",
-                                  [Data#ct_data.id, Err]),
-                    erlkoenig_audit:log(#{
-                        type => binary_verify,
-                        subject => Data#ct_data.id,
-                        result => {error, Err},
-                        details => #{mode => warn}
-                    }),
-                    {ok, Data};
-                {error, Err} ->
-                    erlkoenig_events:notify({signature_rejected,
-                        Data#ct_data.id, Data#ct_data.name, Err}),
-                    erlkoenig_audit:log(#{
-                        type => binary_reject,
-                        subject => Data#ct_data.id,
-                        result => {error, Err},
-                        details => #{binary => Data#ct_data.binary_path}
-                    }),
-                    {error, Err}
-            end
-    end.
-
--spec resolve_sig_path(#ct_data{}) -> binary().
-resolve_sig_path(#ct_data{sig_path = undefined, binary_path = Bin}) ->
-    <<Bin/binary, ".sig">>;
-resolve_sig_path(#ct_data{sig_path = Path}) ->
-    Path.
+%% Signature verification (`maybe_verify_signature/1' +
+%% `resolve_sig_path/1') lives in erlkoenig_ct_security.

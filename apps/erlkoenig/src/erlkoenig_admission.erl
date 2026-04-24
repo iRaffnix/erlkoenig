@@ -154,6 +154,12 @@ handle_call({acquire, Scope, Token, Timeout}, From, State) ->
         false ->
             case length(State#state.waiters) >= State#state.queue_limit of
                 true ->
+                    %% Peer rejection paths (accepted/waiting/timeout)
+                    %% all emit events; queue_full previously didn't,
+                    %% so sustained saturation was invisible in event
+                    %% streams. Operators saw callers getting
+                    %% `queue_full' errors with no correlated signal.
+                    emit_event(queue_full, Scope),
                     {reply, {error, queue_full}, State};
                 false ->
                     TRef = erlang:send_after(Timeout, self(),
@@ -294,6 +300,10 @@ emit_event(waiting, Scope) ->
     end;
 emit_event(timeout, Scope) ->
     try erlkoenig_events:notify({admission_timeout, scope_label(Scope)})
+    catch _:_ -> ok
+    end;
+emit_event(queue_full, Scope) ->
+    try erlkoenig_events:notify({admission_queue_full, scope_label(Scope)})
     catch _:_ -> ok
     end.
 

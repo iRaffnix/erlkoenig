@@ -40,7 +40,7 @@ Events broadcast to the `counter_events` pg group:
 
 Threshold alerts:
 
-    {threshold_event, Id, Name, Metric, Value, Threshold}
+    {threshold_event, Name, Metric, Value, Threshold}
 """.
 
 -behaviour(gen_server).
@@ -219,7 +219,7 @@ check_thresholds(
             op := Op,
             value := ThreshVal,
             action := Action
-        } = T
+        }
         | Rest
     ],
     Rate
@@ -227,15 +227,19 @@ check_thresholds(
     CurrentVal = maps:get(Metric, Rate, 0),
     case eval_op(Op, CurrentVal, ThreshVal) of
         true ->
-            Id = maps:get(id, T, undefined),
             try
                 Action(Name, Metric, CurrentVal, ThreshVal)
             catch
                 C:R ->
                     logger:warning("[erlkoenig_nft_counter] threshold action failed: ~p:~p", [C, R])
             end,
+            %% Emit the 5-tuple shape nft_watch and all known consumers
+            %% (integration tests, showcase scripts) pattern-match on.
+            %% Previously this was a 6-tuple `{_, Id, Name, Metric, ..}'
+            %% which no consumer receives — threshold events from
+            %% nft_counter were silently dropped by every subscriber.
             erlkoenig_nft_events:notify_counter_event(
-                {threshold_event, Id, Name, Metric, CurrentVal, ThreshVal}
+                {threshold_event, Name, Metric, CurrentVal, ThreshVal}
             );
         false ->
             ok

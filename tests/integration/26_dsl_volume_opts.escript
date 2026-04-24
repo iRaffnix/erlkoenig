@@ -95,8 +95,12 @@ main(_) ->
     %% --- Step 4: Find a running container and read its mountinfo -
     %% There's exactly one container after our patch (replicas=1).
     OsPid = test_helper:step("Inspect container os_pid", fun() ->
+        %% `erlkoenig_config:load/1' returns `[{binary(), pid()}]' —
+        %% a list of (Name, Pid) tuples, not bare pids. Older tests
+        %% used `[P | _]' and passed the tuple to `erlkoenig:inspect/1',
+        %% which crashed with function_clause inside gen_statem:call.
         case Pids of
-            [P | _] ->
+            [{_Name, P} | _] ->
                 Info = erlkoenig:inspect(P),
                 case maps:get(state, Info, undefined) of
                     running -> {ok, maps:get(os_pid, Info)};
@@ -129,12 +133,19 @@ main(_) ->
         end
     end),
 
-    test_helper:step("/data has no special hardening flags", fun() ->
+    test_helper:step("/data has no explicit hardening flags", fun() ->
         case find_mount_line(MiPath, " /data ") of
             {ok, Line} ->
                 io:format("    ~s~n", [Line]),
-                %% Default mount should NOT carry these kernel flags.
-                case [F || F <- ["ro", "nosuid", "nodev", "noexec"],
+                %% A default RW volume must not carry the explicit
+                %% hardening flags we control: `ro' (read-only) and
+                %% `noexec' (no-exec). We do NOT assert on `nosuid'
+                %% or `nodev' — modern kernels inside a user namespace
+                %% apply both automatically as an unprivileged-mount
+                %% safety net, regardless of what we request, so
+                %% flagging them here would reject any well-behaved
+                %% distro-default mount.
+                case [F || F <- ["ro", "noexec"],
                            string:find(Line, F) =/= nomatch] of
                     []       -> ok;
                     Unwanted -> {error, {unexpected_flags_on_rw, Unwanted}}

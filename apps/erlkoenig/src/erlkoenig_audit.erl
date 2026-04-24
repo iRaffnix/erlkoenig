@@ -139,11 +139,22 @@ verify_chain(Path, PubKey) ->
                        What =:= signature_invalid ->
                     %% Surface to AMQP — security-relevant: external
                     %% verifier (or future periodic self-check) just
-                    %% found tampering. Page-on-this material.
-                    catch erlkoenig_events:notify(
-                            {audit_chain_break,
-                             #{path => Path, line => Line,
-                               reason => {What, Reason}}});
+                    %% found tampering. Page-on-this material — the
+                    %% one event we MUST NOT silently drop. Log at
+                    %% `critical' if notify itself fails so the
+                    %% operator at least sees the tampering finding
+                    %% in local logs when the event bus is down.
+                    try erlkoenig_events:notify(
+                          {audit_chain_break,
+                           #{path => Path, line => Line,
+                             reason => {What, Reason}}})
+                    catch NClass:NReason ->
+                        logger:critical(
+                          "[audit] tampering notification lost: "
+                          "~p:~p; path=~p line=~p reason=~p",
+                          [NClass, NReason, Path, Line,
+                           {What, Reason}])
+                    end;
                 _ -> ok
             end,
             Result;
@@ -241,7 +252,12 @@ handle_call(signing_pubkey, _From, #state{pub_key = Key} = State) ->
 handle_call(seal_day, _From, State) ->
     case do_seal_day(State) of
         {ok, Info, NewState} -> {reply, {ok, Info}, NewState};
-        {error, _} = Err     -> {reply, Err, State}
+        %% do_seal_day may advance state even when reporting an error,
+        %% because the seal line is already written to disk and the
+        %% chain must reflect that. See the rename_failed / reopen_failed
+        %% branches for the rationale.
+        {error, Reason, NewState} -> {reply, {error, Reason}, NewState};
+        {error, _} = Err -> {reply, Err, State}
     end;
 
 handle_call(_Request, _From, State) ->
@@ -330,10 +346,47 @@ encode_event(Seq, PrevHash, PrivKey, Event) ->
         <<"prev_hash">> => PrevHash
     },
     %% Merge details (caller-controlled fields) into the base.
-    %% Details cannot override the chain-related fields above.
-    EventNoHash = maps:fold(fun(K, V, Acc) ->
+    %%
+    %% The PREVIOUS implementation said "Details cannot override the
+    %% chain-related fields above" — but the old fold
+    %% `Acc#{to_bin(K) => V}' with Base as the initial Acc let any
+    %% Details key overwrite Base entries. That meant a caller
+    %% passing `details => #{seq => 999, prev_hash => <<"...">>}'
+    %% could rewrite the chain link at encoding time — the hash
+    %% would be computed over the tampered event and every
+    %% downstream verify_chain/1 check would still pass (locally
+    %% self-consistent), while peer nodes and customers' offline
+    %% verifiers that reconstructed the chain from known anchors
+    %% would diverge. A tamper-resistant audit log has to rule
+    %% this out at the encoder boundary.
+    %%
+    %% Fix: layer Base on top of Details so Base always wins on
+    %% conflict, and log a loud warning if a reserved key slipped
+    %% in so the caller gets surfaced instead of silently dropped.
+    DetailsBin = maps:fold(fun(K, V, Acc) ->
         Acc#{to_bin(K) => V}
-    end, Base, Details),
+    end, #{}, Details),
+    ReservedKeys = [<<"v">>, <<"seq">>, <<"ts">>, <<"type">>,
+                    <<"subject">>, <<"result">>, <<"prev_hash">>,
+                    <<"this_hash">>, <<"signature">>],
+    ReservedHits = [K || K <- ReservedKeys, maps:is_key(K, DetailsBin)],
+    case ReservedHits of
+        [] -> ok;
+        _  ->
+            logger:warning(
+                "[audit] caller passed reserved fields in details "
+                "(~p) for event type ~p — stripped to protect chain "
+                "integrity",
+                [ReservedHits, Type])
+    end,
+    %% Strip reserved keys from DetailsBin FIRST so they cannot land
+    %% in EventNoHash and leak into compute_this_hash. Base wins on
+    %% merge for the fields it defines, but `this_hash`/`signature`
+    %% are added AFTER the hash is computed — so a stray Details
+    %% entry for them would end up in the hash input and make
+    %% every verifier re-computation disagree by design.
+    CleanDetails = maps:without(ReservedKeys, DetailsBin),
+    EventNoHash = maps:merge(CleanDetails, Base),
     %% Compute this_hash over the canonical encoding of all fields
     %% EXCEPT this_hash itself. The hash binds every visible field
     %% so any mutation invalidates the chain.
@@ -562,6 +615,17 @@ do_seal_day(#state{fd = Fd, path = Path, seq = Seq,
                 encode_event(SealSeq, PrevHash, PrivKey, SealEvent),
             case append_line(Path, [Line, $\n]) of
                 ok ->
+                    %% Once the seal line is on disk, the chain has
+                    %% advanced regardless of what happens next. We
+                    %% commit seq/prev_hash to the state here so a
+                    %% subsequent rename or reopen failure cannot
+                    %% leave state pointing at the PRE-seal anchor —
+                    %% that would make the next log event reuse the
+                    %% seal's seq number and break verify_chain with
+                    %% a duplicate-seq error nobody sees until an
+                    %% auditor tries to read the log.
+                    WrittenState = State#state{seq = SealSeq,
+                                               prev_hash = SealHash},
                     SealedPath = sealed_path(Path),
                     case file:rename(Path, SealedPath) of
                         ok ->
@@ -580,19 +644,42 @@ do_seal_day(#state{fd = Fd, path = Path, seq = Seq,
                                     %% Surface to AMQP for compliance
                                     %% dashboards: "did the seal job
                                     %% run today, and what's the
-                                    %% next-day anchor?"
-                                    catch erlkoenig_events:notify(
-                                            {audit_sealed, Info}),
-                                    {ok, Info, State#state{fd = NewFd,
-                                                           seq = SealSeq,
-                                                           prev_hash = SealHash}};
+                                    %% next-day anchor?" Log-fallback
+                                    %% so compliance folks have a
+                                    %% trace even when the bus is down.
+                                    try erlkoenig_events:notify(
+                                          {audit_sealed, Info})
+                                    catch NC:NR ->
+                                        logger:warning(
+                                          "[audit] seal notification "
+                                          "lost: ~p:~p; info=~p",
+                                          [NC, NR, Info])
+                                    end,
+                                    {ok, Info, WrittenState#state{fd = NewFd}};
                                 {error, R} ->
-                                    {error, {reopen_failed, R}}
+                                    %% Rename worked but we couldn't
+                                    %% reopen — file ended up as the
+                                    %% sealed archive, next append
+                                    %% will re-open lazily.
+                                    {error, {reopen_failed, R},
+                                     WrittenState#state{fd = undefined}}
                             end;
                         {error, R} ->
-                            {error, {rename_failed, R}}
+                            %% Rename failed — the seal event is in
+                            %% the live file already. Reopen for the
+                            %% next append and report the error; the
+                            %% operator can rename manually and the
+                            %% chain stays consistent.
+                            NextFd = case open_log(Path) of
+                                {ok, RFd} -> RFd;
+                                {error, _} -> undefined
+                            end,
+                            {error, {rename_failed, R},
+                             WrittenState#state{fd = NextFd}}
                     end;
                 {error, R} ->
+                    %% Seal event never made it to disk — state is
+                    %% still at the pre-seal anchor, safe to leave.
                     {error, {seal_write_failed, R}}
             end;
         {error, R} ->
@@ -783,10 +870,15 @@ do_query(Path, Opts) ->
     case file:read_file(Path) of
         {ok, Bin} ->
             Lines = binary:split(Bin, <<"\n">>, [global]),
-            Since = maps:get(since, Opts, 0),
+            SinceIso = case maps:get(since, Opts, 0) of
+                0 -> undefined;
+                UnixSec when is_integer(UnixSec), UnixSec > 0 ->
+                    iso8601_from_unix(UnixSec);
+                _ -> undefined
+            end,
             TypeFilter = maps:get(type, Opts, undefined),
             Limit = maps:get(limit, Opts, 100),
-            Filtered = filter_lines(Lines, Since, TypeFilter, Limit, []),
+            Filtered = filter_lines(Lines, SinceIso, TypeFilter, Limit, []),
             {ok, Filtered};
         {error, enoent} ->
             {ok, []};
@@ -794,7 +886,22 @@ do_query(Path, Opts) ->
             {error, Reason}
     end.
 
--spec filter_lines([binary()], integer(), atom() | undefined, non_neg_integer(), [binary()]) -> [binary()].
+%% Render a unix-seconds timestamp in the same ISO-8601 format used by
+%% `iso8601_now/0`. The lexicographic order of that format matches
+%% chronological order, so a substring compare is enough to filter.
+-spec iso8601_from_unix(non_neg_integer()) -> binary().
+iso8601_from_unix(UnixSec) ->
+    {{Y, Mo, D}, {H, Mi, S}} =
+        calendar:system_time_to_universal_time(UnixSec, second),
+    list_to_binary(io_lib:format(
+        "~4..0B-~2..0B-~2..0BT~2..0B:~2..0B:~2..0BZ",
+        [Y, Mo, D, H, Mi, S])).
+
+-spec filter_lines([binary()],
+                   binary() | undefined,
+                   atom() | undefined,
+                   non_neg_integer(),
+                   [binary()]) -> [binary()].
 filter_lines(_, _, _, 0, Acc) ->
     lists:reverse(Acc);
 filter_lines([], _, _, _, Acc) ->
@@ -804,13 +911,44 @@ filter_lines([<<>> | Rest], Since, Type, Limit, Acc) ->
 filter_lines([Line | Rest], Since, Type, Limit, Acc) ->
     %% Simple substring matching — no JSON parser needed for filtering.
     %% Full JSON parsing is left to external tools (jq, SIEM).
-    Include = case Type of
+    %%
+    %% `since' was previously accepted by the API but silently
+    %% discarded here — the compliance-team workflow of "events from
+    %% 00:00 UTC" returned every event in the file. Match now on the
+    %% `"ts":"...Z"' substring since canonical JSON keeps the ts
+    %% field in lexicographic position and ISO-8601 sorts chrono.
+    TypeOk = case Type of
         undefined -> true;
         T ->
             TypeBin = atom_to_binary(T),
             binary:match(Line, TypeBin) =/= nomatch
     end,
-    case Include of
+    SinceOk = case Since of
+        undefined -> true;
+        SinceIso -> ts_after_or_equal(Line, SinceIso)
+    end,
+    case TypeOk andalso SinceOk of
         true  -> filter_lines(Rest, Since, Type, Limit - 1, [Line | Acc]);
         false -> filter_lines(Rest, Since, Type, Limit, Acc)
+    end.
+
+%% Extract the 20-byte ISO timestamp that follows `"ts":"` in the
+%% canonical-JSON line and compare with SinceIso. Length-20 matches
+%% exactly `YYYY-MM-DDTHH:MM:SSZ`. Lines without a `"ts":` field (or
+%% with a truncated one) default to included so we don't silently
+%% hide malformed rows from the auditor.
+-spec ts_after_or_equal(binary(), binary()) -> boolean().
+ts_after_or_equal(Line, SinceIso) ->
+    case binary:match(Line, <<"\"ts\":\"">>) of
+        nomatch ->
+            true;
+        {Start, _MatchLen} ->
+            TsStart = Start + 6,
+            case byte_size(Line) >= TsStart + 20 of
+                true ->
+                    TsBin = binary:part(Line, TsStart, 20),
+                    TsBin >= SinceIso;
+                false ->
+                    true
+            end
     end.

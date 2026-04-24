@@ -238,27 +238,59 @@ handle_call(banned, _From, State) ->
                  catch exit:{noproc, _} -> #{}
                  end,
     Bans = maps:fold(fun(IP, Sources, Acc) ->
-        EffExpiry = lists:max(maps:values(Sources)),
-        RemainingMs = max(0, EffExpiry - Now),
-        case RemainingMs > 0 of
-            true ->
-                [#{ip => erlkoenig_nft_ip:format(IP),
-                   ip_raw => IP,
-                   sources => maps:keys(Sources),
-                   remaining_seconds => RemainingMs div 1000} | Acc];
-            false ->
-                Acc
+        case maps:values(Sources) of
+            [] ->
+                %% Defensive: if threat_mesh ever puts an IP in the
+                %% active_bans map with an empty Sources sub-map
+                %% (race during ban expiry or bug in mesh), lists:max
+                %% crashes on [] → this fold dies → handle_call dies
+                %% → ct_guard gen_server dies → detection offline.
+                %% Skip the anomaly instead of taking the whole process
+                %% down.
+                Acc;
+            Expiries ->
+                EffExpiry = lists:max(Expiries),
+                RemainingMs = max(0, EffExpiry - Now),
+                case RemainingMs > 0 of
+                    true ->
+                        [#{ip => erlkoenig_nft_ip:format(IP),
+                           ip_raw => IP,
+                           sources => maps:keys(Sources),
+                           remaining_seconds => RemainingMs div 1000} | Acc];
+                    false ->
+                        Acc
+                end
         end
     end, [], ActiveBans),
     {reply, Bans, State};
 handle_call({reconfigure, Config}, _From, State) ->
+    %% Reconfigure ALL threshold + detection fields. Previously this
+    %% only touched flood/scan/ban_duration/whitelist — passing a new
+    %% slow_scan, honeypot_ports, honeypot_ban_duration, escalation
+    %% or suspect_after was silently dropped despite the function's
+    %% docstring promising "reconfigure thresholds". Operators tuning
+    %% slow-scan detection in production would see no effect and no
+    %% error — classic silent-API mismatch.
     {FloodMax, FloodWindow} = maps:get(conn_flood, Config, {
         maps:get(flood_max, State), maps:get(flood_window, State)
     }),
     {ScanMax, ScanWindow} = maps:get(port_scan, Config, {
         maps:get(scan_max, State), maps:get(scan_window, State)
     }),
+    {SlowMax, SlowWindow} = maps:get(slow_scan, Config, {
+        maps:get(slow_max, State), maps:get(slow_window, State)
+    }),
     BanDuration = maps:get(ban_duration, Config, maps:get(ban_duration, State)),
+    HoneypotBan = maps:get(honeypot_ban_duration, Config,
+                           maps:get(honeypot_ban_duration, State)),
+    HoneypotPorts =
+        case maps:find(honeypot_ports, Config) of
+            {ok, Ports} when is_list(Ports) -> sets:from_list(Ports);
+            _ -> maps:get(honeypot_ports, State)
+        end,
+    Escalation = maps:get(escalation, Config, maps:get(escalation, State)),
+    SuspectAfter = maps:get(suspect_after, Config,
+                            maps:get(suspect_after, State)),
     Whitelist =
         case maps:find(whitelist, Config) of
             {ok, WL} -> normalize_whitelist(WL);
@@ -269,12 +301,20 @@ handle_call({reconfigure, Config}, _From, State) ->
         flood_window := FloodWindow,
         scan_max := ScanMax,
         scan_window := ScanWindow,
+        slow_max := SlowMax,
+        slow_window := SlowWindow,
         ban_duration := BanDuration,
+        honeypot_ban_duration := HoneypotBan,
+        honeypot_ports := HoneypotPorts,
+        escalation := Escalation,
+        suspect_after := SuspectAfter,
         whitelist := Whitelist
     },
     logger:notice(
-        "[ct_guard] Reconfigured: flood=~p/~ps, scan=~p/~ps, ban=~ps",
-        [FloodMax, FloodWindow, ScanMax, ScanWindow, BanDuration]
+        "[ct_guard] Reconfigured: flood=~p/~ps, scan=~p/~ps, "
+        "slow=~p/~ps, honeypot=~p ports, ban=~ps",
+        [FloodMax, FloodWindow, ScanMax, ScanWindow,
+         SlowMax, SlowWindow, sets:size(HoneypotPorts), BanDuration]
     ),
     {reply, ok, State2};
 handle_call(_Req, _From, State) ->
@@ -369,10 +409,24 @@ do_cleanup(
 ) ->
     Now = erlang:system_time(second),
 
-    %% Remove connection events older than the largest window
+    %% Remove connection events older than the largest window.
+    %%
+    %% Previously this walked ets:first/next and bailed on the first
+    %% entry with Ts >= Cutoff. That was correct WITHIN a single IP
+    %% (timestamps ascend) but wrong ACROSS IPs: the table is an
+    %% ordered_set with key `{SrcIP, Ts, _}`, so the iterator visits
+    %% all of IP_A's entries first, then IP_B's, etc. Hitting a
+    %% non-expired entry for IP_A stopped the scan — IP_B's expired
+    %% entries were left behind, leaking memory over time.
+    %%
+    %% select_delete with a match spec processes every row in one
+    %% atomic pass, regardless of key order.
     MaxWindow = max(max(FW, SW), SlW),
     Cutoff = Now - MaxWindow,
-    ExpiredConns = delete_before(ets:first(?GUARD_CONNS), Cutoff, 0),
+    MatchSpec = [{{{'_', '$1', '_'}, '_'},
+                  [{'<', '$1', Cutoff}],
+                  [true]}],
+    ExpiredConns = ets:select_delete(?GUARD_CONNS, MatchSpec),
 
     case ExpiredConns > 0 of
         true ->
@@ -383,15 +437,6 @@ do_cleanup(
 
     %% Bans are managed by threat_mesh, not ct_guard.
     State.
-
-delete_before('$end_of_table', _, Count) ->
-    Count;
-delete_before({_IP, Ts, _} = Key, Cutoff, Count) when Ts < Cutoff ->
-    Next = ets:next(?GUARD_CONNS, Key),
-    ets:delete(?GUARD_CONNS, Key),
-    delete_before(Next, Cutoff, Count + 1);
-delete_before(_, _, Count) ->
-    Count.
 
 %% ===================================================================
 %% Whitelist

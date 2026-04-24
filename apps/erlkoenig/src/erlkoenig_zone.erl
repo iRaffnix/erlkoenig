@@ -202,6 +202,15 @@ handle_call({destroy_zone, Name}, _From, State) ->
                 false ->
                     case erlkoenig_zone_sup:stop_zone(Name) of
                         ok ->
+                            %% link_state is lazy-inserted on first
+                            %% link_state/1 call and was leaked on
+                            %% destroy before this cleanup. A recreate
+                            %% with the same zone name would then get
+                            %% the stale LinkRef pointing at the old
+                            %% host-side IPVLAN slave — container
+                            %% attaches would connect to the wrong
+                            %% parent interface.
+                            ets:delete(?TAB, {Name, link_state}),
                             ets:delete(?TAB, {Name, ip_pool}),
                             ets:delete(?TAB, {Name, dns}),
                             ets:delete(?TAB, Name),
@@ -325,6 +334,19 @@ first_of(Key, [Map | Rest], Default) ->
 -doc "Check if any running container belongs to this zone.".
 -spec zone_has_containers(zone_name()) -> boolean().
 zone_has_containers(Zone) ->
-    lists:any(fun(Info) ->
-        maps:get(zone, Info, default) =:= Zone
-    end, erlkoenig:list()).
+    %% erlkoenig:list/0 calls get_info/1 per pg member — a container
+    %% that died between pg lookup and the gen_statem:call raises
+    %% exit:noproc, crashes the comprehension, and takes down this
+    %% whole gen_server (bringing every zone service with it).
+    %% Wrap each lookup so a dead/wedged container just counts as
+    %% "not in this zone".
+    Pids = try pg:get_members(erlkoenig_pg, erlkoenig_cts)
+           catch error:_ -> []
+           end,
+    lists:any(fun(Pid) ->
+        try erlkoenig_ct:get_info(Pid) of
+            Info -> maps:get(zone, Info, default) =:= Zone
+        catch
+            _:_ -> false
+        end
+    end, Pids).

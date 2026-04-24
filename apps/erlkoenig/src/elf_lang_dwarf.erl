@@ -288,14 +288,24 @@ scan_abbrev(Bin, Target) ->
             error;
         {Code, Rest1} ->
             {Tag, Rest2} = decode_uleb128(Rest1),
-            %% Skip has_children byte
-            <<_HasChildren:8, Rest3/binary>> = Rest2,
-            {AttrSpecs, Rest4} = read_attr_specs(Rest3, []),
-            case Code of
-                Target ->
-                    {ok, Tag, AttrSpecs};
-                _ ->
-                    scan_abbrev(Rest4, Target)
+            %% `decode_uleb128' returns `{Acc, <<>>}' on a truncated
+            %% continuation (attacker-craftable in a stripped-but-not-
+            %% quite DWARF blob). Without this guard the next line
+            %% badmatched `<<_:8, _/binary>> = <<>>' and crashed the
+            %% caller of elf_lang_dwarf:compilation_units/1, which then
+            %% propagated up the language-detection path and aborted
+            %% container creation with a generic badmatch tuple.
+            case Rest2 of
+                <<_HasChildren:8, Rest3/binary>> ->
+                    {AttrSpecs, Rest4} = read_attr_specs(Rest3, []),
+                    case Code of
+                        Target ->
+                            {ok, Tag, AttrSpecs};
+                        _ ->
+                            scan_abbrev(Rest4, Target)
+                    end;
+                <<>> ->
+                    error
             end
     end.
 

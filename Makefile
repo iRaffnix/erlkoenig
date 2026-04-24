@@ -84,7 +84,7 @@ dialyzer: erl
 	fi; \
 	echo "Dialyzer: OK"
 
-integration: rt erl
+integration: erl
 	@echo ""
 	@echo "==> Integration Tests (braucht sudo)"
 	@echo ""
@@ -92,8 +92,13 @@ integration: rt erl
 		echo "ERROR: Integration tests need root. Run: sudo make integration"; \
 		exit 1; \
 	fi
+	@if [ ! -x "$(RT_BIN)" ]; then \
+		echo "ERROR: C runtime binary not found at $(RT_BIN)"; \
+		echo "Build erlkoenig_rt separately or override RT_BIN=..."; \
+		exit 1; \
+	fi
 	erlc -o $(INT_TESTS) $(INT_TESTS)/test_helper.erl
-	@bash $(INT_TESTS)/run_all.sh
+	@RT_BIN=$(RT_BIN) bash $(INT_TESTS)/run_all.sh
 
 # ── Elixir DSL ──────────────────────────────────────────
 

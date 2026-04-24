@@ -85,7 +85,19 @@ setup_container_net(Port, ContainerId, OsPid) ->
 setup_container_net(Port, ContainerId, OsPid, ZoneName) when is_atom(ZoneName) ->
     case erlkoenig_ip_pool:allocate(ZoneName) of
         {error, _} = Err -> Err;
-        {ok, Ip}         -> setup_container_net(Port, ContainerId, OsPid, Ip, ZoneName)
+        {ok, Ip} ->
+            %% If the subsequent setup fails, the IP we just allocated
+            %% would otherwise stay in the pool's `used` set forever
+            %% (there's no rollback upstream — the caller never saw a
+            %% success to pair with a later release). Release it here
+            %% so a flapping setup doesn't silently drain the pool.
+            case setup_container_net(Port, ContainerId, OsPid, Ip, ZoneName) of
+                {ok, _} = Ok ->
+                    Ok;
+                {error, _} = Err ->
+                    erlkoenig_ip_pool:release(Ip),
+                    Err
+            end
     end;
 setup_container_net(Port, ContainerId, OsPid, Ip) ->
     setup_container_net(Port, ContainerId, OsPid, Ip, default).

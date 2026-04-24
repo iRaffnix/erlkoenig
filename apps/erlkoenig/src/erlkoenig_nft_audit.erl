@@ -135,7 +135,7 @@ terminate(_Reason, _State) ->
 -spec do_log(atom(), map(), state()) -> {noreply, state()}.
 do_log(Action, Details, #{entries := Entries, count := Count} = State) ->
     Entry = #{
-        time => format_time(erlang:localtime()),
+        time => format_time(calendar:universal_time()),
         action => Action,
         details => Details
     },
@@ -143,11 +143,18 @@ do_log(Action, Details, #{entries := Entries, count := Count} = State) ->
     NewEntries = lists:sublist([Entry | Entries], ?MAX_ENTRIES),
     {noreply, State#{entries => NewEntries, count => Count + 1}}.
 
+%% UTC + ISO-8601 format matching `erlkoenig_audit:iso8601_now/0'.
+%% Previous `erlang:localtime()' + "YYYY-MM-DD HH:MM:SS" (no TZ
+%% marker) made cross-audit correlation impossible on nodes running
+%% non-UTC timezones: the main audit chain wrote UTC events while
+%% nft_audit wrote local-time events with no indicator, and an
+%% operator diffing the two streams to reconstruct a ban timeline
+%% saw events appearing ~hours apart that had fired simultaneously.
 -spec format_time(calendar:datetime()) -> binary().
 format_time({{Y, M, D}, {H, Mi, S}}) ->
     iolist_to_binary(
         io_lib:format(
-            "~4..0B-~2..0B-~2..0B ~2..0B:~2..0B:~2..0B",
+            "~4..0B-~2..0B-~2..0BT~2..0B:~2..0B:~2..0BZ",
             [Y, M, D, H, Mi, S]
         )
     ).

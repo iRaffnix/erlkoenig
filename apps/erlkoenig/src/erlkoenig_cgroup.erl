@@ -73,7 +73,8 @@ All operations are pure file I/O on cgroupfs — no os:cmd.
          parse_oom_kill/1,
          parse_pressure_some/1,
          parse_cpu_stat_full/2,
-         parse_memory_events/2]).
+         parse_memory_events/2,
+         move_each_pid/2]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
@@ -553,6 +554,13 @@ ensure_dir(Path) ->
 %% Move ALL processes from SourcePath to TargetPath.
 %% This satisfies the cgroups v2 "no internal process" rule:
 %% a cgroup with subtree_control enabled cannot have member processes.
+%%
+%% Failed writes used to be silently discarded with `_ =`, which hid
+%% the real error behind the downstream `verify_no_processes` check
+%% that fires later with a less-informative `processes_remain_in_base`.
+%% Surface the first write failure directly so the operator sees the
+%% kernel's actual rejection (EPERM, EBUSY, ...) at the moment it
+%% happens.
 -spec move_processes_to(string(), string()) -> ok | {error, term()}.
 move_processes_to(SourcePath, TargetPath) ->
     SourceProcs = filename:join(SourcePath, "cgroup.procs"),
@@ -567,10 +575,7 @@ move_processes_to(SourcePath, TargetPath) ->
                 _ ->
                     logger:info("erlkoenig_cgroup: moving ~b pids from ~s to ~s",
                                 [length(Pids), SourcePath, TargetPath]),
-                    lists:foreach(fun(Pid) ->
-                        _ = file:write_file(TargetProcs, Pid)
-                    end, Pids),
-                    ok
+                    move_each_pid(Pids, TargetProcs)
             end;
         {error, enoent} ->
             %% Source cgroup doesn't exist (e.g. no init/ subgroup) — skip
@@ -579,6 +584,19 @@ move_processes_to(SourcePath, TargetPath) ->
             logger:error("erlkoenig_cgroup: read ~s failed: ~p",
                          [SourceProcs, Reason]),
             {error, Reason}
+    end.
+
+-spec move_each_pid([binary()], string()) -> ok | {error, term()}.
+move_each_pid([], _TargetProcs) ->
+    ok;
+move_each_pid([Pid | Rest], TargetProcs) ->
+    case file:write_file(TargetProcs, Pid) of
+        ok ->
+            move_each_pid(Rest, TargetProcs);
+        {error, Reason} ->
+            logger:error("erlkoenig_cgroup: write ~s failed for pid ~s: ~p",
+                         [TargetProcs, Pid, Reason]),
+            {error, {move_pid_failed, Pid, Reason}}
     end.
 
 %% Verify that no processes remain in a cgroup.

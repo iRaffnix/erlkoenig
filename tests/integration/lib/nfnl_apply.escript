@@ -179,7 +179,7 @@ priority_to_int(N) when is_integer(N) -> N.
 
 compile_and_encode(Family, Table, Chain, Rule) ->
     try
-        Compiled = erlkoenig_firewall_nft:compile_rule(Rule),
+        Compiled = erlkoenig_ct_firewall:compile_rule(Rule),
         case Compiled of
             [] -> [];
             [H | _] when is_list(H) ->

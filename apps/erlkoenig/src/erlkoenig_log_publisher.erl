@@ -130,20 +130,43 @@ handle_call(_, _From, State) ->
 
 %% --- Log ingress (from erlkoenig_ct:forward_output/3) ---
 
-handle_cast({log, stdout, Chunk}, #state{channels = Channels} = State) ->
+%% forward_output/3 in erlkoenig_ct incremented in_flight by 1 when
+%% this cast was sent — the counter's job was to prevent mailbox
+%% overflow ("level 1 admission control" per the moduledoc). Once
+%% the cast has landed in our handle_cast clause, the admission-
+%% control slot is free: the chunk is no longer "in flight" from
+%% the caller's perspective, even if internal buffering will delay
+%% the actual publish.
+%%
+%% BUG this replaces: the old code only sub'd in the channel-
+%% rejected path, and at drain time (one per queued item). Because
+%% buffer_stdout/stderr coalesces N incoming chunks into a single
+%% queued iolist, N incoming cast-subs became 1 drain-sub — a
+%% persistent in_flight leak of N-1 slots per flush. A container
+%% with steady stdout hit LOG_HIGH_WATERMARK within minutes and
+%% then forward_output silently dropped EVERY subsequent chunk
+%% (level-1 tripped permanently). enqueue_chunk's drop-oldest
+%% branch had the same class of leak: it discarded a chunk without
+%% releasing the slot the chunk came in through.
+%%
+%% Fix: sub exactly once per cast, at the cast boundary. All
+%% downstream paths (buffer → enqueue → drain → publish, OR
+%% channel-filter reject, OR queue-full drop-oldest) are internal
+%% to the publisher and no longer touch in_flight.
+handle_cast({log, stdout, Chunk}, #state{channels = Channels,
+                                          in_flight = InFlight} = State) ->
+    atomics:sub(InFlight, 1, 1),
     case lists:member(stdout, Channels) of
-        true -> {noreply, buffer_stdout(Chunk, State)};
-        false ->
-            atomics:sub(State#state.in_flight, 1, 1),
-            {noreply, State}
+        true  -> {noreply, buffer_stdout(Chunk, State)};
+        false -> {noreply, State}
     end;
 
-handle_cast({log, stderr, Chunk}, #state{channels = Channels} = State) ->
+handle_cast({log, stderr, Chunk}, #state{channels = Channels,
+                                          in_flight = InFlight} = State) ->
+    atomics:sub(InFlight, 1, 1),
     case lists:member(stderr, Channels) of
-        true -> {noreply, buffer_stderr(Chunk, State)};
-        false ->
-            atomics:sub(State#state.in_flight, 1, 1),
-            {noreply, State}
+        true  -> {noreply, buffer_stderr(Chunk, State)};
+        false -> {noreply, State}
     end;
 
 handle_cast(_, State) ->
@@ -171,7 +194,8 @@ handle_info(drain, State) ->
     case queue:out(State#state.queue) of
         {{value, {Fd, Chunk, Seq}}, Q2} ->
             publish_chunk(Fd, Chunk, Seq, State),
-            atomics:sub(State#state.in_flight, 1, 1),
+            %% in_flight is sub'd at cast-receive (see handle_cast/2
+            %% for the rationale); do not double-decrement here.
             State2 = State#state{queue = Q2, queue_len = State#state.queue_len - 1},
             self() ! drain,
             {noreply, State2};

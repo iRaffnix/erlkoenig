@@ -661,6 +661,16 @@ format_ip(<<A,B,C,D>>) ->
     iolist_to_binary(io_lib:format("~B.~B.~B.~B", [A,B,C,D]));
 format_ip({A,B,C,D}) ->
     iolist_to_binary(io_lib:format("~B.~B.~B.~B", [A,B,C,D]));
+%% IPv6 as 16-byte binary: previously fell through to the generic
+%% binary clause below and was returned as 16 raw bytes — JSON then
+%% escaped them to gibberish like `  ...` instead of
+%% `fe80::1`. Decompose into 8 u16 words and hand to inet:ntoa/1 so
+%% operators see a readable IPv6 address in AMQP payloads.
+format_ip(<<A:16/big, B:16/big, C:16/big, D:16/big,
+             E:16/big, F:16/big, G:16/big, H:16/big>>) ->
+    iolist_to_binary(inet:ntoa({A, B, C, D, E, F, G, H}));
+format_ip({A,B,C,D,E,F,G,H}) ->
+    iolist_to_binary(inet:ntoa({A, B, C, D, E, F, G, H}));
 format_ip(Bin) when is_binary(Bin) ->
     Bin;
 format_ip(Other) ->

@@ -20,6 +20,13 @@ Reuses the existing nft_encode/nft_table/nft_chain/nft_batch modules.
 
 -export([build_batch/1, build_batch/2]).
 
+%% translate_opts is the validation seam — exported under TEST so unit
+%% tests can exercise the per-key translation and failure modes
+%% without having to round-trip through nft_batch + netlink encoding.
+-ifdef(TEST).
+-export([translate_opts/1]).
+-endif.
+
 -define(FAMILY_INT, 1).  %% inet (dual-stack) for nft_table/nft_delete/nft_chain
 -define(FAMILY_ATOM, inet).  %% for nft_encode:rule_fun
 
@@ -64,7 +71,7 @@ build_batch(#{chains := Chains} = _Config, TableName) ->
         %% Rule encoding — translate DSL keys to internal keys
         RuleFuns = lists:map(fun({Action, Opts}) ->
             InternalOpts = translate_opts(Opts),
-            Compiled = erlkoenig_firewall_nft:compile_generic_rule(Action, InternalOpts),
+            Compiled = erlkoenig_ct_firewall:compile_generic_rule(Action, InternalOpts),
             nft_encode:rule_fun(?FAMILY_ATOM, TableName, CN, Compiled)
         end, Rules),
 
@@ -82,7 +89,7 @@ build_batch(#{chains := Chains} = _Config, TableName) ->
 %%%===================================================================
 
 %% Translate DSL option keys to internal keys used by compile_generic_rule.
-%% Same mapping as erlkoenig_config:expand_nft_rule but without veth_of/replica_ips.
+%% Same mapping as erlkoenig_config_nft:expand_nft_rule but without veth_of/replica_ips.
 %%
 %% Note: container-local nft runs in the container's netns and knows
 %% ONLY its own IP.  Cross-container references
@@ -99,12 +106,53 @@ build_batch(#{chains := Chains} = _Config, TableName) ->
 -spec translate_opts(map()) -> map().
 translate_opts(Opts) ->
     maps:fold(fun
-        (ct_state, States, Acc) -> Acc#{ct => hd(States)};
+        (ct_state, States, Acc) when is_list(States), States =/= [] ->
+            %% Downstream `compile_generic_rule' only recognises
+            %% `ct => established', which maps to `nft_rules:ct_established_accept/0' —
+            %% that expression already matches established OR related
+            %% via a bitwise-OR mask, so the canonical DSL forms
+            %% `[:established]' / `[:established, :related]' both
+            %% resolve correctly. But `hd(States)' used to silently
+            %% drop the tail and worse: a list starting with any OTHER
+            %% atom (`[:new]', `[:invalid]', `[:new, :established]')
+            %% produced a `ct => new'-style key that compile_generic_rule
+            %% doesn't recognise → no ct filter at all → rule fires on
+            %% ALL conntrack states, wider than the operator declared.
+            %% Fail loud for unsupported state lists so the operator
+            %% sees the limitation instead of a quietly-wider rule.
+            case lists:all(fun(S) ->
+                                S =:= established orelse S =:= related
+                           end, States) of
+                true ->
+                    Acc#{ct => established};
+                false ->
+                    error({unsupported_ct_state,
+                           #{states => States,
+                             supported => [established, related],
+                             hint => <<"container-local nft ct_state only "
+                                       "supports [:established] and/or "
+                                       "[:related]. For `new`/`invalid` "
+                                       "matches, express them at host "
+                                       "nft_table level or via a set-lookup "
+                                       "pattern.">>}})
+            end;
+        (ct_state, States, _Acc) ->
+            error({invalid_ct_state,
+                   #{states => States,
+                     hint => <<"ct_state must be a non-empty list">>}});
         (tcp_dport, Port, Acc) -> Acc#{tcp => Port};
         (udp_dport, Port, Acc) -> Acc#{udp => Port};
-        (iifname, V, Acc) -> Acc#{iif => iolist_to_binary(V)};
-        (oifname, V, Acc) -> Acc#{oif => iolist_to_binary(V)};
-        (oifname_ne, V, Acc) -> Acc#{oif_neq => iolist_to_binary(V)};
+        %% Cross-container refs (veth_of / replica_ips) come BEFORE the
+        %% plain iifname/oifname/ip_saddr/ip_daddr clauses — a tuple
+        %% would otherwise reach iolist_to_binary/1 and raise a
+        %% cryptic badarg instead of the documented
+        %% unresolvable_*_in_container_nft hint. Operator readability
+        %% matters: Glasbox means the error names the limitation.
+        (Key, {veth_of, Pod, Ct}, _Acc)
+            when Key =:= iifname; Key =:= oifname; Key =:= oifname_ne ->
+            error({unresolvable_veth_of_in_container_nft,
+                   #{key => Key, pod => Pod, container => Ct,
+                     hint => <<"veth_of refs must live in host nft_table">>}});
         (Key, {replica_ips, Pod, Ct}, _Acc)
             when Key =:= ip_saddr; Key =:= ip_daddr ->
             error({unresolvable_replica_ips_in_container_nft,
@@ -112,11 +160,9 @@ translate_opts(Opts) ->
                      hint => <<"cross-container replica_ips refs must "
                                "live in host nft_table, not container-local "
                                "nft (SPEC-EK-023 §4)">>}});
-        (Key, {veth_of, Pod, Ct}, _Acc)
-            when Key =:= iifname; Key =:= oifname; Key =:= oifname_ne ->
-            error({unresolvable_veth_of_in_container_nft,
-                   #{key => Key, pod => Pod, container => Ct,
-                     hint => <<"veth_of refs must live in host nft_table">>}});
+        (iifname, V, Acc) -> Acc#{iif => iolist_to_binary(V)};
+        (oifname, V, Acc) -> Acc#{oif => iolist_to_binary(V)};
+        (oifname_ne, V, Acc) -> Acc#{oif_neq => iolist_to_binary(V)};
         (ip_saddr, {A,B,C,D}, Acc) -> Acc#{saddr => {A,B,C,D,32}};
         (ip_saddr, {A,B,C,D,P}, Acc) -> Acc#{saddr => {A,B,C,D,P}};
         (ip_daddr, {A,B,C,D}, Acc) -> Acc#{daddr => {A,B,C,D,32}};

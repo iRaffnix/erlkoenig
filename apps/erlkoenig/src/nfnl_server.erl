@@ -166,6 +166,7 @@ init(_Opts) ->
 -spec handle_call(term(), {pid(), term()}, state()) ->
     {reply, term(), state()}.
 handle_call({apply_msgs, MsgFuns}, _From, #{socket := Sock, seq := Seq} = State) ->
+    drain_stale(Sock),
     FirstMsgSeq = next_seq(Seq),
     {Msgs, MsgSeqs, LastMsgSeq} = build_msgs(MsgFuns, FirstMsgSeq, [], []),
     BatchBeginSeq = Seq,
@@ -183,26 +184,31 @@ handle_call({apply_msgs, MsgFuns}, _From, #{socket := Sock, seq := Seq} = State)
     {reply, Result, State#{seq => BatchEndSeq}};
 handle_call({get_counter, Family, Table, Name}, _From,
             #{socket := Sock, seq := Seq} = State) ->
+    drain_stale(Sock),
     QuerySeq = next_seq(Seq),
     Result = nft_object:get_counter(Sock, Family, Table, Name, QuerySeq),
     {reply, Result, State#{seq => next_seq(QuerySeq)}};
 handle_call({get_counter_reset, Family, Table, Name}, _From,
             #{socket := Sock, seq := Seq} = State) ->
+    drain_stale(Sock),
     QuerySeq = next_seq(Seq),
     Result = nft_object:get_counter_reset(Sock, Family, Table, Name, QuerySeq),
     {reply, Result, State#{seq => next_seq(QuerySeq)}};
 handle_call({list_set_elems, Family, Table, SetName}, _From,
             #{socket := Sock, seq := Seq} = State) ->
+    drain_stale(Sock),
     QuerySeq = next_seq(Seq),
     Result = nft_query:list_set_elems(Sock, Family, Table, SetName, QuerySeq),
     {reply, Result, State#{seq => next_seq(QuerySeq)}};
 handle_call({list_chains, Family, Table}, _From,
             #{socket := Sock, seq := Seq} = State) ->
+    drain_stale(Sock),
     QuerySeq = next_seq(Seq),
     Result = nft_query:list_chains(Sock, Family, Table, QuerySeq),
     {reply, Result, State#{seq => next_seq(QuerySeq)}};
 handle_call({get_ruleset, Family}, _From,
             #{socket := Sock, seq := Seq} = State) ->
+    drain_stale(Sock),
     QuerySeq = next_seq(Seq),
     Result = nft_query:get_ruleset(Sock, Family, QuerySeq),
     {reply, Result, State#{seq => next_seq(QuerySeq)}};
@@ -222,6 +228,37 @@ terminate(_Reason, #{socket := Sock}) ->
     nfnl_socket:close(Sock).
 
 %% --- Internal ---
+
+%% Drain any messages left over in the socket's receive buffer by a
+%% previous operation that didn't read them all (e.g. an apply_msgs
+%% timeout with ACKs still in flight). Uses a zero-ms timeout so this
+%% is essentially free when the buffer is empty.
+%%
+%% Without this, query paths (get_counter, list_chains, ...) would
+%% consume stale responses and parse them as their own — a single
+%% skipped ACK cascades because every subsequent query then reads
+%% data intended for the previous call, in perpetuity until the
+%% socket is closed.
+-spec drain_stale(socket:socket()) -> ok.
+drain_stale(Sock) ->
+    drain_stale(Sock, 0).
+
+-spec drain_stale(socket:socket(), non_neg_integer()) -> ok.
+drain_stale(Sock, Count) ->
+    case socket:recv(Sock, 0, 0) of
+        {ok, _Stale} ->
+            drain_stale(Sock, Count + 1);
+        {error, _} when Count > 0 ->
+            %% Finding stale messages here means a previous operation
+            %% timed out and the kernel's late ACK landed after we
+            %% gave up. Log so the operator can correlate with the
+            %% earlier timeout warning.
+            logger:warning("nfnl_server: discarded ~p stale netlink "
+                           "message(s) from prior operation", [Count]),
+            ok;
+        {error, _} ->
+            ok
+    end.
 
 %% 32-bit wraparound-safe sequence increment.
 -spec next_seq(non_neg_integer()) -> non_neg_integer().

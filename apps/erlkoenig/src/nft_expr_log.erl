@@ -44,7 +44,7 @@ Corresponds to libnftnl src/expr/log.c.
 
 -type log_opts() :: #{
     prefix => binary(),
-    group => non_neg_integer(),
+    group => 0..65535,
     snaplen => non_neg_integer(),
     level => 0..7
 }.
@@ -73,8 +73,16 @@ new(Opts) when is_map(Opts) ->
     Attrs = iolist_to_binary(
         lists:flatten([
             case maps:get(group, Opts, undefined) of
-                undefined -> [];
-                Group -> [nfnl_attr:encode(?NFTA_LOG_GROUP, <<Group:16/big>>)]
+                undefined ->
+                    [];
+                Group when is_integer(Group), Group >= 0, Group =< 16#FFFF ->
+                    [nfnl_attr:encode(?NFTA_LOG_GROUP, <<Group:16/big>>)];
+                %% Kernel nf_loginfo.group is u16. Silently truncating via
+                %% `<<Group:16/big>>' turned `group => 65536' into group 0
+                %% (kernel-log fallback) — operator's NFLOG consumer never
+                %% saw a single packet and had no signal something was wrong.
+                Group ->
+                    error({log_group_out_of_range, Group})
             end,
             case maps:get(prefix, Opts, undefined) of
                 undefined -> [];

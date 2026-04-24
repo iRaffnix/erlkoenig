@@ -149,11 +149,20 @@ terminate(_Reason, State) ->
 
 -spec get_container_ip(pid()) -> {ok, inet:ip4_address()} | {error, term()}.
 get_container_ip(Pid) ->
+    %% Previously only `exit:{noproc, _}' was caught. A wedged
+    %% gen_statem:call (exit:{timeout, _}) would propagate and crash
+    %% the health gen_server — blast-radius: all health checks in
+    %% the system go offline because one container's state machine
+    %% is deadlocked. Catch broader so a misbehaving container can't
+    %% take the monitor with it.
     try erlkoenig_ct:get_info(Pid) of
         #{state := running, net_info := #{ip := Ip}} -> {ok, Ip};
         #{state := running, id := _} -> {error, no_ip};
         #{state := S} -> {error, {not_running, S}}
-    catch exit:{noproc, _} -> {error, not_found}
+    catch
+        exit:{noproc, _}  -> {error, not_found};
+        exit:{timeout, _} -> {error, timeout};
+        _:Err             -> {error, Err}
     end.
 
 -spec schedule_check(#check{}) -> #check{}.

@@ -57,7 +57,7 @@ prop_dns_filter_compile_one_safe() ->
 
 prop_parse_container_name_safe() ->
     ?FORALL(Bin, proper_types:binary(),
-        run_safely(fun() -> erlkoenig_config:parse_container_name(Bin) end,
+        run_safely(fun() -> erlkoenig_config_nft:parse_container_name(Bin) end,
                    Bin)).
 
 %% ----------------------------------------------------------------

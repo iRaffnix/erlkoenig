@@ -49,7 +49,13 @@ store_test_() ->
           {"parse_quota accepts strings, ints, binaries",
            ?_test(t_parse_quota())},
           {"parse_quota raises on garbage",
-           ?_test(t_parse_quota_invalid())}]
+           ?_test(t_parse_quota_invalid())},
+          {"destroy succeeds when the on-disk dir already vanished",
+           ?_test(t_destroy_disk_already_gone())},
+          {"destroy keeps metadata when rm_rf can't remove the dir",
+           ?_test(t_destroy_rm_rf_failure_retains_metadata())},
+          {"cleanup_ephemeral logs and skips undeletable volumes",
+           ?_test(t_cleanup_ephemeral_partial_failure())}]
      end}.
 
 %%====================================================================
@@ -292,3 +298,94 @@ t_parse_quota_invalid() ->
                  erlkoenig_volume_store:parse_quota(<<"garbage">>)),
     ?assertError({invalid_quota, _},
                  erlkoenig_volume_store:parse_quota(-1)).
+
+%%====================================================================
+%% Destroy failure paths — regression guard for the silent rm_rf bug
+%%====================================================================
+%%
+%% Background: do_destroy used to `_ = rm_rf(HostPath)` and delete the
+%% dets entry unconditionally. An I/O error (read-only FS, permission
+%% denied, NFS stale) left the directory on disk while the metadata
+%% was gone — unrecoverable orphan. The fix preserves the metadata on
+%% non-enoent errors so operators can retry destroy after fixing the
+%% underlying I/O issue.
+
+t_destroy_disk_already_gone() ->
+    %% Someone cleaned the on-disk dir behind our back. Destroy still
+    %% succeeds because the end state matches (dir gone, metadata gone).
+    {ok, V} = erlkoenig_volume_store:ensure(
+        #{container => <<"ct-gone">>, persist => <<"ghost">>,
+          uid => 0, gid => 0}),
+    Host = maps:get(host_path, V),
+    ok = file:del_dir_r(binary_to_list(Host)),
+    ok = erlkoenig_volume_store:destroy(maps:get(uuid, V)),
+    ?assertEqual(not_found,
+                 erlkoenig_volume_store:find(<<"ct-gone">>, <<"ghost">>)).
+
+t_destroy_rm_rf_failure_retains_metadata() ->
+    %% If the test happens to run as root, chmod tricks don't block
+    %% deletion — skip rather than misleadingly pass. (CI runs non-root
+    %% per make check; integration suite is the root gate.)
+    case os:getenv("USER") of
+        "root" -> ok;
+        _ -> do_run_destroy_failure()
+    end.
+
+do_run_destroy_failure() ->
+    {ok, V} = erlkoenig_volume_store:ensure(
+        #{container => <<"ct-busy">>, persist => <<"locked">>,
+          uid => 0, gid => 0}),
+    Host = maps:get(host_path, V),
+    Uuid = maps:get(uuid, V),
+    %% Make the dir unreadable+unwritable so del_dir_r can't recurse.
+    %% Putting a file inside first ensures rm_rf has something to try.
+    ok = file:write_file(
+           filename:join(binary_to_list(Host), "blocker"), <<"x">>),
+    ok = file:change_mode(binary_to_list(Host), 8#0000),
+    try
+        %% destroy must report the failure and keep the metadata so
+        %% a retry (after the operator fixes the perms) is possible.
+        ?assertMatch({error, {rm_rf_failed, _}},
+                     erlkoenig_volume_store:destroy(Uuid)),
+        ?assertMatch({ok, _},
+                     erlkoenig_volume_store:find(<<"ct-busy">>, <<"locked">>))
+    after
+        %% Restore permissions so cleanup/1 can delete the test root.
+        _ = file:change_mode(binary_to_list(Host), 8#0700),
+        _ = erlkoenig_volume_store:destroy(Uuid)
+    end.
+
+t_cleanup_ephemeral_partial_failure() ->
+    case os:getenv("USER") of
+        "root" -> ok;
+        _ -> do_run_cleanup_partial()
+    end.
+
+do_run_cleanup_partial() ->
+    %% Two ephemeral volumes for the same container. Cripple one so
+    %% its destroy fails; the other one still gets cleaned up, and the
+    %% returned list reflects only the survivor — no silent swallow.
+    {ok, Good} = erlkoenig_volume_store:ensure(
+        #{container => <<"ct-mixed">>, persist => <<"good">>,
+          uid => 0, gid => 0, lifecycle => ephemeral}),
+    {ok, Bad} = erlkoenig_volume_store:ensure(
+        #{container => <<"ct-mixed">>, persist => <<"bad">>,
+          uid => 0, gid => 0, lifecycle => ephemeral}),
+    BadHost = maps:get(host_path, Bad),
+    ok = file:write_file(
+           filename:join(binary_to_list(BadHost), "blocker"), <<"x">>),
+    ok = file:change_mode(binary_to_list(BadHost), 8#0000),
+    try
+        {ok, Destroyed} =
+            erlkoenig_volume_store:cleanup_ephemeral(<<"ct-mixed">>),
+        ?assertEqual([maps:get(uuid, Good)], Destroyed),
+        %% Bad still in store — operator can retry.
+        ?assertMatch({ok, _},
+                     erlkoenig_volume_store:find(<<"ct-mixed">>, <<"bad">>)),
+        %% Good is gone.
+        ?assertEqual(not_found,
+                     erlkoenig_volume_store:find(<<"ct-mixed">>, <<"good">>))
+    after
+        _ = file:change_mode(binary_to_list(BadHost), 8#0700),
+        _ = erlkoenig_volume_store:destroy(maps:get(uuid, Bad))
+    end.

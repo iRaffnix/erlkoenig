@@ -110,8 +110,11 @@ proto_encode_decode(_Config) ->
     ?assertEqual(16#10, binary:first(Cmd)).
 
 proto_spawn_roundtrip(_Config) ->
-    %% reply_container_pid decode: <<Tag, Pid:32/big, NsLen:16/big, Ns/binary>>
-    Payload = <<3, 0,0,0,1, 0,5, "/test">>,
+    %% reply_container_pid decode: Tag + Version + TLV(pid) + TLV(netns).
+    Ns = <<"/test">>,
+    Payload = <<3, 1,
+                1:16/big, 4:16/big, 1:32/big,
+                2:16/big, (byte_size(Ns)):16/big, Ns/binary>>,
     {ok, reply_container_pid, #{child_pid := 1, netns_path := <<"/test">>}} =
         erlkoenig_proto:decode(Payload).
 

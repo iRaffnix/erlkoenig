@@ -294,11 +294,38 @@ handle_call(reload, _From, #{table := OldTable} = State) ->
                     logger:error("[erlkoenig_nft] Reload failed (still degraded): ~p", [DiagReason]),
                     {reply, ApplyErr, State#{degraded_reason => DiagReason}};
                 active ->
-                    %% Was active — try to roll back to old config
-                    _ = apply_config(maps:get(config, State)),
-                    start_counters(maps:get(config, State)),
-                    logger:error("[erlkoenig_nft] Reload failed: ~p, rolled back", [ApplyErr]),
-                    {reply, ApplyErr, State}
+                    %% Was active — try to roll back to old config. The
+                    %% rollback itself can fail (kernel rejected both
+                    %% new AND old config). Previously the result was
+                    %% silently discarded and the log still claimed
+                    %% "rolled back" — an operator reading that line
+                    %% could reasonably believe the system was back to
+                    %% a known-good state when actually neither config
+                    %% was live. Surface the real outcome.
+                    OldConfig = maps:get(config, State),
+                    case apply_config(OldConfig) of
+                        ok ->
+                            start_counters(OldConfig),
+                            logger:error("[erlkoenig_nft] Reload failed: ~p, "
+                                         "rolled back to previous config",
+                                         [ApplyErr]),
+                            {reply, ApplyErr, State};
+                        {error, RollbackReason} ->
+                            %% Both new and old failed — transition to
+                            %% degraded. No counters running.
+                            DiagReason = diagnose_and_report(OldConfig, RollbackReason),
+                            logger:error("[erlkoenig_nft] Reload failed: ~p, "
+                                         "ROLLBACK ALSO FAILED: ~p — "
+                                         "entering degraded mode",
+                                         [ApplyErr, DiagReason]),
+                            erlkoenig_nft_events:notify_control(
+                                apply_failed, {error, DiagReason},
+                                #{table => maps:get(table, State)}
+                            ),
+                            {reply, ApplyErr,
+                             State#{mode => degraded,
+                                    degraded_reason => DiagReason}}
+                    end
             end
     end;
 handle_call(list_chains, _From, #{config := Config} = State) ->
@@ -794,7 +821,7 @@ build_chain_rules(Table, ChainConfig, Config) ->
 
 %% Generic rule from DSL
 build_rule(Table, Chain, {rule, Verdict, Opts}, _Config) ->
-    Exprs = erlkoenig_firewall_nft:compile_generic_rule(Verdict, Opts),
+    Exprs = erlkoenig_ct_firewall:compile_generic_rule(Verdict, Opts),
     encode_rule(Table, Chain, Exprs);
 
 %% Simple rules → single term list → single msg_fun
@@ -1248,7 +1275,19 @@ set_type(_) -> undefined.
 
 -spec is_allowlist(binary()) -> boolean().
 is_allowlist(Name) ->
-    binary:match(Name, <<"allow">>) =/= nomatch.
+    %% Prefix-match, not substring: a substring match would also flag
+    %% `disallow_outbound' as an allowlist and then exclude it from the
+    %% blocklist search in `blocklist_name/2' — ban operations would
+    %% silently return {error, no_matching_set} for operators whose
+    %% DSL names happened to contain "allow" anywhere in the set name.
+    %% Prefix-match preserves the convention (allowlist, allow_inbound,
+    %% allow_v4 all still match) while rejecting the substring trap.
+    case Name of
+        <<"allow">> -> true;
+        <<"allow_", _/binary>> -> true;
+        <<"allowlist", _/binary>> -> true;
+        _ -> false
+    end.
 
 %% --- Internal: Build initial set elements ---
 %%
@@ -1309,9 +1348,21 @@ normalize_set_elements(Elements, ipv6_addr) ->
      || E <- Elements
     ];
 normalize_set_elements(Elements, inet_service) ->
-    [<<Port:16/big>> || Port <- Elements];
+    [encode_port(Port) || Port <- Elements];
 normalize_set_elements(Elements, _Type) ->
     Elements.
+
+%% Validate port range before packing into 16 bits — `<<Port:16/big>>`
+%% silently truncates via `band 16#FFFF` on values > 65535, so a DSL
+%% typo like 700000 would encode as port 31392 and end up in the
+%% kernel as a valid but completely unintended match. Fail loud so
+%% the operator sees the mistake at apply_config time instead of
+%% debugging "why is my allowlist letting the wrong port through".
+-spec encode_port(integer()) -> binary().
+encode_port(Port) when is_integer(Port), Port >= 0, Port =< 65535 ->
+    <<Port:16/big>>;
+encode_port(Port) ->
+    error({invalid_port, Port}).
 
 %% --- Internal: Build verdict map ---
 

@@ -61,10 +61,39 @@ decode_reply_exited_signal_test() ->
     ?assertEqual({ok, reply_exited, #{exit_code => 139, term_signal => 11}},
                  erlkoenig_proto:decode(Bin)).
 
+%% Exact bytes that erlkoenig_rt.c::send_reply_status would emit for
+%% state=1, pid=1234, uptime=5000. Before the TLV fix the decoder was
+%% reading the TLV type bytes positionally, so state came back as 0
+%% and pid as a ghost value around 16 million — recovery path broke
+%% silently. Keep this as a reproducer for that exact drift.
 decode_reply_status_test() ->
-    Bin = <<16#06, 1, 1:8, 1234:32/big, 5000:64/big>>,
+    Bin = <<16#06, 1,
+            %% TLV: type=1 (state), len=1, value=1
+            1:16/big, 1:16/big, 1:8,
+            %% TLV: type=2 (pid), len=4, value=1234
+            2:16/big, 4:16/big, 1234:32/big,
+            %% TLV: type=3 (uptime), len=8, value=5000
+            3:16/big, 8:16/big, 5000:64/big>>,
     ?assertEqual({ok, reply_status,
                   #{state => 1, child_pid => 1234, uptime_ms => 5000}},
+                 erlkoenig_proto:decode(Bin)).
+
+%% Defaults-on-missing: if the C runtime ever omits a field, decode
+%% should return 0 for it rather than crash. Exercises each maps:find
+%% fallback clause.
+decode_reply_status_missing_uptime_test() ->
+    Bin = <<16#06, 1,
+            1:16/big, 1:16/big, 2:8,          %% state=2
+            2:16/big, 4:16/big, 42:32/big>>,  %% pid=42
+    ?assertEqual({ok, reply_status,
+                  #{state => 2, child_pid => 42, uptime_ms => 0}},
+                 erlkoenig_proto:decode(Bin)).
+
+decode_reply_status_empty_tlv_test() ->
+    %% No TLVs — decoder must not crash, returns zero defaults.
+    Bin = <<16#06, 1>>,
+    ?assertEqual({ok, reply_status,
+                  #{state => 0, child_pid => 0, uptime_ms => 0}},
                  erlkoenig_proto:decode(Bin)).
 
 %% stdout/stderr are streaming frames: <<Tag:8, Data/binary>> — NO version

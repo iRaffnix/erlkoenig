@@ -33,6 +33,47 @@ jobs:
       - name: CI gate
         run: make test dialyzer
 
+  # ── Protocol Golden Vectors (cross-repo contract, SPEC-PROTO-001) ─
+  # Fast, self-contained regression gate for the BEAM<->C wire
+  # protocol. Fetches vectors from the sibling erlkoenigin repo and
+  # runs them through erlkoenig_proto:decode/1. If the wire shape
+  # drifts on either side (C runtime emits a different layout, or
+  # Erlang decoder changes its semantic map), this job fails loud.
+  # Deliberately kept separate from the main `erlang` job so the
+  # signal is obvious in CI logs.
+  proto-golden:
+    name: Protocol Golden Vectors
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout erlkoenigin (protocol vectors)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/erlkoenigin
+          path: erlkoenigin
+
+      - name: Setup Beam
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: '28'
+          rebar3-version: '3.24'
+
+      - name: Cache rebar3
+        uses: actions/cache@v4
+        with:
+          path: |
+            _build
+            ~/.cache/rebar3
+          key: erlang-${{ hashFiles('rebar.lock', 'rebar.config') }}
+          restore-keys: |
+            erlang-
+
+      - name: Run golden tests
+        env:
+          ERLKOENIG_PROTOCOL_VECTORS: ${{ github.workspace }}/erlkoenigin/specs/protocol/vectors/v1
+        run: rebar3 eunit --module=erlkoenig_proto_golden_tests
+
   # ── Elixir DSL ────────────────────────────────────────────
   dsl:
     name: Elixir DSL Tests

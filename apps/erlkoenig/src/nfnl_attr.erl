@@ -114,12 +114,26 @@ decode(<<>>) ->
 decode(Bin) when is_binary(Bin), byte_size(Bin) < ?NLA_HEADER_SIZE ->
     [];
 decode(<<Len:16/little, _Type:16/little, _/binary>> = Bin) when
-    Len < ?NLA_HEADER_SIZE; Len > byte_size(Bin) + 0
+    Len < ?NLA_HEADER_SIZE;
+    %% `((Len + 3) div 4) * 4' = Len rounded up to the 4-byte alignment
+    %% (guard-safe integer arithmetic for `Len + pad_size(Len)').
+    %% Before this upper bound, a malformed NLA where Len == byte_size(Bin)
+    %% but Len is NOT 4-byte-aligned (e.g. Len=18 in an 18-byte buffer)
+    %% would pass the old `Len > byte_size(Bin)' check and then badmatch
+    %% in `<<_Pad:PadLen/binary, _/binary>> = Rest' because Rest was
+    %% too short to hold the padding. Attacker-reachable DoS on any
+    %% netlink-parsing gen_server (nft_ct, nfnl_server).
+    ((Len + 3) div 4) * 4 > byte_size(Bin)
 ->
     error({invalid_nla, Len, byte_size(Bin)});
 decode(<<Len:16/little, Type:16/little, Rest/binary>>) ->
     DataLen = Len - ?NLA_HEADER_SIZE,
-    PadLen = pad_size(Len),
+    %% `Len + pad_size(Len)' might exceed Rest only when we're at
+    %% the tail with the actual padding omitted by the sender —
+    %% tolerate that by capping PadLen to what's available, so a
+    %% last-attribute-without-trailing-padding still decodes cleanly.
+    PadLen0 = pad_size(Len),
+    PadLen = min(PadLen0, byte_size(Rest) - DataLen),
     <<Data:DataLen/binary, _Pad:PadLen/binary, Tail/binary>> = Rest,
     Attr =
         case Type band ?NLA_F_NESTED of

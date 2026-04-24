@@ -70,16 +70,33 @@ extract(#elf{header = #elf_header{machine = Arch}} = Elf) when
             %% stub functions like Go's syscall.RawSyscall
             CallsiteNrs = resolve_callsite_syscalls(Elf, Arch, ExecShdrs),
             AllNrs2 = ordsets:union(AllNrs, ordsets:from_list(CallsiteNrs)),
-            Resolved = lists:foldl(
-                fun(Nr, Acc) ->
+            %% Nrs whose name can't be resolved are kept in the profile
+            %% (dropping them would break binaries that use recently-added
+            %% syscalls our DB doesn't know yet), but we collect them for
+            %% observability — `from_binary' in elf_seccomp uses the count
+            %% so the OCI JSON-exported profile and the in-tree BPF
+            %% profile no longer silently diverge on "unknown" entries.
+            {Resolved, UnknownNrs} = lists:foldl(
+                fun(Nr, {Acc, UnkAcc}) ->
                     case elf_syscall_db:name(Arch, Nr) of
-                        {ok, Name} -> Acc#{Nr => Name};
-                        error -> Acc#{Nr => <<"unknown">>}
+                        {ok, Name} -> {Acc#{Nr => Name}, UnkAcc};
+                        error -> {Acc#{Nr => <<"unknown">>}, [Nr | UnkAcc]}
                     end
                 end,
-                #{},
+                {#{}, []},
                 AllNrs2
             ),
+            case UnknownNrs of
+                [] ->
+                    ok;
+                _ ->
+                    logger:warning(
+                        "elf_syscall: ~B syscall nr(s) without DB name on "
+                        "arch ~p — allowed in BPF but omitted from JSON "
+                        "export; update elf_syscall_db. nrs=~w",
+                        [length(UnknownNrs), Arch, lists:sort(UnknownNrs)]
+                    )
+            end,
             Cats = build_categories(maps:values(Resolved)),
             {ok, #{
                 arch => Arch,

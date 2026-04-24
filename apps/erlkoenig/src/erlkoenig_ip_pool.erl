@@ -164,7 +164,18 @@ find_pool_for_ip(Ip) ->
     try
         Zones = erlkoenig_zone:zones(),
         find_pool_for_ip(Ip, Zones)
-    catch _:_ -> error
+    catch Class:Reason ->
+        %% `release/1' falls back to the default pool on `error'.
+        %% Without logging, a crashed zone registry silently rerouted
+        %% IPs from zone-pools into the default pool's free list —
+        %% later allocations could hand cross-subnet IPs to default-
+        %% zone containers and conflict against the original zone.
+        logger:warning(
+            "ip_pool: zone-lookup for ~p failed (~p:~p); "
+            "falling back to default pool — next allocation may "
+            "reuse cross-subnet IPs",
+            [Ip, Class, Reason]),
+        error
     end.
 
 find_pool_for_ip(_Ip, []) -> error;

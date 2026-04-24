@@ -643,3 +643,96 @@ seal_without_hmac_key_fails_test_() ->
                             erlkoenig_audit:seal_day())
            end]
       end}}.
+
+%% Regression guard: `details` may not override chain-critical fields
+%% (seq, prev_hash, ts, this_hash, signature, ...). The old encoder
+%% said so in a comment but happily let a caller's Details entry
+%% overwrite them at encode-time — a hostile or buggy caller could
+%% rewrite the chain link, or insert a bogus `this_hash`/`signature`
+%% that would make the hash computation disagree with every
+%% verifier's recomputation.
+details_cannot_override_chain_fields_test_() ->
+    {"details keys on reserved names are stripped before hashing",
+     {setup, fun setup/0, fun cleanup/1,
+      fun({_Pid, Path}) ->
+          [fun() ->
+               %% First event — establish a known chain head.
+               erlkoenig_audit:log(#{type => baseline,
+                                     subject => <<"x">>,
+                                     result => ok}),
+               flush(),
+               [_] = read_lines(Path),
+
+               %% Second event with hostile details trying to rewrite
+               %% seq, prev_hash, this_hash and signature.
+               erlkoenig_audit:log(#{
+                   type => hostile,
+                   subject => <<"y">>,
+                   result => ok,
+                   details => #{
+                       seq => 9999,
+                       prev_hash => <<"deadbeef">>,
+                       this_hash => <<"cafebabe">>,
+                       signature => <<"fake">>,
+                       real_field => <<"payload">>
+                   }
+               }),
+               flush(),
+
+               [_, Line2] = read_lines(Path),
+               Event2 = json:decode(Line2),
+
+               %% seq must be 2, not 9999 — Base wins.
+               ?assertEqual(2, maps:get(<<"seq">>, Event2)),
+               %% prev_hash must NOT equal the attacker's `deadbeef`.
+               ?assertNotEqual(<<"deadbeef">>,
+                               maps:get(<<"prev_hash">>, Event2)),
+               %% Real field from details still comes through.
+               ?assertEqual(<<"payload">>,
+                            maps:get(<<"real_field">>, Event2)),
+               %% Recompute the hash the way verify_lines does: strip
+               %% both this_hash AND signature, then canonical_json +
+               %% sha256 → hex. Must equal the stored this_hash.
+               Stored = maps:get(<<"this_hash">>, Event2),
+               Stripped = maps:remove(<<"signature">>,
+                                      maps:remove(<<"this_hash">>,
+                                                  Event2)),
+               Canonical = erlkoenig_audit:canonical_json(Stripped),
+               Recomputed = list_to_binary(
+                   [io_lib:format("~2.16.0b", [B])
+                    || <<B>> <= crypto:hash(sha256, Canonical)]),
+               ?assertEqual(Stored, Recomputed),
+               %% And the stored this_hash must NOT equal the attacker's
+               %% injected value.
+               ?assertNotEqual(<<"cafebabe">>, Stored)
+           end]
+      end}}.
+
+details_preserves_verify_chain_test_() ->
+    {"verify_chain/1 passes after a caller put reserved keys in details",
+     {setup, fun setup/0, fun cleanup/1,
+      fun({_Pid, Path}) ->
+          [fun() ->
+               %% Write three events, one with hostile details.
+               erlkoenig_audit:log(#{type => a, subject => <<"x">>,
+                                     result => ok}),
+               erlkoenig_audit:log(#{
+                   type => b, subject => <<"y">>, result => ok,
+                   details => #{
+                       seq => 42,
+                       prev_hash => <<"ffffffff">>,
+                       this_hash => <<"tamper">>,
+                       signature => <<"tamper">>,
+                       payload => <<"honest">>
+                   }
+               }),
+               erlkoenig_audit:log(#{type => c, subject => <<"z">>,
+                                     result => ok}),
+               flush(),
+               %% verify_chain recomputes every hash from scratch — if
+               %% the fix above didn't fully neutralise the injected
+               %% fields, the chain recomputation diverges and we'd
+               %% get {error, {chain_break, ...}}.
+               ?assertMatch({ok, 3}, erlkoenig_audit:verify_chain(Path))
+           end]
+      end}}.

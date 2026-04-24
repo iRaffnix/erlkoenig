@@ -313,7 +313,7 @@ expose the shared structure without breaking the flat sugar.
 - **`Erlkoenig.Nft.ChainBuilder.add_conn_limit/2`** + the
   shared `compile_conn_limit!/1` validator — where the DSL sugar
   is wired.
-- **`erlkoenig_firewall_nft:compile_generic_special(connlimit_drop, …)`**
+- **`erlkoenig_ct_firewall:compile_generic_special(connlimit_drop, …)`**
   — the rule expansion to nftables expressions.
 - **Chapter 19** — capability framework this composes with.
 - **Chapter 20** — the audit verifier that re-checks chain

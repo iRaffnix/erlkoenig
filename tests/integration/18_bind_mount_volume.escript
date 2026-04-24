@@ -18,16 +18,21 @@ main(_) ->
     io:format("~n=== Test 18: Bind-Mount Persistent Volumes ===~n~n"),
     test_helper:boot(),
 
-    %% Setup: create volume directories
-    VolBase = "/var/lib/erlkoenig/volumes/test-vol-ct",
-    DataDir = VolBase ++ "/data",
-    LogDir = VolBase ++ "/logs",
-    ConfigDir = VolBase ++ "/config",
-    lists:foreach(fun(D) -> filelib:ensure_dir(D ++ "/"), file:make_dir(D) end,
-                  [VolBase, DataDir, LogDir, ConfigDir]),
-
-    %% Write a config file for the read-only volume
-    ok = file:write_file(ConfigDir ++ "/app.conf", <<"setting=42\n">>),
+    %% The volume store now uses UUID-keyed directories
+    %% (`/var/lib/erlkoenig/volumes/<uuid>/`) with `by-name/` symlinks
+    %% for human-readable lookup, not the legacy
+    %% `/var/lib/erlkoenig/volumes/<container>/<persist>/' layout.
+    %% We let the store create its UUID dirs on first `erlkoenig:spawn'
+    %% and read the actual host paths back from `inspect/1'.
+    VolumeByName =
+        fun(Info, Persist) ->
+            Vols = maps:get(volumes, Info, []),
+            case [maps:get(host, V) || V <- Vols,
+                                       maps:get(persist, V, undefined) =:= Persist] of
+                [HP | _] -> binary_to_list(HP);
+                []       -> error({volume_not_found, Persist})
+            end
+        end,
 
     %% --- Test 1: Spawn with volume, write, verify ---
     Pid1 = test_helper:step("Spawn container mit Volume", fun() ->
@@ -47,6 +52,13 @@ main(_) ->
                     read_only => true}
               ]}),
         timer:sleep(1500),
+        %% Seed the read-only config volume with our sample file
+        %% through the store's real host dir (read-only means no
+        %% container-side writes, but the host can prepopulate).
+        InfoSeed = erlkoenig:inspect(P),
+        ConfigDir = VolumeByName(InfoSeed, <<"config">>),
+        ok = file:write_file(ConfigDir ++ "/app.conf",
+                             <<"setting=42\n">>),
         {ok, P}
     end),
 
@@ -72,6 +84,8 @@ main(_) ->
     end),
 
     test_helper:step("Verify file visible on host", fun() ->
+        Info = erlkoenig:inspect(Pid1),
+        DataDir = VolumeByName(Info, <<"data">>),
         HostPath = DataDir ++ "/persist_test.txt",
         case file:read_file(HostPath) of
             {ok, Content} ->
@@ -107,6 +121,10 @@ main(_) ->
     end),
 
     test_helper:step("Verify volume data on host after stop", fun() ->
+        %% Pid1 is stopped but its volume record survives in the store,
+        %% so inspect still returns the host path.
+        Info = erlkoenig:inspect(Pid1),
+        DataDir = VolumeByName(Info, <<"data">>),
         HostPath = DataDir ++ "/persist_test.txt",
         case file:read_file(HostPath) of
             {ok, Content} ->
@@ -155,8 +173,10 @@ main(_) ->
     %% Cleanup
     test_helper:cleanup([Pid2]),
 
-    %% Cleanup host dirs
-    os:cmd("rm -rf " ++ VolBase),
+    %% Volumes are managed by the store — dropping test containers
+    %% leaves the UUID dirs behind. That's fine for a dev host; a
+    %% future iteration can call erlkoenig_volume_store:cleanup_ephemeral/1
+    %% here once the test container is flagged `ephemeral'.
 
     io:format("~n=== Test 18 bestanden ===~n~n"),
     halt(0).

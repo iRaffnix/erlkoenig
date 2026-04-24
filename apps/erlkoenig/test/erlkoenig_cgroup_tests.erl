@@ -249,3 +249,42 @@ auto_ceiling_negative_test() ->
     BadCfg = #{memory_max => Ceiling, pids_max => 24576},
     ?assertError({invalid_config, containers_memory_max_too_low, _},
                  erlkoenig_cgroup:validate_containers_config(BadCfg)).
+
+%% =================================================================
+%% move_each_pid — regression guard for silent-write-failure bug
+%%
+%% Before hardening, move_processes_to used lists:foreach with
+%% `_ = file:write_file(...)` which discarded per-pid write errors.
+%% A downstream verify_no_processes check would eventually catch
+%% "processes remain" but the operator lost the real errno. The fix
+%% returns the first write failure tagged with the offending pid.
+%% =================================================================
+
+move_each_pid_all_succeed_test() ->
+    Path = "/tmp/eunit_ek_cg_mep_ok_" ++
+           integer_to_list(erlang:system_time(nanosecond)),
+    try
+        ok = file:write_file(Path, <<>>),
+        ?assertEqual(ok, erlkoenig_cgroup:move_each_pid(
+                           [<<"123">>, <<"456">>, <<"789">>], Path))
+    after
+        _ = file:delete(Path)
+    end.
+
+move_each_pid_write_failure_surfaces_errno_test() ->
+    BadPath = "/tmp/eunit_ek_cg_nonexistent_parent_" ++
+              integer_to_list(erlang:system_time(nanosecond)) ++
+              "/nested/cgroup.procs",
+    Result = erlkoenig_cgroup:move_each_pid([<<"1234">>], BadPath),
+    ?assertMatch({error, {move_pid_failed, <<"1234">>, _}}, Result).
+
+move_each_pid_stops_at_first_error_test() ->
+    BadPath = "/tmp/eunit_ek_cg_bad_parent_" ++
+              integer_to_list(erlang:system_time(nanosecond)) ++
+              "/nope/cgroup.procs",
+    Result = erlkoenig_cgroup:move_each_pid(
+               [<<"first">>, <<"second">>], BadPath),
+    ?assertMatch({error, {move_pid_failed, <<"first">>, _}}, Result).
+
+move_each_pid_empty_list_is_noop_test() ->
+    ?assertEqual(ok, erlkoenig_cgroup:move_each_pid([], "/doesnt/matter")).

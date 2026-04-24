@@ -130,6 +130,46 @@ banned_ignores_connections_test() ->
     gen_statem:stop(Pid),
     teardown(Reg).
 
+%% Repeat-offender path: after ban + probation, a new connection
+%% puts the actor back in `observing` with a FRESH detection
+%% window. Regression guard for a bug where `first_seen` stayed
+%% pinned to the original session start — the elapsed time then
+%% exceeded `slow_window`, and slow-scan detection was silently
+%% disabled for every subsequent offense.
+probation_to_observing_resets_first_seen_test() ->
+    Reg = setup(),
+    IP = <<10, 0, 0, 42>>,
+    Config = (base_config(Reg))#{
+        honeypot_ban_duration => 1,     %% 1 second — short enough for eunit
+        probation => 120,               %% stays in probation long enough
+        escalation => [1, 1, 1, 1]      %% ignore escalation math here
+    },
+    {ok, Pid} = erlkoenig_threat_actor:start_link(IP, Config),
+
+    %% Honeypot port 22 → banned.
+    erlkoenig_threat_actor:connection(Pid, 22),
+    timer:sleep(50),
+    ?assertEqual(banned, get_statem_state(Pid)),
+
+    FirstSeenBeforeProbation = extract_first_seen(Pid),
+
+    %% Wait for the 1s ban timer → probation.
+    timer:sleep(1_100),
+    ?assertEqual(probation, get_statem_state(Pid)),
+
+    %% A new connection during probation moves us back to observing.
+    erlkoenig_threat_actor:connection(Pid, 9000),
+    timer:sleep(50),
+    ?assertEqual(observing, get_statem_state(Pid)),
+
+    %% first_seen must have advanced — otherwise slow_scan silently
+    %% loses effect for the remainder of the actor's life.
+    FirstSeenAfterProbation = extract_first_seen(Pid),
+    ?assert(FirstSeenAfterProbation >= FirstSeenBeforeProbation),
+
+    gen_statem:stop(Pid),
+    teardown(Reg).
+
 %% ===================================================================
 %% Helpers
 %% ===================================================================
@@ -143,3 +183,14 @@ get_statem_state(Pid) ->
     {data, StateKV} = lists:last(StatusItems),
     {"State", {StateName, _StateData}} = lists:keyfind("State", 1, StateKV),
     StateName.
+
+%% Dig `first_seen` out of the gen_statem's state data. The record
+%% layout is private to `erlkoenig_threat_actor`, so we go by tuple
+%% position: #data{ip, config, ports_seen, conn_timestamps,
+%% first_seen, last_seen, ban_count, registry} → element 6 after
+%% the record-tag slot (1-based: [data, ip, config, ports_seen,
+%% conn_timestamps, first_seen, ...]). If the record layout changes,
+%% update this helper and the corresponding comment in the module.
+extract_first_seen(Pid) ->
+    {_StateName, Data} = sys:get_state(Pid),
+    lists:nth(6, tuple_to_list(Data)).

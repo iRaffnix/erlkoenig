@@ -61,7 +61,7 @@ start(_StartType, _StartArgs) ->
     {ok, Sup}.
 
 stop(_State) ->
-    _ = erlkoenig_firewall_nft:teardown_table(),
+    _ = erlkoenig_ct_firewall:teardown_table(),
     ok.
 
 %% Log recovery results summary.
@@ -77,7 +77,7 @@ log_recovery_results(Results) ->
 setup_firewall() ->
     Zones = try erlkoenig_zone:zones() catch _:_ -> [] end,
     ZoneConfigs = [erlkoenig_zone:zone_config(Z) || Z <- Zones],
-    case erlkoenig_firewall_nft:setup_table(ZoneConfigs) of
+    case erlkoenig_ct_firewall:setup_table(ZoneConfigs) of
         ok -> ok;
         {error, Reason} ->
             logger:error("firewall setup failed: ~p", [Reason])

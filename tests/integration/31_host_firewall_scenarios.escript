@@ -217,7 +217,7 @@ build_chain_create(Table, #{name := Name} = Chain) ->
 
 build_chain_rules(Table, #{name := Name, rules := Rules}) ->
     [begin
-        Exprs = erlkoenig_firewall_nft:compile_rule(R),
+        Exprs = erlkoenig_ct_firewall:compile_rule(R),
         nft_encode:rule_fun(inet, Table, Name, Exprs)
      end || R <- Rules].
 
@@ -420,10 +420,10 @@ test_dsl_term(Dir, Name, ExpectedTable) ->
     %% Dead-man-switch
     DMS = spawn_dead_man_switch(ExpectedTable),
 
-    %% Apply via erlkoenig_config:apply_nft_tables/5
+    %% Apply via erlkoenig_config_nft:apply_nft_tables/5
     %% Empty maps for IpMap/VethMap/Pods/Zones — host-only firewalls
     %% don't reference container IPs.
-    erlkoenig_config:apply_nft_tables(NftTables, #{}, #{}, [], []),
+    erlkoenig_config_nft:apply_nft_tables(NftTables, #{}, #{}, [], []),
 
     %% Verify the table exists in kernel
     verify_table_exists(ExpectedTable),

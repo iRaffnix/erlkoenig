@@ -153,3 +153,47 @@ idempotent_ban_test() ->
     Bans = erlkoenig_threat_mesh:active_bans(),
     ?assert(maps:is_key(IP, Bans)),
     stop_mesh(Pid).
+
+%% Reconfigure must actively lift kernel bans for newly-whitelisted
+%% IPs. The natural operator mental model: "this IP was banned by
+%% mistake, I'll add it to the whitelist to fix". Without this fix,
+%% the operator had to wait for the timer (up to 24h+) and in the
+%% meantime saw their whitelist edit had no effect.
+reconfigure_adding_whitelist_lifts_active_ban_test() ->
+    setup(),
+    Pid = start_mesh(),
+    IP = <<30, 31, 32, 33>>,
+
+    erlkoenig_threat_mesh:local_ban(IP,
+        os:system_time(millisecond) + 60_000, flood),
+    timer:sleep(20),
+    BansBefore = erlkoenig_threat_mesh:active_bans(),
+    ?assert(maps:is_key(IP, BansBefore)),
+
+    erlkoenig_threat_mesh:reconfigure(#{whitelist => ["30.31.32.33"]}),
+    timer:sleep(50),
+
+    BansAfter = erlkoenig_threat_mesh:active_bans(),
+    ?assertNot(maps:is_key(IP, BansAfter)),
+    stop_mesh(Pid).
+
+reconfigure_leaves_non_whitelisted_bans_alone_test() ->
+    setup(),
+    Pid = start_mesh(),
+    Banned = <<40, 41, 42, 43>>,
+    Whitelisted = <<50, 51, 52, 53>>,
+
+    erlkoenig_threat_mesh:local_ban(Banned,
+        os:system_time(millisecond) + 60_000, flood),
+    erlkoenig_threat_mesh:local_ban(Whitelisted,
+        os:system_time(millisecond) + 60_000, flood),
+    timer:sleep(20),
+
+    %% Only Whitelisted lands in the list — the other ban must stay.
+    erlkoenig_threat_mesh:reconfigure(#{whitelist => ["50.51.52.53"]}),
+    timer:sleep(50),
+
+    BansAfter = erlkoenig_threat_mesh:active_bans(),
+    ?assert(maps:is_key(Banned, BansAfter)),
+    ?assertNot(maps:is_key(Whitelisted, BansAfter)),
+    stop_mesh(Pid).

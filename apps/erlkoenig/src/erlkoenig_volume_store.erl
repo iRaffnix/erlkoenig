@@ -395,11 +395,30 @@ do_destroy(Uuid) ->
                 end,
             %% rm -rf is destructive but scoped to the volume root;
             %% the directory name is a UUID we generated, so no
-            %% user-controlled path traversal is possible.
-            _ = rm_rf(HostPath),
-            _ = maybe_remove_by_name_symlink(Container, Persist),
-            ok = dets:delete(?TABLE, Uuid),
-            ok;
+            %% user-controlled path traversal is possible. A failure
+            %% here MUST NOT cascade into dets:delete, or we'd orphan
+            %% the data dir with no record in the metadata — operators
+            %% would have no way to recover the space. Keep the entry
+            %% so the operator can fix the underlying I/O issue and
+            %% retry destroy.
+            case rm_rf(HostPath) of
+                ok ->
+                    _ = maybe_remove_by_name_symlink(Container, Persist),
+                    ok = dets:delete(?TABLE, Uuid),
+                    ok;
+                {error, enoent} ->
+                    %% Already gone (operator cleaned it up manually,
+                    %% or a concurrent destroy beat us). Treat as
+                    %% success and drop the metadata.
+                    _ = maybe_remove_by_name_symlink(Container, Persist),
+                    ok = dets:delete(?TABLE, Uuid),
+                    ok;
+                {error, Reason} ->
+                    logger:error("volume_store: rm_rf ~s (uuid=~s) "
+                                 "failed: ~p — metadata kept for retry",
+                                 [HostPath, Uuid, Reason]),
+                    {error, {rm_rf_failed, Reason}}
+            end;
         [] ->
             {error, not_found}
     end.
@@ -445,7 +464,23 @@ do_cleanup_ephemeral(Container) ->
                       uuid := U}}, Acc) when C =:= Container -> [U | Acc];
            (_, Acc) -> Acc
         end, [], ?TABLE),
-    Destroyed = [U || U <- Targets, do_destroy(U) =:= ok],
+    %% Loop explicitly so partial failures land in the error log
+    %% rather than silently disappearing from a list comprehension.
+    %% The return shape stays {ok, Destroyed} — callers (erlkoenig_ct)
+    %% compare the count against what they expected and see mismatches
+    %% reflected in the logs.
+    Destroyed = lists:foldr(
+        fun(Uuid, Acc) ->
+            case do_destroy(Uuid) of
+                ok -> [Uuid | Acc];
+                {error, Reason} ->
+                    logger:error("volume_store: cleanup_ephemeral "
+                                 "for ~s: destroy ~s failed: ~p "
+                                 "(volume retained in store)",
+                                 [Container, Uuid, Reason]),
+                    Acc
+            end
+        end, [], Targets),
     {ok, Destroyed}.
 
 %%====================================================================
@@ -513,26 +548,64 @@ chown_and_mode(Path, Uid, Gid) ->
 -spec maybe_ensure_by_name_symlink(binary(), binary(), binary()) ->
     ok | {error, term()}.
 maybe_ensure_by_name_symlink(Container, Persist, Uuid) ->
-    ByNameDir = filename:join([by_name_dir(), binary_to_list(Container)]),
-    _ = filelib:ensure_dir(ByNameDir ++ "/"),
-    _ = file:make_dir(ByNameDir),
-    LinkPath = filename:join(ByNameDir, binary_to_list(Persist)),
-    %% Relative target so moving the volumes root doesn't break links.
-    Target = filename:join(["..", "..", binary_to_list(Uuid)]),
-    case file:make_symlink(Target, LinkPath) of
-        ok -> ok;
-        {error, eexist} -> ok;
-        {error, _} = Err -> Err
+    %% Persist is already regex-validated by erlkoenig_volume, but
+    %% Container name is not path-sanitized upstream. A container
+    %% declared as `<<"../../etc">>' would otherwise resolve
+    %% ByNameDir to `/var/lib/erlkoenig/volumes/by-name/../../etc',
+    %% which filename:join does NOT normalize away — the mkdir +
+    %% symlink would escape the volumes root. Validate here as a
+    %% trust-boundary even though upstream validation SHOULD also
+    %% enforce this.
+    case safe_name_component(Container) of
+        true ->
+            ByNameDir = filename:join([by_name_dir(),
+                                       binary_to_list(Container)]),
+            _ = filelib:ensure_dir(ByNameDir ++ "/"),
+            _ = file:make_dir(ByNameDir),
+            LinkPath = filename:join(ByNameDir, binary_to_list(Persist)),
+            %% Relative target so moving the volumes root doesn't
+            %% break links.
+            Target = filename:join(["..", "..", binary_to_list(Uuid)]),
+            case file:make_symlink(Target, LinkPath) of
+                ok -> ok;
+                {error, eexist} -> ok;
+                {error, _} = Err -> Err
+            end;
+        false ->
+            logger:error(
+                "volume_store: rejecting by-name symlink for unsafe "
+                "container name: ~p", [Container]),
+            {error, {invalid_container_name, Container}}
     end.
+
+%% Accept only names that cannot escape the by-name/ directory.
+%% Rejects empty, "..", anything containing "/", "\0", or ".." as a
+%% component, and reserves "." for reasons of sanity.
+-spec safe_name_component(binary()) -> boolean().
+safe_name_component(<<>>) -> false;
+safe_name_component(<<"..">>) -> false;
+safe_name_component(<<".">>) -> false;
+safe_name_component(Bin) when is_binary(Bin) ->
+    nomatch =:= binary:match(Bin, [<<"/">>, <<"\\">>, <<0>>, <<"..">>]).
 
 -spec maybe_remove_by_name_symlink(binary(), binary()) -> ok.
 maybe_remove_by_name_symlink(Container, Persist) ->
-    ByNameDir = filename:join([by_name_dir(), binary_to_list(Container)]),
-    LinkPath = filename:join(ByNameDir, binary_to_list(Persist)),
-    _ = file:delete(LinkPath),
-    %% If the container dir is empty, remove it too. Best-effort.
-    _ = file:del_dir(ByNameDir),
-    ok.
+    case safe_name_component(Container) of
+        false ->
+            %% Same guard as the create side — if a malformed Container
+            %% made it past earlier checks during `ensure`, we
+            %% definitely don't want the `del_dir' below to chase ..s
+            %% out of the volumes root on teardown.
+            ok;
+        true ->
+            ByNameDir = filename:join([by_name_dir(),
+                                       binary_to_list(Container)]),
+            LinkPath = filename:join(ByNameDir, binary_to_list(Persist)),
+            _ = file:delete(LinkPath),
+            %% If the container dir is empty, remove it too. Best-effort.
+            _ = file:del_dir(ByNameDir),
+            ok
+    end.
 
 -spec rm_rf(binary()) -> ok | {error, term()}.
 rm_rf(Path) when is_binary(Path) ->

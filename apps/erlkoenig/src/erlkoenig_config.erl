@@ -53,8 +53,10 @@ parse(TermFile) ->
         {ok, [Config]} when is_list(Config) ->
             {ok, maps:from_list(Config)};
         {ok, _} ->
+            config_error(parse_failed, TermFile, invalid_format),
             {error, {invalid_format, TermFile}};
         {error, Reason} ->
+            config_error(parse_failed, TermFile, Reason),
             {error, {read_failed, TermFile, Reason}}
     end.
 
@@ -63,7 +65,13 @@ parse(TermFile) ->
 validate(TermFile) ->
     case parse(TermFile) of
         {ok, Config} ->
-            erlkoenig_config_validate:validate_config(Config);
+            case erlkoenig_config_validate:validate_config(Config) of
+                ok ->
+                    ok;
+                {error, Reason} = Err ->
+                    config_error(validate_failed, TermFile, Reason),
+                    Err
+            end;
         {error, _} = Err ->
             Err
     end.
@@ -115,6 +123,26 @@ declared_names(TermFile) ->
         {error, _} = E ->
             E
     end.
+
+config_error(parse_failed, TermFile, Reason) ->
+    erlkoenig_error:emit(
+      ?EK_ERROR(config, parse_failed,
+                "configuration parse failed",
+                #{path => path_binary(TermFile),
+                  reason => Reason}));
+config_error(validate_failed, TermFile, Reason) ->
+    erlkoenig_error:emit(
+      ?EK_ERROR(config, validate_failed,
+                "configuration validation failed",
+                #{path => path_binary(TermFile),
+                  reason => Reason})).
+
+path_binary(Path) when is_binary(Path) ->
+    Path;
+path_binary(Path) when is_atom(Path) ->
+    atom_to_binary(Path, utf8);
+path_binary(Path) ->
+    unicode:characters_to_binary(Path).
 
 %% Validation (validate_config/1, validate_zones/1,
 %% validate_containers/1) lives in erlkoenig_config_validate.

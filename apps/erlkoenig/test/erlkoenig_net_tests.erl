@@ -56,3 +56,51 @@ default_gateway_test() ->
 default_netmask_test() ->
     Netmask = application:get_env(erlkoenig, netmask, 24),
     ?assertEqual(24, Netmask).
+
+%% =================================================================
+%% ErrorMap retry contract
+%% =================================================================
+
+netns_setup_eaddrinuse_errormap_retries_test() ->
+    Err = erlkoenig_error:make(
+            network, netns_setup_failed, "runtime rejected container network namespace setup",
+            #{reason => {net_setup_failed, -98, <<"address in use">>},
+              ifname => <<"i.web0">>,
+              ip => {10, 0, 0, 2},
+              gateway => {10, 0, 0, 1},
+              prefixlen => 24}),
+    Calls = spawn_counter(),
+    Call = fun() ->
+        Calls ! call,
+        case counter_value(Calls) of
+            1 -> {error, Err};
+            _ -> {ok, #{ip => {10, 0, 0, 2}}}
+        end
+    end,
+    ?assertMatch({ok, #{ip := {10, 0, 0, 2}}},
+                 erlkoenig_ct_net:try_net_setup_loop(Call, 2, undefined)),
+    ?assertEqual(2, counter_value(Calls)),
+    Calls ! stop.
+
+spawn_counter() ->
+    spawn_link(fun() -> counter_loop(0) end).
+
+counter_value(Pid) ->
+    Ref = make_ref(),
+    Pid ! {get, self(), Ref},
+    receive
+        {Ref, N} -> N
+    after 1000 ->
+        exit(counter_timeout)
+    end.
+
+counter_loop(N) ->
+    receive
+        call ->
+            counter_loop(N + 1);
+        {get, From, Ref} ->
+            From ! {Ref, N},
+            counter_loop(N);
+        stop ->
+            ok
+    end.

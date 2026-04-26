@@ -92,14 +92,13 @@ do_container_net_setup(#ct_data{id = Id, ip = Ip,
             {next_state, starting, Data2};
         {error, Reason} ->
             _ = erlkoenig_cgroup:destroy(Id),
-            erlkoenig_error:emit(
-              ?EK_ERROR(network, net_setup_failed,
-                        "erlkoenig_net:setup_container_net failed",
-                        #{zone  => Data#ct_data.zone,
-                          reason => Reason}),
-              Id),
+            Err = ?EK_ERROR(network, net_setup_failed,
+                            "erlkoenig_net:setup_container_net failed",
+                            #{zone  => Data#ct_data.zone,
+                              reason => Reason}),
+            erlkoenig_error:emit(Err, Id),
             {next_state, failed,
-             Data#ct_data{error_reason = {net_setup_failed, Reason}}}
+             Data#ct_data{error_reason = Err}}
     end.
 
 %% -- Container files ----------------------------------------------
@@ -230,6 +229,14 @@ try_net_setup_loop(_Call, 0, LastErr) ->
 try_net_setup_loop(Call, N, _) ->
     case Call() of
         {ok, _} = Ok -> Ok;
+        {error, #{code := 'EK_NETWORK_NETNS_SETUP_FAILED'} = Err} ->
+            case netns_setup_errno(Err) of
+                -98 ->
+                    timer:sleep(500),
+                    try_net_setup_loop(Call, N - 1, {error, Err});
+                _ ->
+                    {error, Err}
+            end;
         {error, {net_setup_failed, -98, _}} = Err ->
             timer:sleep(500),
             try_net_setup_loop(Call, N - 1, Err);
@@ -239,6 +246,11 @@ try_net_setup_loop(Call, N, _) ->
         {error, _} = Err ->
             Err
     end.
+
+netns_setup_errno(#{data := #{reason := {net_setup_failed, Code, _}}}) ->
+    Code;
+netns_setup_errno(_) ->
+    undefined.
 
 -doc "Get the DNS IP for a zone as a 32-bit network-order integer.".
 %% The DNS server runs on the zone's gateway IP.

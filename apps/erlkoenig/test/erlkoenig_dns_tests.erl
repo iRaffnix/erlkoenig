@@ -170,13 +170,28 @@ pending_map_operations_test() ->
     %% Test the pending map pattern used for upstream forwarding
     Pending = #{},
     Id = 12345,
-    Entry = {{127,0,0,1}, 5353, fake_socket, make_ref()},
-    Pending2 = Pending#{Id => Entry},
+    Sock = fake_socket,
+    Entry = {Id, {127,0,0,1}, 5353, make_ref()},
+    Pending2 = Pending#{Sock => Entry},
     ?assertEqual(1, map_size(Pending2)),
 
     %% Take removes and returns the entry
-    {Entry, Pending3} = maps:take(Id, Pending2),
+    {Entry, Pending3} = maps:take(Sock, Pending2),
     ?assertEqual(0, map_size(Pending3)),
 
     %% Take on missing key returns error
-    ?assertEqual(error, maps:take(99999, Pending3)).
+    ?assertEqual(error, maps:take(other_socket, Pending3)).
+
+pending_same_dns_id_different_sockets_do_not_collide_test() ->
+    %% DNS clients can reuse the same 16-bit query id. The resolver's
+    %% pending state must key by upstream socket, otherwise the second
+    %% query overwrites the first and the first reply can be lost.
+    Id = 12345,
+    Sock1 = upstream_socket_1,
+    Sock2 = upstream_socket_2,
+    Entry1 = {Id, {127,0,0,1}, 5353, make_ref()},
+    Entry2 = {Id, {127,0,0,1}, 5354, make_ref()},
+    Pending = #{Sock1 => Entry1, Sock2 => Entry2},
+    ?assertEqual(2, map_size(Pending)),
+    {Entry1, Pending2} = maps:take(Sock1, Pending),
+    ?assertEqual(#{Sock2 => Entry2}, Pending2).

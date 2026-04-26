@@ -36,8 +36,14 @@ Anti-entropy: on nodeup, all active bans are re-broadcast.
 
 -behaviour(gen_server).
 
+-include("erlkoenig_error.hrl").
+
 -export([start_link/1, local_ban/3, local_unban/1, active_bans/0, reconfigure/1]).
 -export([init/1, handle_cast/2, handle_info/2, handle_call/3, terminate/2]).
+
+-ifdef(TEST).
+-export([kernel_ban_error/3, kernel_unban_error/2, normalize_whitelist/1]).
+-endif.
 
 -define(PG_SCOPE, erlkoenig_nft).
 -define(PG_GROUP, erlkoenig_threats).
@@ -282,9 +288,12 @@ do_kernel_ban(IP, _EffectiveExpiry, Reason) ->
             logger:notice("[threat_mesh] banned ~s reason=~p",
                           [erlkoenig_nft_ip:format(IP), Reason]);
         {error, Err} ->
-            logger:warning("[threat_mesh] ban failed ~s: ~p",
-                           [erlkoenig_nft_ip:format(IP), Err]),
-            broadcast_guard({ct_guard_ban_failed, #{ip => IP, reason => Reason}})
+            Error = kernel_ban_error(IP, Reason, Err),
+            logger:warning("[threat_mesh] ban failed ~s code=~p: ~p",
+                           [erlkoenig_nft_ip:format(IP), error_code(Error), Err]),
+            broadcast_guard({ct_guard_ban_failed,
+                             #{ip => IP, reason => Reason,
+                               code => error_code(Error), error => Error}})
     catch
         C:R ->
             %% Crash path also emits ct_guard_ban_failed — dashboards
@@ -294,11 +303,14 @@ do_kernel_ban(IP, _EffectiveExpiry, Reason) ->
             %% crashed, call timeout). Previously only the error-return
             %% branch notified, so a crashed nft gen_server silently
             %% produced no dashboard signal.
-            logger:warning("[threat_mesh] ban crashed ~s: ~p:~p",
-                           [erlkoenig_nft_ip:format(IP), C, R]),
+            Error = threat_error(kernel_ban_crashed,
+                                 #{ip => IP, reason => Reason,
+                                   class => C, error => R}),
+            logger:warning("[threat_mesh] ban crashed ~s code=~p: ~p:~p",
+                           [erlkoenig_nft_ip:format(IP), error_code(Error), C, R]),
             broadcast_guard({ct_guard_ban_failed,
                              #{ip => IP, reason => Reason,
-                               error => {C, R}}})
+                               code => error_code(Error), error => Error}})
     end,
     ok.
 
@@ -311,12 +323,15 @@ do_kernel_unban(IP) ->
                           [erlkoenig_nft_ip:format(IP)]),
             broadcast_guard({ct_guard_unban, #{ip => IP}});
         {error, Err} ->
-            logger:warning("[threat_mesh] unban failed ~s: ~p",
-                           [erlkoenig_nft_ip:format(IP), Err])
+            Error = kernel_unban_error(IP, Err),
+            logger:warning("[threat_mesh] unban failed ~s code=~p: ~p",
+                           [erlkoenig_nft_ip:format(IP), error_code(Error), Err])
     catch
         C:R ->
-            logger:warning("[threat_mesh] unban crashed ~s: ~p:~p",
-                           [erlkoenig_nft_ip:format(IP), C, R])
+            Error = threat_error(kernel_unban_crashed,
+                                 #{ip => IP, class => C, error => R}),
+            logger:warning("[threat_mesh] unban crashed ~s code=~p: ~p:~p",
+                           [erlkoenig_nft_ip:format(IP), error_code(Error), C, R])
     end,
     ok.
 
@@ -358,7 +373,10 @@ pg_send(Msg) ->
         Members = pg:get_members(?PG_SCOPE, ?PG_GROUP),
         _ = [Pid ! Msg || Pid <- Members, Pid =/= self()],
         ok
-    catch _:_ -> ok
+    catch C:R ->
+        _ = threat_error(mesh_propagation_failed,
+                         #{message => Msg, class => C, error => R}),
+        ok
     end.
 
 %% Normalize whitelist entries to binary IP format.
@@ -366,9 +384,67 @@ normalize_whitelist(List) ->
     lists:filtermap(fun(Entry) ->
         case erlkoenig_nft_ip:normalize(Entry) of
             {ok, Bin} -> {true, Bin};
-            _ -> false
+            {error, Reason} ->
+                _ = threat_error(whitelist_parse_failed,
+                                 #{entry => Entry, reason => Reason}),
+                false
         end
     end, List).
 
 is_whitelisted(IP, Whitelist) ->
     lists:member(IP, Whitelist).
+
+kernel_ban_error(IP, Reason, #{code := 'EK_NFT_TIMEOUT'} = Err) ->
+    threat_error(kernel_ban_timeout,
+                 #{ip => IP, reason => Reason,
+                   nft_code => maps:get(code, Err),
+                   nft_error => Err});
+kernel_ban_error(IP, Reason, Err) ->
+    threat_error(kernel_ban_rejected,
+                 #{ip => IP, reason => Reason,
+                   nft_code => nested_code(Err),
+                   nft_error => Err}).
+
+kernel_unban_error(IP, #{code := 'EK_NFT_TIMEOUT'} = Err) ->
+    threat_error(kernel_unban_timeout,
+                 #{ip => IP, nft_code => maps:get(code, Err),
+                   nft_error => Err});
+kernel_unban_error(IP, Err) ->
+    threat_error(kernel_unban_rejected,
+                 #{ip => IP, nft_code => nested_code(Err),
+                   nft_error => Err}).
+
+threat_error(kernel_ban_rejected, Data) ->
+    ?EK_ERROR(threat, kernel_ban_rejected,
+              "kernel rejected threat ban", Data);
+threat_error(kernel_ban_timeout, Data) ->
+    ?EK_ERROR(threat, kernel_ban_timeout,
+              "threat ban timed out while applying kernel state", Data);
+threat_error(kernel_ban_crashed, Data) ->
+    ?EK_ERROR(threat, kernel_ban_crashed,
+              "threat ban crashed while applying kernel state", Data);
+threat_error(kernel_unban_rejected, Data) ->
+    ?EK_ERROR(threat, kernel_unban_rejected,
+              "kernel rejected threat unban", Data);
+threat_error(kernel_unban_timeout, Data) ->
+    ?EK_ERROR(threat, kernel_unban_timeout,
+              "threat unban timed out while applying kernel state", Data);
+threat_error(kernel_unban_crashed, Data) ->
+    ?EK_ERROR(threat, kernel_unban_crashed,
+              "threat unban crashed while applying kernel state", Data);
+threat_error(mesh_propagation_failed, Data) ->
+    ?EK_ERROR(threat, mesh_propagation_failed,
+              "threat mesh propagation failed", Data);
+threat_error(whitelist_parse_failed, Data) ->
+    ?EK_ERROR(threat, whitelist_parse_failed,
+              "threat whitelist entry could not be parsed", Data).
+
+nested_code(#{code := Code}) ->
+    Code;
+nested_code(_) ->
+    undefined.
+
+error_code(#{code := Code}) ->
+    Code;
+error_code(_) ->
+    undefined.

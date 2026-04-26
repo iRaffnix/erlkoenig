@@ -30,6 +30,8 @@ Then used by name from any process:
 
 -behaviour(gen_server).
 
+-include("erlkoenig_error.hrl").
+
 -export([
     start_link/0,
     start_link/1,
@@ -53,7 +55,7 @@ Then used by name from any process:
 -export_type([server_ref/0]).
 
 -ifdef(TEST).
--export([next_seq/1, process_acks/3]).
+-export([next_seq/1, process_acks/3, wrap_query_error/3]).
 -endif.
 
 %% --- Types ---
@@ -160,7 +162,7 @@ init(_Opts) ->
             Seq = erlang:system_time(second) band 16#FFFFFFFF,
             {ok, #{socket => Sock, seq => Seq}};
         {error, Reason} ->
-            {stop, {socket_open_failed, Reason}}
+            {stop, nft_error(socket_open_failed, #{reason => Reason})}
     end.
 
 -spec handle_call(term(), {pid(), term()}, state()) ->
@@ -178,39 +180,56 @@ handle_call({apply_msgs, MsgFuns}, _From, #{socket := Sock, seq := Seq} = State)
         case nfnl_socket:send(Sock, Batch) of
             ok ->
                 collect_until_seq(Sock, Expected, ok);
-            {error, _} = Err ->
-                Err
+            {error, Reason} ->
+                {error, nft_error(netlink_send_failed, #{reason => Reason,
+                                                         batch_bytes => byte_size(Batch)})}
         end,
     {reply, Result, State#{seq => BatchEndSeq}};
 handle_call({get_counter, Family, Table, Name}, _From,
             #{socket := Sock, seq := Seq} = State) ->
     drain_stale(Sock),
     QuerySeq = next_seq(Seq),
-    Result = nft_object:get_counter(Sock, Family, Table, Name, QuerySeq),
+    Result = wrap_query_error(
+        counter_query_failed,
+        nft_object:get_counter(Sock, Family, Table, Name, QuerySeq),
+        #{family => Family, table => Table, name => Name, seq => QuerySeq}),
     {reply, Result, State#{seq => next_seq(QuerySeq)}};
 handle_call({get_counter_reset, Family, Table, Name}, _From,
             #{socket := Sock, seq := Seq} = State) ->
     drain_stale(Sock),
     QuerySeq = next_seq(Seq),
-    Result = nft_object:get_counter_reset(Sock, Family, Table, Name, QuerySeq),
+    Result = wrap_query_error(
+        counter_query_failed,
+        nft_object:get_counter_reset(Sock, Family, Table, Name, QuerySeq),
+        #{family => Family, table => Table, name => Name, seq => QuerySeq,
+          reset => true}),
     {reply, Result, State#{seq => next_seq(QuerySeq)}};
 handle_call({list_set_elems, Family, Table, SetName}, _From,
             #{socket := Sock, seq := Seq} = State) ->
     drain_stale(Sock),
     QuerySeq = next_seq(Seq),
-    Result = nft_query:list_set_elems(Sock, Family, Table, SetName, QuerySeq),
+    Result = wrap_query_error(
+        list_set_elems_failed,
+        nft_query:list_set_elems(Sock, Family, Table, SetName, QuerySeq),
+        #{family => Family, table => Table, set => SetName, seq => QuerySeq}),
     {reply, Result, State#{seq => next_seq(QuerySeq)}};
 handle_call({list_chains, Family, Table}, _From,
             #{socket := Sock, seq := Seq} = State) ->
     drain_stale(Sock),
     QuerySeq = next_seq(Seq),
-    Result = nft_query:list_chains(Sock, Family, Table, QuerySeq),
+    Result = wrap_query_error(
+        list_chains_failed,
+        nft_query:list_chains(Sock, Family, Table, QuerySeq),
+        #{family => Family, table => Table, seq => QuerySeq}),
     {reply, Result, State#{seq => next_seq(QuerySeq)}};
 handle_call({get_ruleset, Family}, _From,
             #{socket := Sock, seq := Seq} = State) ->
     drain_stale(Sock),
     QuerySeq = next_seq(Seq),
-    Result = nft_query:get_ruleset(Sock, Family, QuerySeq),
+    Result = wrap_query_error(
+        ruleset_query_failed,
+        nft_query:get_ruleset(Sock, Family, QuerySeq),
+        #{family => Family, seq => QuerySeq}),
     {reply, Result, State#{seq => next_seq(QuerySeq)}};
 handle_call(_Request, _From, State) ->
     {reply, {error, unknown_call}, State}.
@@ -304,11 +323,11 @@ collect_until_seq(Sock, Expected, Acc) ->
             logger:warning("nfnl_server: timeout waiting for ~p ACKs",
                            [maps:size(Expected)]),
             case Acc of
-                ok -> {error, timeout};
+                ok -> {error, nft_error(timeout, #{pending_acks => maps:size(Expected)})};
                 Err -> Err
             end;
         {error, Reason} ->
-            {error, Reason}
+            {error, nft_error(netlink_recv_failed, #{reason => Reason})}
     end.
 
 %% Process parsed ACKs against the expected set.
@@ -326,7 +345,10 @@ process_acks([{Seq, Result} | Rest], Expected, Acc) ->
         {true, Expected2} ->
             NewAcc = case {Acc, Result} of
                 {ok, ok}           -> ok;
-                {ok, {error, _}}   -> Result;
+                {ok, {error, {Errno, ErrName}}} ->
+                    {error, nft_error(batch_rejected, #{errno => Errno,
+                                                        errno_name => ErrName,
+                                                        seq => Seq})};
                 {{error, _}, _}    -> Acc
             end,
             process_acks(Rest, Expected2, NewAcc);
@@ -334,3 +356,42 @@ process_acks([{Seq, Result} | Rest], Expected, Acc) ->
             %% Stale or out-of-band ACK — discard silently
             process_acks(Rest, Expected, Acc)
     end.
+
+nft_error(socket_open_failed, Data) ->
+    ?EK_ERROR(nft, socket_open_failed,
+              "nf_tables netlink socket could not be opened", Data);
+nft_error(netlink_send_failed, Data) ->
+    ?EK_ERROR(nft, netlink_send_failed,
+              "nf_tables netlink batch could not be sent", Data);
+nft_error(timeout, Data) ->
+    ?EK_ERROR(nft, timeout,
+              "nf_tables netlink ACK wait timed out", Data);
+nft_error(netlink_recv_failed, Data) ->
+    ?EK_ERROR(nft, netlink_recv_failed,
+              "nf_tables netlink response could not be received", Data);
+nft_error(batch_rejected, Data) ->
+    ?EK_ERROR(nft, batch_rejected,
+              "kernel rejected nf_tables batch", Data);
+nft_error(counter_query_failed, Data) ->
+    ?EK_ERROR(nft, counter_query_failed,
+              "nf_tables counter query failed", Data);
+nft_error(list_set_elems_failed, Data) ->
+    ?EK_ERROR(nft, list_set_elems_failed,
+              "nf_tables set element query failed", Data);
+nft_error(list_chains_failed, Data) ->
+    ?EK_ERROR(nft, list_chains_failed,
+              "nf_tables chain listing failed", Data);
+nft_error(ruleset_query_failed, Data) ->
+    ?EK_ERROR(nft, ruleset_query_failed,
+              "nf_tables ruleset query failed", Data).
+
+wrap_query_error(_Reason, {ok, _} = Ok, _Data) ->
+    Ok;
+wrap_query_error(counter_query_failed, {error, Reason}, Data) ->
+    {error, nft_error(counter_query_failed, Data#{reason => Reason})};
+wrap_query_error(list_set_elems_failed, {error, Reason}, Data) ->
+    {error, nft_error(list_set_elems_failed, Data#{reason => Reason})};
+wrap_query_error(list_chains_failed, {error, Reason}, Data) ->
+    {error, nft_error(list_chains_failed, Data#{reason => Reason})};
+wrap_query_error(ruleset_query_failed, {error, Reason}, Data) ->
+    {error, nft_error(ruleset_query_failed, Data#{reason => Reason})}.

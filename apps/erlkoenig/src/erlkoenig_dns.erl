@@ -29,6 +29,8 @@ Container names are registered/unregistered via `register/2` and
 
 -behaviour(gen_server).
 
+-include("erlkoenig_error.hrl").
+
 %% Exposed for fuzzing.  Pure parsers, no side effects.
 -export([decode_query/1, decode_name/2]).
 
@@ -57,8 +59,8 @@ Container names are registered/unregistered via `register/2` and
     upstream :: inet:ip4_address(),
     domain   :: binary(),
     ttl      :: non_neg_integer(),
-    pending  :: #{non_neg_integer() => {inet:ip_address(), inet:port_number(),
-                                        gen_udp:socket(), reference()}}
+    pending  :: #{gen_udp:socket() => {non_neg_integer(), inet:ip_address(),
+                                       inet:port_number(), reference()}}
 }).
 
 %% =================================================================
@@ -131,6 +133,11 @@ do_init(ZoneName, BindIp) ->
                         ttl      = TTL,
                         pending  = #{}}};
         {error, Reason} ->
+            _ = dns_error(bind_failed,
+                          #{zone => ZoneName,
+                            bind_ip => BindIp,
+                            port => ?DNS_PORT,
+                            reason => Reason}),
             {stop, {dns_bind_failed, Reason}}
     end.
 
@@ -197,14 +204,19 @@ handle_info({udp, Socket, SrcIp, SrcPort, Packet}, State) when Socket =:= State#
     State2 = handle_dns_query(SrcIp, SrcPort, Packet, State),
     {noreply, State2};
 
-handle_info({udp, _UpSock, _Ip, _Port, Reply}, State) ->
+handle_info({udp, UpSock, _Ip, _Port, Reply}, State) ->
     %% Upstream DNS reply — forward back to original client
-    State2 = handle_upstream_reply(Reply, State),
+    State2 = handle_upstream_reply(UpSock, Reply, State),
     {noreply, State2};
 
-handle_info({upstream_timeout, Id}, #state{pending = Pending} = State) ->
-    case maps:take(Id, Pending) of
-        {{_SrcIp, _SrcPort, UpSock, _TRef}, Pending2} ->
+handle_info({upstream_timeout, UpSock}, #state{pending = Pending} = State) ->
+    case maps:take(UpSock, Pending) of
+        {{Id, SrcIp, SrcPort, _TRef}, Pending2} ->
+            _ = dns_error(upstream_timeout,
+                          #{id => Id,
+                            src_ip => SrcIp,
+                            src_port => SrcPort,
+                            timeout_ms => ?UPSTREAM_TIMEOUT}),
             _ = gen_udp:close(UpSock),
             {noreply, State#state{pending = Pending2}};
         error ->
@@ -215,7 +227,7 @@ handle_info(_Info, State) ->
     {noreply, State}.
 
 terminate(_Reason, #state{socket = Socket, pending = Pending}) ->
-    maps:foreach(fun(_Id, {_Ip, _Port, UpSock, TRef}) ->
+    maps:foreach(fun(UpSock, {_Id, _Ip, _Port, TRef}) ->
         _ = erlang:cancel_timer(TRef),
         _ = gen_udp:close(UpSock)
     end, Pending),
@@ -284,7 +296,7 @@ audit_dns_deny({A, B, C, D}, Name, Reason) ->
 -spec resolve_internal(non_neg_integer(), binary(), non_neg_integer(), binary(), #state{}) -> binary().
 resolve_internal(Id, Name, ?TYPE_A, Packet, #state{tab = Tab, ttl = TTL}) ->
     case ets:match_object(Tab, {name, Name, '_'}) of
-        [{name, _, {A, B, C, D}}] ->
+        [{name, _, {A, B, C, D}} | _] ->
             encode_a_reply(Id, Packet, Name, A, B, C, D, TTL);
         [] ->
             encode_nxdomain(Id, Packet)
@@ -293,7 +305,7 @@ resolve_internal(Id, Name, ?TYPE_PTR, Packet, #state{tab = Tab}) ->
     case ptr_to_ip(Name) of
         {ok, Ip} ->
             case ets:match_object(Tab, {ip, Ip, '_'}) of
-                [{ip, _, PtrName}] ->
+                [{ip, _, PtrName} | _] ->
                     encode_ptr_reply(Id, Packet, PtrName);
                 [] ->
                     encode_nxdomain(Id, Packet)
@@ -310,30 +322,86 @@ forward_upstream(Id, SrcIp, SrcPort, Packet, State) ->
     #state{upstream = Upstream, pending = Pending} = State,
     case gen_udp:open(0, [binary, {active, true}]) of
         {ok, UpSock} ->
-            _ = gen_udp:send(UpSock, Upstream, ?DNS_PORT, Packet),
-            TRef = erlang:send_after(?UPSTREAM_TIMEOUT, self(), {upstream_timeout, Id}),
-            Pending2 = Pending#{Id => {SrcIp, SrcPort, UpSock, TRef}},
-            State#state{pending = Pending2};
-        {error, _} ->
+            case gen_udp:send(UpSock, Upstream, ?DNS_PORT, Packet) of
+                ok ->
+                    TRef = erlang:send_after(?UPSTREAM_TIMEOUT, self(),
+                                              {upstream_timeout, UpSock}),
+                    Pending2 = Pending#{UpSock => {Id, SrcIp, SrcPort, TRef}},
+                    State#state{pending = Pending2};
+                {error, Reason} ->
+                    _ = dns_error(upstream_send_failed,
+                                  #{id => Id,
+                                    upstream => Upstream,
+                                    port => ?DNS_PORT,
+                                    reason => Reason}),
+                    _ = gen_udp:close(UpSock),
+                    State
+            end;
+        {error, Reason} ->
+            _ = dns_error(upstream_open_failed,
+                          #{id => Id,
+                            upstream => Upstream,
+                            reason => Reason}),
             State
     end.
 
--spec handle_upstream_reply(binary(), #state{}) -> #state{}.
-handle_upstream_reply(Reply, State) ->
+-spec handle_upstream_reply(gen_udp:socket(), binary(), #state{}) -> #state{}.
+handle_upstream_reply(UpSock, Reply, State) ->
     case Reply of
         <<Id:16, _/binary>> ->
-            case maps:take(Id, State#state.pending) of
-                {{SrcIp, SrcPort, UpSock, TRef}, Pending2} ->
+            case maps:take(UpSock, State#state.pending) of
+                {{Id, SrcIp, SrcPort, TRef}, Pending2} ->
                     _ = erlang:cancel_timer(TRef),
                     _ = gen_udp:send(State#state.socket, SrcIp, SrcPort, Reply),
+                    _ = gen_udp:close(UpSock),
+                    State#state{pending = Pending2};
+                {{OtherId, SrcIp, SrcPort, TRef}, Pending2} ->
+                    _ = dns_error(upstream_reply_id_mismatch,
+                                  #{reply_id => Id,
+                                    expected_id => OtherId,
+                                    src_ip => SrcIp,
+                                    src_port => SrcPort}),
+                    _ = erlang:cancel_timer(TRef),
                     _ = gen_udp:close(UpSock),
                     State#state{pending = Pending2};
                 error ->
                     State
             end;
         _ ->
+            _ = dns_error(upstream_reply_malformed,
+                          #{reply_bytes => byte_size(Reply)}),
             State
     end.
+
+dns_error(bind_failed, Data) ->
+    Err = ?EK_ERROR(dns, bind_failed, "DNS socket bind failed", Data),
+    erlkoenig_error:emit(Err),
+    Err;
+dns_error(upstream_open_failed, Data) ->
+    Err = ?EK_ERROR(dns, upstream_open_failed,
+                    "DNS upstream socket open failed", Data),
+    erlkoenig_error:emit(Err),
+    Err;
+dns_error(upstream_send_failed, Data) ->
+    Err = ?EK_ERROR(dns, upstream_send_failed,
+                    "DNS upstream query send failed", Data),
+    erlkoenig_error:emit(Err),
+    Err;
+dns_error(upstream_timeout, Data) ->
+    Err = ?EK_ERROR_S(warn, dns, upstream_timeout,
+                      "DNS upstream query timed out", Data),
+    erlkoenig_error:emit(Err),
+    Err;
+dns_error(upstream_reply_id_mismatch, Data) ->
+    Err = ?EK_ERROR_S(warn, dns, upstream_reply_id_mismatch,
+                      "DNS upstream reply id did not match pending query", Data),
+    erlkoenig_error:emit(Err),
+    Err;
+dns_error(upstream_reply_malformed, Data) ->
+    Err = ?EK_ERROR_S(warn, dns, upstream_reply_malformed,
+                      "DNS upstream reply could not be parsed", Data),
+    erlkoenig_error:emit(Err),
+    Err.
 
 %% =================================================================
 %% DNS Codec

@@ -44,6 +44,8 @@ See erlkoenig_ebpfd/include/ek_ebpfd_proto.h for the spec.
     decode_attrs/1
 ]).
 
+-include("erlkoenig_error.hrl").
+
 %% -- Protocol constants -------------------------------------------
 
 -define(PROTO_VERSION, 1).
@@ -189,10 +191,33 @@ connect() ->
         {error, enoent} ->
             {error, not_running};
         {error, econnrefused} ->
+            steering_error(econnrefused, Path),
             {error, not_running};
+        {error, timeout} ->
+            steering_error(timeout, Path),
+            {error, timeout};
         {error, _} = Err ->
             Err
     end.
+
+steering_error(econnrefused, Path) ->
+    erlkoenig_error:emit(
+      ?EK_ERROR(network, econnrefused,
+                "network connection was refused",
+                #{socket_path => path_binary(Path),
+                  service => ebpfd}));
+steering_error(timeout, Path) ->
+    erlkoenig_error:emit(
+      ?EK_ERROR(network, timeout,
+                "network operation timed out",
+                #{socket_path => path_binary(Path),
+                  service => ebpfd,
+                  timeout_ms => ?CONNECT_TIMEOUT})).
+
+path_binary(Path) when is_binary(Path) ->
+    Path;
+path_binary(Path) ->
+    unicode:characters_to_binary(Path).
 
 %% -- Send/Receive -------------------------------------------------
 

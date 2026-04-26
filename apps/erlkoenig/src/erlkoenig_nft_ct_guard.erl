@@ -56,6 +56,8 @@ Usage:
 
 -behaviour(gen_server).
 
+-include("erlkoenig_error.hrl").
+
 -export([start_link/1, stop/1]).
 -export([stats/0, banned/0, reconfigure/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
@@ -344,6 +346,9 @@ handle_info({ct_new, #{src := SrcIP} = Event}, State) ->
                 {ok, Pid} ->
                     erlkoenig_threat_actor:connection(Pid, DstPort);
                 drop ->
+                    guard_error(dispatch_failed,
+                                #{src => SrcIP, dport => DstPort,
+                                  event => Event}),
                     ok
             end,
             {noreply, State2}
@@ -367,7 +372,10 @@ handle_info(broadcast_stats, #{events_seen := Seen} = State) ->
         Members = pg:get_members(erlkoenig_nft, ct_guard_events),
         _ = [Pid ! StatsEvent || Pid <- Members],
         ok
-    catch _:_ -> ok
+    catch C:R ->
+        guard_error(stats_broadcast_failed,
+                    #{event => StatsEvent, class => C, error => R}),
+        ok
     end,
     erlang:send_after(5000, self(), broadcast_stats),
     {noreply, State};
@@ -447,7 +455,10 @@ normalize_whitelist(List) ->
         fun(Entry) ->
             case erlkoenig_nft_ip:normalize(Entry) of
                 {ok, Bin} -> {true, Bin};
-                {error, _} -> false
+                {error, Reason} ->
+                    guard_error(whitelist_parse_failed,
+                                #{entry => Entry, reason => Reason}),
+                    false
             end
         end,
         List
@@ -471,6 +482,8 @@ ensure_actor(SrcIP, Config) ->
     ensure_actor(SrcIP, Config, 0).
 
 ensure_actor(_SrcIP, _Config, Retries) when Retries > 2 ->
+    guard_error(actor_start_retry_exhausted, #{src => _SrcIP,
+                                               retries => Retries}),
     drop;
 ensure_actor(SrcIP, Config, Retries) ->
     case ets:lookup(?ACTOR_REGISTRY, SrcIP) of
@@ -492,8 +505,10 @@ ensure_actor(SrcIP, Config, Retries) ->
                         {ok, Pid} = erlkoenig_threat_sup:start_actor(SrcIP, ActorConfig),
                         ets:update_element(?ACTOR_REGISTRY, SrcIP, {2, Pid}),
                         {ok, Pid}
-                    catch _:_ ->
+                    catch C:R ->
                         ets:delete(?ACTOR_REGISTRY, SrcIP),
+                        guard_error(actor_start_failed,
+                                    #{src => SrcIP, class => C, error => R}),
                         drop
                     end;
                 false ->
@@ -524,3 +539,24 @@ ensure_ets(Name, Opts) ->
         undefined -> ets:new(Name, Opts);
         _Tid -> Name
     end.
+
+guard_error(dispatch_failed, Data) ->
+    erlkoenig_error:emit(
+      ?EK_ERROR(threat, guard_dispatch_failed,
+                "ct_guard could not dispatch conntrack event to actor", Data));
+guard_error(stats_broadcast_failed, Data) ->
+    erlkoenig_error:emit(
+      ?EK_ERROR(threat, guard_stats_broadcast_failed,
+                "ct_guard stats broadcast failed", Data));
+guard_error(whitelist_parse_failed, Data) ->
+    erlkoenig_error:emit(
+      ?EK_ERROR(threat, guard_whitelist_parse_failed,
+                "ct_guard whitelist entry could not be parsed", Data));
+guard_error(actor_start_failed, Data) ->
+    erlkoenig_error:emit(
+      ?EK_ERROR(threat, guard_actor_start_failed,
+                "ct_guard could not start threat actor", Data));
+guard_error(actor_start_retry_exhausted, Data) ->
+    erlkoenig_error:emit(
+      ?EK_ERROR(threat, guard_actor_start_retry_exhausted,
+                "ct_guard actor start retry budget was exhausted", Data)).

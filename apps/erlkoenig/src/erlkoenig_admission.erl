@@ -39,6 +39,8 @@ end.
 
 -behaviour(gen_server).
 
+-include("erlkoenig_error.hrl").
+
 -export([start_link/0,
          acquire/1, acquire/2,
          release/1,
@@ -109,7 +111,10 @@ acquire(Scope, Timeout) when is_integer(Timeout), Timeout > 0 ->
         {ok, Token} -> {ok, Token};
         {error, _} = E -> E
     catch
-        exit:{timeout, _} -> {error, timeout}
+        exit:{timeout, _} ->
+            admission_error(timeout, Scope, #{timeout_ms => Timeout,
+                                             source => caller_timeout}),
+            {error, timeout}
     end.
 
 -doc """
@@ -160,6 +165,9 @@ handle_call({acquire, Scope, Token, Timeout}, From, State) ->
                     %% streams. Operators saw callers getting
                     %% `queue_full' errors with no correlated signal.
                     emit_event(queue_full, Scope),
+                    admission_error(queue_full, Scope,
+                                    #{queued => length(State#state.waiters),
+                                      queue_limit => State#state.queue_limit}),
                     {reply, {error, queue_full}, State};
                 false ->
                     TRef = erlang:send_after(Timeout, self(),
@@ -189,6 +197,7 @@ handle_info({timeout_waiter, Token}, State) ->
         {ok, #waiter{from = From, scope = Scope}, Rest} ->
             gen_server:reply(From, {error, timeout}),
             emit_event(timeout, Scope),
+            admission_error(timeout, Scope, #{source => waiter_timeout}),
             {noreply, State#state{waiters = Rest}};
         not_found ->
             %% Raced with admit — token already handed out, nothing to do.
@@ -306,6 +315,17 @@ emit_event(queue_full, Scope) ->
     try erlkoenig_events:notify({admission_queue_full, scope_label(Scope)})
     catch _:_ -> ok
     end.
+
+admission_error(timeout, Scope, Data) ->
+    erlkoenig_error:emit(
+      ?EK_ERROR(admission, timeout,
+                "admission wait timed out",
+                Data#{scope => scope_label(Scope)}));
+admission_error(queue_full, Scope, Data) ->
+    erlkoenig_error:emit(
+      ?EK_ERROR(admission, queue_full,
+                "admission queue is full",
+                Data#{scope => scope_label(Scope)})).
 
 scope_label(host) -> <<"host">>;
 scope_label(Z) when is_binary(Z) -> Z;

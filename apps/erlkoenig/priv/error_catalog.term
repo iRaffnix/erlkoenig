@@ -112,7 +112,7 @@
      since => "0.9.0",
      severity => error,
      description => "Erlang distribution cookie file is not readable",
-     operator_action => "create /opt/erlkoenig/cookie or set ERLKOENIG_COOKIE_FILE to the cookie used by the running node",
+     operator_action => "create /etc/erlkoenig/cookie or set ERLKOENIG_COOKIE_FILE to the cookie used by the running node",
      evidence_fields => [path]}},
 
  { 'EK_HOST_SOCKET_DIR_MISSING',

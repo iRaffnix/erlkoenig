@@ -32,6 +32,8 @@ Process lifecycle:
 
 -behaviour(gen_statem).
 
+-include("erlkoenig_error.hrl").
+
 -export([start_link/2, connection/2]).
 -export([init/1, callback_mode/0, terminate/3]).
 -export([observing/3, suspicious/3, banned/3, probation/3]).
@@ -112,6 +114,9 @@ observing(cast, {connection, DstPort}, Data) ->
         {ban, Reason, Duration} ->
             do_ban(Reason, Duration, Data2);
         suspect ->
+            threat_actor_error(suspicious_transition,
+                               #{ip => Data2#data.ip,
+                                 ports => sets:to_list(Data2#data.ports_seen)}),
             broadcast({ct_guard_suspect, #{ip => Data2#data.ip,
                 ports => sets:to_list(Data2#data.ports_seen)}}),
             {next_state, suspicious, Data2,
@@ -278,6 +283,10 @@ escalate(BaseDuration, #data{ban_count = BanCount, config = Config}) ->
     lists:nth(Idx, Escalation).
 
 do_ban(Reason, DurationSec, #data{ip = IP} = Data) ->
+    threat_actor_error(ban_triggered,
+                       #{ip => IP, reason => Reason,
+                         duration_seconds => DurationSec,
+                         ban_count => Data#data.ban_count}),
     BanUntil = os:system_time(millisecond) + (DurationSec * 1000),
     erlkoenig_threat_mesh:local_ban(IP, BanUntil, Reason),
     broadcast({ct_guard_ban, #{
@@ -294,8 +303,24 @@ broadcast(Msg) ->
         Members = pg:get_members(erlkoenig_nft, ct_guard_events),
         _ = [Pid ! Msg || Pid <- Members],
         ok
-    catch _:_ -> ok
+    catch C:R ->
+        threat_actor_error(event_broadcast_failed,
+                           #{message => Msg, class => C, error => R}),
+        ok
     end.
+
+threat_actor_error(suspicious_transition, Data) ->
+    erlkoenig_error:emit(
+      ?EK_ERROR(threat, actor_suspicious_transition,
+                "threat actor entered suspicious state", Data));
+threat_actor_error(ban_triggered, Data) ->
+    erlkoenig_error:emit(
+      ?EK_ERROR(threat, actor_ban_triggered,
+                "threat actor triggered a ban", Data));
+threat_actor_error(event_broadcast_failed, Data) ->
+    erlkoenig_error:emit(
+      ?EK_ERROR(threat, actor_event_broadcast_failed,
+                "threat actor event broadcast failed", Data)).
 
 %% Config-driven timeouts (DSL values in seconds, we need milliseconds).
 %% Falls back to compiled defaults when the config key is missing.

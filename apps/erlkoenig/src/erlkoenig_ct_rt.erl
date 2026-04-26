@@ -30,6 +30,7 @@ in step 3b.
 """.
 
 -include("erlkoenig_ct_state.hrl").
+-include("erlkoenig_error.hrl").
 
 -export([
     send_to_rt/2,
@@ -51,21 +52,23 @@ in step 3b.
 Send data to C runtime via socket.
 
 Returns `ok` when the bytes are handed to gen_tcp, or
-`{error, not_connected}` when the state-machine's socket is
+`{error, Error}` when the state-machine's socket is
 `undefined` (briefly during tcp_closed handling, or when a caller
 in a non-connected state tries to send). User-visible commands
 (stop/kill/resize/input) surface this error to their caller so
 the operator sees an explicit failure rather than a silent
 success that the runtime never observed.
 """.
--spec send_to_rt(iodata(), #ct_data{}) -> ok | {error, not_connected}.
+-spec send_to_rt(iodata(), #ct_data{}) -> ok | {error, erlkoenig_error:error_map()}.
 send_to_rt(Bin, #ct_data{sock = Sock}) when Sock =/= undefined ->
     ok = gen_tcp:send(Sock, Bin),
     ok;
 send_to_rt(_Bin, #ct_data{id = Id}) ->
     logger:warning("container ~s: send_to_rt dropped — socket not set",
                    [Id]),
-    {error, not_connected}.
+    {error, ?EK_ERROR(runtime, not_connected,
+                      "runtime socket is not connected",
+                      #{container_id => Id, operation => send_to_rt})}.
 
 -doc "Return the I/O handle for external modules (e.g. erlkoenig_net).".
 -spec rt_io_handle(#ct_data{}) -> {socket, gen_tcp:socket()} | undefined.
@@ -101,14 +104,18 @@ make_socket_path(ContainerId) ->
 -doc "Wait for a Unix socket to appear and connect.".
 %% Polls every 50ms until the socket is connectable or timeout.
 -spec wait_and_connect(binary(), non_neg_integer()) ->
-    {ok, gen_tcp:socket()} | {error, term()}.
+    {ok, gen_tcp:socket()} | {error, erlkoenig_error:error_map()}.
 wait_and_connect(SocketPath, Timeout) ->
     wait_and_connect(SocketPath, Timeout, 50).
 
 -spec wait_and_connect(binary(), integer(), pos_integer()) ->
-    {ok, gen_tcp:socket()} | {error, term()}.
-wait_and_connect(_SocketPath, Timeout, _Interval) when Timeout =< 0 ->
-    {error, timeout};
+    {ok, gen_tcp:socket()} | {error, erlkoenig_error:error_map()}.
+wait_and_connect(SocketPath, Timeout, _Interval) when Timeout =< 0 ->
+    {error, ?EK_ERROR(runtime, socket_connect_failed,
+                      "wait_and_connect to erlkoenig_rt socket timed out",
+                      #{socket_path => SocketPath,
+                        reason => timeout,
+                        timeout_ms => Timeout})};
 wait_and_connect(SocketPath, Timeout, Interval) ->
     SockPathStr = binary_to_list(SocketPath),
     case gen_tcp:connect({local, SockPathStr}, 0,
@@ -155,9 +162,11 @@ returned so callers don't accidentally hold a half-connected
 socket.
 """.
 -spec connect_to_runtime(#ct_data{}) ->
-    {ok, gen_tcp:socket()} | {error, term()}.
+    {ok, gen_tcp:socket()} | {error, erlkoenig_error:error_map()}.
 connect_to_runtime(#ct_data{socket_path = undefined}) ->
-    {error, no_socket_path};
+    {error, ?EK_ERROR(runtime, no_socket_path,
+                      "runtime socket path is not set",
+                      #{operation => connect_to_runtime})};
 connect_to_runtime(#ct_data{socket_path = SocketPath}) ->
     SockPathStr = binary_to_list(SocketPath),
     case gen_tcp:connect({local, SockPathStr}, 0,
@@ -171,29 +180,34 @@ connect_to_runtime(#ct_data{socket_path = SocketPath}) ->
                     _ = gen_tcp:close(Sock),
                     Err
             end;
-        {error, _} = Err ->
-            Err
+        {error, Reason} ->
+            {error, ?EK_ERROR(runtime, socket_connect_failed,
+                              "connect to erlkoenig_rt socket failed",
+                              #{socket_path => SocketPath,
+                                reason => Reason,
+                                timeout_ms => 3000})}
     end.
 
 %% Sync handshake used only on the reconnect path. The first-connect
 %% path (creating_do_spawn) sends encode_handshake/0 asynchronously and
 %% handles the reply via creating_handle_rt_data/3 — keep those flows
 %% distinct to minimise blast radius.
--spec do_reconnect_handshake(gen_tcp:socket()) -> ok | {error, term()}.
+-spec do_reconnect_handshake(gen_tcp:socket()) -> ok | {error, erlkoenig_error:error_map()}.
 do_reconnect_handshake(Sock) ->
     case gen_tcp:send(Sock, erlkoenig_proto:encode_handshake()) of
         ok ->
             case gen_tcp:recv(Sock, 0, 2000) of
                 {ok, Reply} ->
-                    case erlkoenig_proto:check_handshake_reply(Reply) of
-                        ok -> ok;
-                        {error, Reason} -> {error, {handshake_failed, Reason}}
-                    end;
+                    check_reconnect_handshake_reply(Reply);
                 {error, Reason} ->
-                    {error, {handshake_recv, Reason}}
+                    {error, ?EK_ERROR(runtime, handshake_recv_failed,
+                                      "runtime handshake reply could not be received",
+                                      #{reason => Reason})}
             end;
         {error, Reason} ->
-            {error, {handshake_send, Reason}}
+            {error, ?EK_ERROR(runtime, handshake_send_failed,
+                              "runtime handshake could not be sent",
+                              #{reason => Reason})}
     end.
 
 -doc "Kill a process by OS PID (used when socket is unavailable).".
@@ -206,7 +220,7 @@ kill_os_pid(_) -> ok.
 
 -doc "Send a command and synchronously wait for the reply.".
 -spec sync_rt_command(#ct_data{}, iodata(), non_neg_integer()) ->
-    {ok, binary()} | {error, term()}.
+    {ok, binary()} | {error, erlkoenig_error:error_map()}.
 sync_rt_command(#ct_data{sock = Sock}, Cmd, Timeout) when Sock =/= undefined ->
     ok = inet:setopts(Sock, [{active, false}]),
     ok = gen_tcp:send(Sock, Cmd),
@@ -216,10 +230,17 @@ sync_rt_command(#ct_data{sock = Sock}, Cmd, Timeout) when Sock =/= undefined ->
     %% hid broken-C-runtime scenarios behind a misleading label.
     Result = case gen_tcp:recv(Sock, 0, Timeout) of
         {ok, Reply}     -> {ok, Reply};
-        {error, Reason} -> {error, Reason}
+        {error, Reason} ->
+            {error, ?EK_ERROR(runtime, sync_command_failed,
+                              "runtime synchronous command failed",
+                              #{reason => Reason, timeout_ms => Timeout})}
     end,
     ok = inet:setopts(Sock, [{active, true}]),
-    Result.
+    Result;
+sync_rt_command(#ct_data{id = Id}, _Cmd, _Timeout) ->
+    {error, ?EK_ERROR(runtime, not_connected,
+                      "runtime socket is not connected",
+                      #{container_id => Id, operation => sync_rt_command})}.
 
 -spec handle_setup_reply(binary(), binary(), string()) -> ok.
 handle_setup_reply(Reply, Id, What) ->
@@ -229,4 +250,14 @@ handle_setup_reply(Reply, Id, What) ->
         {ok, reply_error, #{code := Code, message := Msg}} ->
             logger:warning("container ~s: ~s failed: ~p ~s (continuing without)",
                            [Id, What, Code, Msg])
+    end.
+
+check_reconnect_handshake_reply(Reply) ->
+    case erlkoenig_proto:check_handshake_reply(Reply) of
+        ok ->
+            ok;
+        {error, Reason} ->
+            {error, ?EK_ERROR(runtime, handshake_failed,
+                              "runtime rejected reconnect handshake reply",
+                              #{reason => Reason, reply => Reply})}
     end.

@@ -143,7 +143,8 @@ prefix_test_() ->
      {"prefix /16 supports 65 533 addresses", fun prefix_16_capacity/0},
      {"prefix /30 yields exactly one host",   fun prefix_30_one_host/0},
      {"prefix /31 is rejected at boot",       fun prefix_31_rejected/0},
-     {"release outside pool range is no-op",  fun release_out_of_range/0}
+     {"release outside pool range is no-op",  fun release_out_of_range/0},
+     {"release never allocated IP is no-op",  fun release_never_allocated/0}
     ].
 
 prefix_28_size() ->
@@ -207,6 +208,19 @@ release_out_of_range() ->
         timer:sleep(10),
         %% First allocate should still be the natural .2, not .99.99.99.99
         ?assertEqual({ok, {10, 99, 0, 2}}, gen_server:call(Pid, allocate))
+    after stop_zone(Pid)
+    end.
+
+release_never_allocated() ->
+    %% Releasing an in-range address that the pool has not handed out
+    %% must not put it on the free list. Otherwise it can be allocated
+    %% once from free and again later when `next' naturally reaches it.
+    Pid = start_zone(stratnr, {10, 99, 0, 0}, 28),
+    try
+        gen_server:cast(Pid, {release, {10, 99, 0, 10}}),
+        timer:sleep(10),
+        ?assertEqual({ok, {10, 99, 0, 2}}, gen_server:call(Pid, allocate)),
+        ?assertEqual({ok, {10, 99, 0, 3}}, gen_server:call(Pid, allocate))
     after stop_zone(Pid)
     end.
 

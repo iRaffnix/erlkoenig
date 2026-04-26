@@ -18,6 +18,7 @@ admission_test_() ->
       fun t_per_zone_cap_independent_of_host/1,
       fun t_queue_full_rejects_immediately/1,
       fun t_release_unknown_token_noop/1,
+      fun t_timed_out_waiter_not_admitted_later/1,
       fun t_snapshot_reflects_state/1,
       fun t_zero_host_cap_means_unlimited/1]}.
 
@@ -118,6 +119,37 @@ t_release_unknown_token_noop(_) ->
         ok = erlkoenig_admission:release(make_ref()),
         Snap = erlkoenig_admission:snapshot(),
         ?assertEqual(0, maps:get(host_in_flight, Snap))
+    end).
+
+t_timed_out_waiter_not_admitted_later(_) ->
+    ?_test(begin
+        ok = gen_server:stop(erlkoenig_admission, normal, 5_000),
+        ok = application:set_env(erlkoenig, admission_max_host, 1),
+        ok = application:set_env(erlkoenig, admission_queue_limit, 10),
+        {ok, _} = erlkoenig_admission:start_link(),
+
+        {ok, Holder} = erlkoenig_admission:acquire(host, 1_000),
+        Self = self(),
+        Waiter = spawn_link(fun() ->
+            Self ! {waiter_done, erlkoenig_admission:acquire(host, 50)}
+        end),
+        receive
+            {waiter_done, {error, timeout}} -> ok;
+            {waiter_done, Other} -> ?assert(false, {unexpected, Other})
+        after 1_000 ->
+            ?assert(false, waiter_didnt_timeout)
+        end,
+        unlink(Waiter),
+
+        %% Releasing the holder after the waiter's timeout must not
+        %% resurrect that stale waiter or leak a phantom holder.
+        ok = erlkoenig_admission:release(Holder),
+        timer:sleep(50),
+        Snap = erlkoenig_admission:snapshot(),
+        ?assertEqual(0, maps:get(host_in_flight, Snap)),
+        ?assertEqual(0, maps:get(queued, Snap)),
+        {ok, Fresh} = erlkoenig_admission:acquire(host, 1_000),
+        ok = erlkoenig_admission:release(Fresh)
     end).
 
 t_snapshot_reflects_state(_) ->

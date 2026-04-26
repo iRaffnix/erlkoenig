@@ -328,14 +328,23 @@ creating(info, {tcp, Sock, Reply}, #ct_data{sock = Sock,
 
 creating(info, {tcp_closed, Sock}, #ct_data{sock = Sock} = Data) ->
     {next_state, failed,
-     Data#ct_data{sock = undefined, error_reason = socket_closed}};
+     Data#ct_data{sock = undefined,
+                  error_reason = ct_error(socket_closed,
+                                          "runtime socket closed during create",
+                                          #{phase => creating})}};
 
 creating(info, {tcp_error, Sock, Reason}, #ct_data{sock = Sock} = Data) ->
     {next_state, failed,
-     Data#ct_data{sock = undefined, error_reason = {socket_error, Reason}}};
+     Data#ct_data{sock = undefined,
+                  error_reason = ct_error(socket_error,
+                                          "runtime socket errored during create",
+                                          #{phase => creating, reason => Reason})}};
 
 creating(state_timeout, spawn_timeout, Data) ->
-    {next_state, failed, Data#ct_data{error_reason = spawn_timeout}};
+    {next_state, failed,
+     Data#ct_data{error_reason = ct_error(spawn_timeout,
+                                          "container spawn timed out",
+                                          #{timeout_ms => ?SPAWN_TIMEOUT})}};
 
 creating({call, _From}, _, _Data) ->
     {keep_state_and_data, [postpone]};
@@ -354,22 +363,25 @@ creating_do_spawn(#ct_data{id = ContainerId,
         {error, admission_timeout} ->
             logger:warning("container ~s: admission gate timed out", [ContainerId]),
             {next_state, failed,
-             Data#ct_data{error_reason = admission_timeout}};
+             Data#ct_data{error_reason = ct_error(admission_timeout,
+                                                  "admission gate timed out",
+                                                  #{zone => Zone})}};
         {error, admission_queue_full} ->
             logger:warning("container ~s: admission queue full", [ContainerId]),
             {next_state, failed,
-             Data#ct_data{error_reason = admission_queue_full}};
+             Data#ct_data{error_reason = ct_error(admission_queue_full,
+                                                  "admission queue is full",
+                                                  #{zone => Zone})}};
         {error, {quarantined, Hash, Since}} ->
             logger:warning("container ~s: binary quarantined (~s since ~p)",
                            [ContainerId, erlkoenig_ct_security:format_hash_prefix(Hash), Since]),
-            erlkoenig_error:emit(
-              ?EK_ERROR(runtime, binary_quarantined,
-                        "spawn refused by quarantine",
-                        #{hash_prefix => erlkoenig_ct_security:format_hash_prefix(Hash),
-                          since_ms => Since}),
-              ContainerId),
+            Err = ?EK_ERROR(runtime, binary_quarantined,
+                            "spawn refused by quarantine",
+                            #{hash_prefix => erlkoenig_ct_security:format_hash_prefix(Hash),
+                              since_ms => Since}),
+            erlkoenig_error:emit(Err, ContainerId),
             {next_state, failed,
-             Data#ct_data{error_reason = {quarantined, Hash}}}
+             Data#ct_data{error_reason = Err}}
     end.
 
 creating_do_spawn_gated(#ct_data{id = ContainerId} = Data) ->
@@ -418,15 +430,14 @@ creating_do_spawn_gated(#ct_data{id = ContainerId} = Data) ->
                 sock = Sock,
                 socket_path = SocketPath
             }, [{state_timeout, ?SPAWN_TIMEOUT, spawn_timeout}]};
-        {error, Reason} ->
-            erlkoenig_error:emit(
-              ?EK_ERROR(runtime, socket_connect_failed,
-                        "wait_and_connect to erlkoenig_rt socket",
-                        #{socket_path => SocketPath, reason => Reason,
-                          timeout_ms  => 10000}),
-              Data#ct_data.id),
+        {error, Err} ->
+            Err2 = ?EK_ERROR(runtime, socket_connect_failed,
+                             "wait_and_connect to erlkoenig_rt socket",
+                             #{socket_path => SocketPath, reason => Err,
+                               timeout_ms  => 10000}),
+            erlkoenig_error:emit(Err2, Data#ct_data.id),
             {next_state, failed,
-             Data#ct_data{error_reason = {socket_connect_failed, Reason}}}
+             Data#ct_data{error_reason = Err2}}
     end.
 
 creating_send_spawn(Data) ->
@@ -471,11 +482,15 @@ creating_handle_rt_data(Reply, false = _Handshake, Data) ->
                     {keep_state, Data2#ct_data{handshake = true}};
                 {error, SigReason} ->
                     {next_state, failed,
-                     Data#ct_data{error_reason = {signature_rejected, SigReason}}}
+                     Data#ct_data{error_reason = ct_error(signature_rejected,
+                                                          "container signature rejected",
+                                                          #{reason => SigReason})}}
             end;
         {error, Reason} ->
             {next_state, failed,
-             Data#ct_data{error_reason = Reason}}
+             Data#ct_data{error_reason = ct_error(handshake_failed,
+                                                  "runtime handshake reply rejected during create",
+                                                  #{reason => Reason, reply => Reply})}}
     end;
 creating_handle_rt_data(Reply, true = _Handshake, Data) ->
     %% Second message: SPAWN reply
@@ -484,22 +499,20 @@ creating_handle_rt_data(Reply, true = _Handshake, Data) ->
             {next_state, namespace_ready,
              Data#ct_data{os_pid = Pid, netns_path = Ns}};
         {ok, reply_error, #{code := Code, message := ErrMsg}} ->
-            erlkoenig_error:emit(
-              ?EK_ERROR(runtime, spawn_failed,
-                        "erlkoenig_rt rejected CMD_SPAWN",
-                        #{code => Code, message => ErrMsg,
-                          binary => Data#ct_data.binary_path}),
-              Data#ct_data.id),
+            Err = ?EK_ERROR(runtime, spawn_failed,
+                            "erlkoenig_rt rejected CMD_SPAWN",
+                            #{code => Code, message => ErrMsg,
+                              binary => Data#ct_data.binary_path}),
+            erlkoenig_error:emit(Err, Data#ct_data.id),
             {next_state, failed,
-             Data#ct_data{error_reason = {spawn_failed, Code, ErrMsg}}};
+             Data#ct_data{error_reason = Err}};
         Other ->
-            erlkoenig_error:emit(
-              ?EK_ERROR(runtime, unexpected_spawn_reply,
-                        "unknown reply to CMD_SPAWN",
-                        #{reply => Other}),
-              Data#ct_data.id),
+            Err = ?EK_ERROR(runtime, unexpected_spawn_reply,
+                            "unknown reply to CMD_SPAWN",
+                            #{reply => Other}),
+            erlkoenig_error:emit(Err, Data#ct_data.id),
             {next_state, failed,
-             Data#ct_data{error_reason = {unexpected_reply, Other}}}
+             Data#ct_data{error_reason = Err}}
     end.
 
 %% =================================================================
@@ -531,11 +544,17 @@ namespace_ready({call, From}, get_info, Data) ->
 
 namespace_ready(info, {tcp_closed, Sock}, #ct_data{sock = Sock} = Data) ->
     {next_state, failed,
-     Data#ct_data{sock = undefined, error_reason = socket_closed}};
+     Data#ct_data{sock = undefined,
+                  error_reason = ct_error(socket_closed,
+                                          "runtime socket closed during namespace setup",
+                                          #{phase => namespace_ready})}};
 
 namespace_ready(info, {tcp_error, Sock, Reason}, #ct_data{sock = Sock} = Data) ->
     {next_state, failed,
-     Data#ct_data{sock = undefined, error_reason = {socket_error, Reason}}};
+     Data#ct_data{sock = undefined,
+                  error_reason = ct_error(socket_error,
+                                          "runtime socket errored during namespace setup",
+                                          #{phase => namespace_ready, reason => Reason})}};
 
 namespace_ready(info, {poll_stats, _, _}, _Data) -> keep_state_and_data;
 namespace_ready(info, check_restart, _Data) -> keep_state_and_data.
@@ -559,18 +578,27 @@ starting(info, {tcp, Sock, Reply}, #ct_data{sock = Sock} = Data) ->
     starting_handle_data(Reply, Data);
 
 starting(info, {tcp_closed, Sock}, #ct_data{sock = Sock} = Data) ->
-    Data2 = maybe_reply_go_error(Data, socket_closed),
+    Err = ct_error(socket_closed,
+                   "runtime socket closed while waiting for GO reply",
+                   #{phase => starting}),
+    Data2 = maybe_reply_go_error(Data, Err),
     {next_state, failed,
-     Data2#ct_data{sock = undefined, error_reason = socket_closed}};
+     Data2#ct_data{sock = undefined, error_reason = Err}};
 
 starting(info, {tcp_error, Sock, Reason}, #ct_data{sock = Sock} = Data) ->
-    Data2 = maybe_reply_go_error(Data, {socket_error, Reason}),
+    Err = ct_error(socket_error,
+                   "runtime socket errored while waiting for GO reply",
+                   #{phase => starting, reason => Reason}),
+    Data2 = maybe_reply_go_error(Data, Err),
     {next_state, failed,
-     Data2#ct_data{sock = undefined, error_reason = {socket_error, Reason}}};
+     Data2#ct_data{sock = undefined, error_reason = Err}};
 
 starting(state_timeout, go_timeout, Data) ->
-    Data2 = maybe_reply_go_error(Data, go_timeout),
-    {next_state, failed, Data2#ct_data{error_reason = go_timeout}};
+    Err = ct_error(go_timeout,
+                   "container GO timed out",
+                   #{timeout_ms => ?GO_TIMEOUT}),
+    Data2 = maybe_reply_go_error(Data, Err),
+    {next_state, failed, Data2#ct_data{error_reason = Err}};
 
 starting({call, _From}, _, _Data) ->
     {keep_state_and_data, [postpone]};
@@ -629,10 +657,14 @@ running({call, From}, stop_container, Data) ->
         ok ->
             {next_state, stopping,
              Data#ct_data{from = From, user_stopped = true}};
-        {error, not_connected} = Err ->
+        {error, #{code := 'EK_RUNTIME_NOT_CONNECTED'}} = Err ->
             %% Socket was torn down under us — fail loud instead of
             %% transitioning to stopping and hanging the caller on a
             %% stop-timeout reply that will never fire.
+            {keep_state_and_data, [{reply, From, Err}]};
+        {error, _} = Err ->
+            logger:warning("container ~s: stop command failed before stopping: ~p",
+                           [Data#ct_data.id, Err]),
             {keep_state_and_data, [{reply, From, Err}]}
     end;
 
@@ -640,7 +672,11 @@ running({call, From}, {kill, Signal}, Data) ->
     case erlkoenig_ct_rt:send_to_rt(erlkoenig_proto:encode_cmd_kill(Signal), Data) of
         ok ->
             {next_state, stopping, Data, [{reply, From, ok}]};
-        {error, not_connected} = Err ->
+        {error, #{code := 'EK_RUNTIME_NOT_CONNECTED'}} = Err ->
+            {keep_state_and_data, [{reply, From, Err}]};
+        {error, _} = Err ->
+            logger:warning("container ~s: kill command failed before stopping: ~p",
+                           [Data#ct_data.id, Err]),
             {keep_state_and_data, [{reply, From, Err}]}
     end;
 
@@ -665,7 +701,7 @@ running(info, {poll_stats, Interval, Metrics}, Data) ->
 
 running(cast, {send_input, InputData}, Data) ->
     %% Cast: no reply path. send_to_rt already logs a warning on
-    %% not_connected — there's nobody to hand the error to.
+    %% runtime failure — there's nobody to hand the error to.
     _ = erlkoenig_ct_rt:send_to_rt(
           erlkoenig_proto:encode_cmd_stdin(InputData), Data),
     keep_state_and_data.
@@ -726,8 +762,11 @@ stopping(state_timeout, force_kill, Data) when Data#ct_data.sock =/= undefined -
     {keep_state_and_data, [{state_timeout, ?STOP_TIMEOUT, give_up}]};
 
 stopping(state_timeout, give_up, Data) ->
-    Data2 = maybe_reply_stop(Data, {error, kill_timeout}),
-    {next_state, failed, Data2#ct_data{error_reason = kill_timeout}};
+    Err = ct_error(kill_timeout,
+                   "container did not exit after forced kill",
+                   #{timeout_ms => ?STOP_TIMEOUT}),
+    Data2 = maybe_reply_stop(Data, {error, Err}),
+    {next_state, failed, Data2#ct_data{error_reason = Err}};
 
 stopping({call, _From}, _, _Data) ->
     {keep_state_and_data, [postpone]}.
@@ -745,9 +784,12 @@ starting_handle_data(Reply, Data) ->
             {next_state, stopped,
              Data2#ct_data{exit_info = ExitInfo}};
         {ok, reply_error, #{code := Code, message := ErrMsg}} ->
-            Data2 = maybe_reply_go_error(Data, {go_failed, Code, ErrMsg}),
+            Err = ct_error(go_failed,
+                           "erlkoenig_rt rejected CMD_GO",
+                           #{code => Code, message => ErrMsg}),
+            Data2 = maybe_reply_go_error(Data, Err),
             {next_state, failed,
-             Data2#ct_data{error_reason = {go_failed, Code, ErrMsg}}};
+             Data2#ct_data{error_reason = Err}};
         {ok, reply_stdout, #{data := Chunk}} ->
             erlkoenig_ct_observe:forward_output(stdout, Chunk, Data),
             keep_state_and_data;
@@ -755,8 +797,11 @@ starting_handle_data(Reply, Data) ->
             erlkoenig_ct_observe:forward_output(stderr, Chunk, Data),
             keep_state_and_data;
         Other ->
+            Err = ct_error(unexpected_reply,
+                           "unexpected runtime reply while starting container",
+                           #{phase => starting, reply => Other}),
             {next_state, failed,
-             Data#ct_data{error_reason = {unexpected_reply, Other}}}
+             Data#ct_data{error_reason = Err}}
     end.
 
 running_handle_data(Reply, Data) ->
@@ -962,11 +1007,10 @@ failed(enter, _OldState, Data) ->
     erlkoenig_ct_security:release_admission_token(Data),
     %% Record the crash against the binary's hash so the quarantine
     %% circuit breaker can spot crashloops. Quarantine failures caused
-    %% by quarantine itself (error_reason = {quarantined, _}) don't
-    %% feed back into the counter — otherwise a quarantined binary
-    %% would keep driving its own quarantine deeper.
-    case Data#ct_data.error_reason of
-        {quarantined, _} -> ok;
+    %% by quarantine itself don't feed back into the counter — otherwise
+    %% a quarantined binary would keep driving its own quarantine deeper.
+    case error_code(Data#ct_data.error_reason) of
+        'EK_RUNTIME_BINARY_QUARANTINED' -> ok;
         _ -> _ = erlkoenig_ct_security:safe_record_crash(Data#ct_data.binary_path)
     end,
     erlkoenig_events:notify({container_failed, Data#ct_data.id,
@@ -1066,18 +1110,27 @@ recovering(info, {tcp_closed, Sock}, #ct_data{sock = Sock} = Data) ->
     logger:warning("container ~s: socket closed during recovery",
                    [Data#ct_data.id]),
     {next_state, failed,
-     Data#ct_data{sock = undefined, error_reason = recovery_socket_closed}};
+     Data#ct_data{sock = undefined,
+                  error_reason = ct_error(recovery_socket_closed,
+                                          "runtime socket closed during recovery",
+                                          #{phase => recovering})}};
 
 recovering(info, {tcp_error, Sock, Reason}, #ct_data{sock = Sock} = Data) ->
     logger:error("container ~s: socket error during recovery: ~p",
                  [Data#ct_data.id, Reason]),
     {next_state, failed,
-     Data#ct_data{sock = undefined, error_reason = {recovery_socket_error, Reason}}};
+     Data#ct_data{sock = undefined,
+                  error_reason = ct_error(recovery_socket_error,
+                                          "runtime socket errored during recovery",
+                                          #{phase => recovering, reason => Reason})}};
 
 recovering(state_timeout, recovery_timeout, Data) ->
     %% Couldn't recover in time
     logger:warning("container ~s: recovery timeout", [Data#ct_data.id]),
-    {next_state, failed, Data#ct_data{error_reason = recovery_timeout}};
+    {next_state, failed,
+     Data#ct_data{error_reason = ct_error(recovery_timeout,
+                                          "container recovery timed out",
+                                          #{timeout_ms => 5000})}};
 
 recovering({call, From}, get_info, Data) ->
     {keep_state_and_data, [{reply, From, erlkoenig_ct_info:build_info(recovering, Data)}]};
@@ -1130,7 +1183,9 @@ disconnected(state_timeout, try_reconnect, Data) ->
                                    [Data#ct_data.id, NewAttempts]),
                     {next_state, failed,
                      Data#ct_data{reconnect_attempts = NewAttempts,
-                                  error_reason = reconnect_exhausted}};
+                                  error_reason = ct_error(reconnect_exhausted,
+                                                          "runtime reconnect attempts exhausted",
+                                                          #{attempts => NewAttempts})}};
                 false ->
                     {keep_state,
                      Data#ct_data{reconnect_attempts = NewAttempts},
@@ -1261,6 +1316,40 @@ make_id() ->
 %% keep the `{reply, From, build_info(State, Data)}' shape; only the
 %% projection of `#ct_data{}' into the public map moved.
 %% `maybe_add_stats/3' lives in erlkoenig_ct_observe.
+
+ct_error(socket_closed, Context, Data) ->
+    ?EK_ERROR(ct, socket_closed, Context, Data);
+ct_error(socket_error, Context, Data) ->
+    ?EK_ERROR(ct, socket_error, Context, Data);
+ct_error(spawn_timeout, Context, Data) ->
+    ?EK_ERROR(ct, spawn_timeout, Context, Data);
+ct_error(admission_timeout, Context, Data) ->
+    ?EK_ERROR(ct, admission_timeout, Context, Data);
+ct_error(admission_queue_full, Context, Data) ->
+    ?EK_ERROR(ct, admission_queue_full, Context, Data);
+ct_error(signature_rejected, Context, Data) ->
+    ?EK_ERROR(ct, signature_rejected, Context, Data);
+ct_error(handshake_failed, Context, Data) ->
+    ?EK_ERROR(ct, handshake_failed, Context, Data);
+ct_error(go_timeout, Context, Data) ->
+    ?EK_ERROR(ct, go_timeout, Context, Data);
+ct_error(go_failed, Context, Data) ->
+    ?EK_ERROR(ct, go_failed, Context, Data);
+ct_error(unexpected_reply, Context, Data) ->
+    ?EK_ERROR(ct, unexpected_reply, Context, Data);
+ct_error(kill_timeout, Context, Data) ->
+    ?EK_ERROR(ct, kill_timeout, Context, Data);
+ct_error(recovery_socket_closed, Context, Data) ->
+    ?EK_ERROR(ct, recovery_socket_closed, Context, Data);
+ct_error(recovery_socket_error, Context, Data) ->
+    ?EK_ERROR(ct, recovery_socket_error, Context, Data);
+ct_error(recovery_timeout, Context, Data) ->
+    ?EK_ERROR(ct, recovery_timeout, Context, Data);
+ct_error(reconnect_exhausted, Context, Data) ->
+    ?EK_ERROR(ct, reconnect_exhausted, Context, Data).
+
+error_code(#{code := Code}) -> Code;
+error_code(_) -> undefined.
 
 -spec maybe_reply_go(#ct_data{}) -> #ct_data{}.
 maybe_reply_go(#ct_data{from = undefined} = Data) ->

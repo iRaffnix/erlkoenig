@@ -12,6 +12,7 @@
 
 -include_lib("eunit/include/eunit.hrl").
 -include("erlkoenig_ct_state.hrl").
+-include("erlkoenig_error_test.hrl").
 
 %% =================================================================
 %% connect_to_runtime/1 handshake behaviour
@@ -62,8 +63,8 @@ connect_to_runtime_fails_on_wrong_handshake_reply_test() ->
                         id = <<"test-ct">>},
         %% check_handshake_reply rejects anything that's not v=1 or v=2,
         %% so the fake server's 0xFF reply is a clean protocol_mismatch.
-        ?assertMatch({error, {handshake_failed, {protocol_mismatch, _, _}}},
-                     erlkoenig_ct_rt:connect_to_runtime(Data))
+        ?assertErrorCode('EK_RUNTIME_HANDSHAKE_FAILED',
+                         erlkoenig_ct_rt:connect_to_runtime(Data))
     after
         cleanup(SockPath, LSock, ServerPid)
     end.
@@ -75,11 +76,25 @@ connect_to_runtime_fails_on_closed_socket_test() ->
                         id = <<"test-ct">>},
         %% Server accepts then closes; the handshake send may succeed
         %% but the recv returns closed. Surfaced as handshake_recv.
-        ?assertMatch({error, {handshake_recv, _}},
-                     erlkoenig_ct_rt:connect_to_runtime(Data))
+        ?assertErrorCode('EK_RUNTIME_HANDSHAKE_RECV_FAILED',
+                         erlkoenig_ct_rt:connect_to_runtime(Data))
     after
         cleanup(SockPath, LSock, ServerPid)
     end.
+
+connect_to_runtime_without_socket_path_returns_code_test() ->
+    ?assertErrorCode('EK_RUNTIME_NO_SOCKET_PATH',
+                     erlkoenig_ct_rt:connect_to_runtime(#ct_data{})).
+
+send_to_rt_without_socket_returns_code_test() ->
+    ?assertErrorCode('EK_RUNTIME_NOT_CONNECTED',
+                     erlkoenig_ct_rt:send_to_rt(<<"cmd">>,
+                                                #ct_data{id = <<"test-ct">>})).
+
+sync_rt_command_without_socket_returns_code_test() ->
+    ?assertErrorCode('EK_RUNTIME_NOT_CONNECTED',
+                     erlkoenig_ct_rt:sync_rt_command(
+                       #ct_data{id = <<"test-ct">>}, <<"cmd">>, 1000)).
 
 %% =================================================================
 %% Fake-RT helpers

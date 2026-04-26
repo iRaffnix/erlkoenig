@@ -24,6 +24,8 @@ it's a pure input check, independent of the store.
 -export([validate_persist_name/1,
          resolve/4]).
 
+-include("erlkoenig_error.hrl").
+
 %% Persist name: must start with [a-z0-9], followed by [a-z0-9_-]*
 -spec validate_persist_name(binary()) -> ok | {error, invalid_persist_name}.
 validate_persist_name(<<>>) ->
@@ -107,8 +109,25 @@ resolve_loop(ContainerName,
                     resolve_loop(ContainerName, Rest, Uid, Gid,
                                  [Resolved | Acc]);
                 {error, _} = Err ->
+                    volume_error(store_ensure_failed,
+                                 #{container => ContainerName,
+                                   persist => Persist,
+                                   reason => element(2, Err)}),
                     Err
             end;
-        {error, _} = Err ->
+        {error, Reason} = Err ->
+            volume_error(path_invalid,
+                         #{container => ContainerName,
+                           persist => Persist,
+                           reason => Reason}),
             Err
     end.
+
+volume_error(path_invalid, Data) ->
+    erlkoenig_error:emit(
+      ?EK_ERROR(volume, path_invalid,
+                "volume persist name is invalid", Data));
+volume_error(store_ensure_failed, Data) ->
+    erlkoenig_error:emit(
+      ?EK_ERROR(volume, store_ensure_failed,
+                "volume store could not ensure backing path", Data)).

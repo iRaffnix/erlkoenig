@@ -50,6 +50,11 @@ All fields except `type'/`reason' have sensible defaults.
 
 -export([make/2, make/3, make/4, make/5,
          emit/1, emit/2,
+         code/2,
+         catalog/0,
+         lookup/1,
+         validate_catalog/0,
+         format/2,
          to_string/1,
          to_map/1,
          routing_key/1,
@@ -60,6 +65,7 @@ All fields except `type'/`reason' have sensible defaults.
 -type severity() :: warn | error | critical.
 -type error_map() :: #{type     := atom(),
                        reason   := atom(),
+                       code     := atom(),
                        context  := binary(),
                        data     := map(),
                        severity := severity(),
@@ -99,6 +105,7 @@ make(Type, Reason, Context, Data, Opts)
   when is_atom(Type), is_atom(Reason), is_map(Data), is_map(Opts) ->
     #{type      => Type,
       reason    => Reason,
+      code      => code(Type, Reason),
       context   => iolist_to_binary(Context),
       data      => Data,
       severity  => maps:get(severity, Opts, error),
@@ -140,6 +147,64 @@ emit(Err, ContainerId) ->
     emit(Err#{container => ContainerId}).
 
 %%====================================================================
+%% Stable error-code catalog
+%%====================================================================
+
+-doc "Return the stable public error code for a component/reason pair.".
+-spec code(atom(), atom()) -> atom().
+code(Type, Reason) when is_atom(Type), is_atom(Reason) ->
+    list_to_atom("EK_" ++ upper_atom(Type) ++ "_" ++ upper_atom(Reason)).
+
+-doc "Load the error catalog from priv/error_catalog.term.".
+-spec catalog() -> {ok, [{atom(), map()}]} | {error, term()}.
+catalog() ->
+    case catalog_path() of
+        {ok, Path} ->
+            case file:consult(Path) of
+                {ok, [Entries]} when is_list(Entries) -> {ok, Entries};
+                {ok, Other} -> {error, {bad_catalog_term, Other}};
+                {error, _} = Err -> Err
+            end;
+        {error, _} = Err ->
+            Err
+    end.
+
+-doc "Lookup one stable error code in the catalog.".
+-spec lookup(atom()) -> {ok, map()} | {error, term()}.
+lookup(Code) when is_atom(Code) ->
+    case catalog() of
+        {ok, Entries} ->
+            case lists:keyfind(Code, 1, Entries) of
+                {Code, Meta} -> {ok, Meta#{code => Code}};
+                false -> {error, not_found}
+            end;
+        {error, _} = Err ->
+            Err
+    end.
+
+-doc "Validate catalog shape and component/reason/code consistency.".
+-spec validate_catalog() -> ok | {error, term()}.
+validate_catalog() ->
+    case catalog() of
+        {ok, Entries} -> validate_entries(Entries);
+        {error, _} = Err -> Err
+    end.
+
+-doc "Format a code and evidence map for CLI-style output.".
+-spec format(atom(), map()) -> iodata().
+format(Code, Evidence) when is_atom(Code), is_map(Evidence) ->
+    case lookup(Code) of
+        {ok, Meta} ->
+            [atom_to_binary(Code), <<" ">>,
+             to_binary(maps:get(description, Meta, <<>>)), <<"\n">>,
+             <<"action: ">>, to_binary(maps:get(operator_action, Meta, <<>>)), <<"\n">>,
+             <<"evidence: ">>, io_lib:format("~p", [Evidence])];
+        {error, _} ->
+            [atom_to_binary(Code), <<" (uncataloged)\n">>,
+             <<"evidence: ">>, io_lib:format("~p", [Evidence])]
+    end.
+
+%%====================================================================
 %% Formatting
 %%====================================================================
 
@@ -168,9 +233,10 @@ stringified so Python can consume without Erlang-specific decoders.
 """.
 -spec to_map(error_map()) -> map().
 to_map(#{type := T, reason := R, context := C, data := D,
-         severity := S, source := Src, ts := Ts, container := Ct}) ->
+         code := Code, severity := S, source := Src, ts := Ts, container := Ct}) ->
     Base = #{<<"type">>     => atom_to_binary(T),
              <<"reason">>   => atom_to_binary(R),
+             <<"code">>     => atom_to_binary(Code),
              <<"context">>  => C,
              <<"data">>     => jsonable_map(D),
              <<"severity">> => atom_to_binary(S),
@@ -207,6 +273,77 @@ payload(Err) ->
 %%====================================================================
 %% Internal
 %%====================================================================
+
+catalog_path() ->
+    case code:priv_dir(erlkoenig) of
+        {error, _} ->
+            SrcPath = filename:join(["apps", "erlkoenig", "priv",
+                                     "error_catalog.term"]),
+            case filelib:is_regular(SrcPath) of
+                true -> {ok, SrcPath};
+                false -> {error, priv_dir_not_found}
+            end;
+        Dir ->
+            {ok, filename:join(Dir, "error_catalog.term")}
+    end.
+
+validate_entries(Entries) ->
+    Codes = [Code || {Code, _Meta} <- Entries],
+    case duplicates(Codes) of
+        [] -> validate_entries(Entries, []);
+        Dupes -> {error, {duplicate_codes, Dupes}}
+    end.
+
+validate_entries([], []) ->
+    ok;
+validate_entries([], Errors) ->
+    {error, lists:reverse(Errors)};
+validate_entries([{Code, Meta} | Rest], Errors)
+  when is_atom(Code), is_map(Meta) ->
+    Required = [component, reason, since, description,
+                operator_action, evidence_fields],
+    Missing = [K || K <- Required, not maps:is_key(K, Meta)],
+    EntryErrors0 = case Missing of
+        [] -> [];
+        _ -> [{missing_fields, Code, Missing}]
+    end,
+    ExpectedCode = code(maps:get(component, Meta, undefined),
+                        maps:get(reason, Meta, undefined)),
+    EntryErrors = case ExpectedCode =:= Code of
+        true -> EntryErrors0;
+        false -> [{code_mismatch, Code, ExpectedCode} | EntryErrors0]
+    end,
+    CriticalErrors = case maps:get(severity, Meta, error) of
+        critical ->
+            case maps:is_key(iron_rule, Meta) of
+                true -> [];
+                false -> [{critical_without_iron_rule, Code}]
+            end;
+        _ ->
+            []
+    end,
+    validate_entries(Rest, CriticalErrors ++ EntryErrors ++ Errors);
+validate_entries([Bad | Rest], Errors) ->
+    validate_entries(Rest, [{bad_entry, Bad} | Errors]).
+
+duplicates(Items) ->
+    duplicates(Items, #{}, []).
+
+duplicates([], _Seen, Dupes) ->
+    lists:usort(Dupes);
+duplicates([Item | Rest], Seen, Dupes) ->
+    case maps:is_key(Item, Seen) of
+        true -> duplicates(Rest, Seen, [Item | Dupes]);
+        false -> duplicates(Rest, Seen#{Item => true}, Dupes)
+    end.
+
+upper_atom(A) when is_atom(A) ->
+    string:uppercase(atom_to_list(A)).
+
+to_binary(Bin) when is_binary(Bin) -> Bin;
+to_binary(List) when is_list(List) -> iolist_to_binary(List);
+to_binary(Atom) when is_atom(Atom) -> atom_to_binary(Atom);
+to_binary(Other) -> iolist_to_binary(io_lib:format("~p", [Other])).
 
 %% Best-effort conversion: atoms → binaries, tuples → lists, nested
 %% maps recursed. Anything exotic becomes its ~p iolist.

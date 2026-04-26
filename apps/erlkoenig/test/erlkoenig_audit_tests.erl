@@ -2,6 +2,7 @@
 
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("stdlib/include/assert.hrl").
+-include("erlkoenig_error_test.hrl").
 
 test_path() ->
     "/tmp/erlkoenig_audit_test_" ++
@@ -228,10 +229,9 @@ hash_chain_verify_tamper_test_() ->
                    <<"\"subject\":\"y\"">>, <<"\"subject\":\"Y\"">>),
                ?assertNotEqual(Bin, Tampered),  %% sanity: replacement happened
                ok = file:write_file(Path, Tampered),
-               case erlkoenig_audit:verify_chain(Path) of
-                   {error, {chain_break, 2, _}} -> ok;
-                   Other -> ?assertEqual({error, {chain_break, 2, '_'}}, Other)
-               end
+               ?assertMatch({error, #{code := 'EK_AUDIT_CHAIN_BROKEN',
+                                       data := #{line := 2}}},
+                            erlkoenig_audit:verify_chain(Path))
            end]
       end}}.
 
@@ -248,9 +248,10 @@ hash_chain_verify_truncation_test_() ->
                Truncated = binary:part(Bin, 0, byte_size(Bin) - 30),
                ok = file:write_file(Path, Truncated),
                case erlkoenig_audit:verify_chain(Path) of
-                   {error, {chain_break, 2, _}} -> ok;
+                   {error, #{code := 'EK_AUDIT_CHAIN_BROKEN',
+                             data := #{line := 2}}} -> ok;
                    {ok, 1} -> ok;  %% if truncation hit exactly the newline
-                   Other -> ?assertMatch({error, {chain_break, _, _}}, Other)
+                   Other -> ?assertMatch({error, #{code := 'EK_AUDIT_CHAIN_BROKEN'}}, Other)
                end
            end]
       end}}.
@@ -372,10 +373,9 @@ verify_chain_with_wrong_pubkey_test_() ->
                flush(),
                %% Generate a DIFFERENT keypair
                {WrongPub, _} = crypto:generate_key(eddsa, ed25519),
-               case erlkoenig_audit:verify_chain(Path, WrongPub) of
-                   {error, {signature_invalid, 1, _}} -> ok;
-                   Other -> ?assertEqual({error, {signature_invalid, 1, '_'}}, Other)
-               end
+               ?assertMatch({error, #{code := 'EK_AUDIT_SIGNATURE_INVALID',
+                                       data := #{line := 1}}},
+                            erlkoenig_audit:verify_chain(Path, WrongPub))
            end]
       end}}.
 
@@ -420,11 +420,13 @@ tampered_signed_event_detected_test_() ->
                    <<"\"subject\":\"alpha\"">>, <<"\"subject\":\"ALPHA\"">>),
                ?assertNotEqual(Bin, Tampered),
                ok = file:write_file(Path, Tampered),
-               %% The hash check fires first — that's the cheaper test
+               %% The hash check usually fires first — that's the cheaper test
                case erlkoenig_audit:verify_chain(Path, PubKey) of
-                   {error, {chain_break, 1, _}} -> ok;
-                   {error, {signature_invalid, 1, _}} -> ok;
-                   Other -> ?assertMatch({error, {_, 1, _}}, Other)
+                   {error, #{code := 'EK_AUDIT_CHAIN_BROKEN',
+                             data := #{line := 1}}} -> ok;
+                   {error, #{code := 'EK_AUDIT_SIGNATURE_INVALID',
+                             data := #{line := 1}}} -> ok;
+                   Other -> ?assertMatch({error, #{data := #{line := 1}}}, Other)
                end
            end]
       end}}.
@@ -543,8 +545,8 @@ verify_seal_wrong_key_test_() ->
                {ok, Info} = erlkoenig_audit:seal_day(),
                SealedPath = maps:get(sealed_path, Info),
                WrongKey = crypto:strong_rand_bytes(32),
-               ?assertEqual({error, seal_hmac_mismatch},
-                            erlkoenig_audit:verify_seal(SealedPath, WrongKey))
+               ?assertErrorCode('EK_AUDIT_SEAL_HMAC_MISMATCH',
+                                erlkoenig_audit:verify_seal(SealedPath, WrongKey))
            end]
       end}}.
 
@@ -566,8 +568,8 @@ verify_seal_tampered_test_() ->
                    <<"\"subject\":\"ALPHA\"">>),
                ?assertNotEqual(Bin, Tampered),
                ok = file:write_file(SealedPath, Tampered),
-               ?assertEqual({error, seal_hmac_mismatch},
-                            erlkoenig_audit:verify_seal(SealedPath, HmacKey))
+               ?assertErrorCode('EK_AUDIT_SEAL_HMAC_MISMATCH',
+                                erlkoenig_audit:verify_seal(SealedPath, HmacKey))
            end]
       end}}.
 
@@ -639,8 +641,8 @@ seal_without_hmac_key_fails_test_() ->
           [fun() ->
                erlkoenig_audit:log(#{type => a, subject => <<"x">>, result => ok}),
                flush(),
-               ?assertEqual({error, no_hmac_key},
-                            erlkoenig_audit:seal_day())
+               ?assertErrorCode('EK_AUDIT_SEAL_FAILED',
+                                erlkoenig_audit:seal_day())
            end]
       end}}.
 

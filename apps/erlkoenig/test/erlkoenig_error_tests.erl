@@ -13,6 +13,7 @@ make_minimal_test() ->
     E = erlkoenig_error:make(network, econnrefused),
     ?assertEqual(network, maps:get(type, E)),
     ?assertEqual(econnrefused, maps:get(reason, E)),
+    ?assertEqual('EK_NETWORK_ECONNREFUSED', maps:get(code, E)),
     ?assertEqual(<<>>, maps:get(context, E)),
     ?assertEqual(#{}, maps:get(data, E)),
     ?assertEqual(error, maps:get(severity, E)),
@@ -33,7 +34,8 @@ make_with_severity_test() ->
 
 iodata_context_accepted_test() ->
     %% io_lib:format returns iodata, must be accepted.
-    E = erlkoenig_error:make(io, enoent, io_lib:format("file ~s", ["/tmp/x"])),
+    E = erlkoenig_error:make(network, econnrefused,
+                             io_lib:format("file ~s", ["/tmp/x"])),
     ?assertEqual(<<"file /tmp/x">>, maps:get(context, E)).
 
 routing_key_test() ->
@@ -47,6 +49,7 @@ payload_maps_types_to_binaries_test() ->
     P = erlkoenig_error:payload(E),
     ?assertEqual(<<"network">>,  maps:get(<<"type">>, P)),
     ?assertEqual(<<"timeout">>,  maps:get(<<"reason">>, P)),
+    ?assertEqual(<<"EK_NETWORK_TIMEOUT">>, maps:get(<<"code">>, P)),
     ?assertEqual(<<"connect">>,  maps:get(<<"context">>, P)),
     ?assertEqual(<<"error">>,    maps:get(<<"severity">>, P)),
     ?assertEqual(<<"10.0.0.1">>, maps:get(<<"ip">>, maps:get(<<"data">>, P))),
@@ -66,7 +69,8 @@ to_string_with_context_and_container_test() ->
 
 macro_captures_source_test() ->
     %% The ?EK_ERROR macro bakes module/function/arity/line into the map.
-    E = ?EK_ERROR(runtime, failed, "oops", #{}),
+    E = ?EK_ERROR(runtime, not_connected, "oops", #{}),
+    ?assertEqual('EK_RUNTIME_NOT_CONNECTED', maps:get(code, E)),
     Src = maps:get(source, E),
     ?assertEqual(?MODULE, maps:get(module, Src)),
     ?assertEqual(macro_captures_source_test, maps:get(function, Src)),
@@ -75,7 +79,7 @@ macro_captures_source_test() ->
 
 emit_without_bus_is_safe_test() ->
     %% erlkoenig_events is not started in eunit — emit must not crash.
-    E = erlkoenig_error:make(io, enoent, "no such file"),
+    E = erlkoenig_error:make(runtime, not_connected, "no runtime socket"),
     ?assertEqual(ok, erlkoenig_error:emit(E)).
 
 emit_with_container_tag_test() ->
@@ -99,6 +103,7 @@ amqp_codec_round_trip_test() ->
     P = maps:get(<<"payload">>, Decoded),
     ?assertEqual(<<"network">>,      maps:get(<<"type">>, P)),
     ?assertEqual(<<"econnrefused">>, maps:get(<<"reason">>, P)),
+    ?assertEqual(<<"EK_NETWORK_ECONNREFUSED">>, maps:get(<<"code">>, P)),
     ?assertEqual(<<"10.0.0.12">>,    maps:get(<<"ip">>,   maps:get(<<"data">>, P))),
     ?assertEqual(7777,               maps:get(<<"port">>, maps:get(<<"data">>, P))).
 
@@ -106,8 +111,41 @@ payload_handles_pids_and_refs_test() ->
     %% Opaque terms still produce a valid payload (iolist-binary fallback).
     Pid = self(),
     Ref = erlang:make_ref(),
-    E   = erlkoenig_error:make(runtime, crashed, "caller died",
+    E   = erlkoenig_error:make(runtime, handshake_failed, "caller died",
                                 #{pid => Pid, ref => Ref}),
     P   = erlkoenig_error:payload(E),
     ?assert(is_binary(maps:get(<<"pid">>, maps:get(<<"data">>, P)))),
     ?assert(is_binary(maps:get(<<"ref">>, maps:get(<<"data">>, P)))).
+
+code_is_stable_public_atom_test() ->
+    ?assertEqual('EK_RUNTIME_SOCKET_CONNECT_FAILED',
+                 erlkoenig_error:code(runtime, socket_connect_failed)).
+
+catalog_validates_test() ->
+    ?assertEqual(ok, erlkoenig_error:validate_catalog()).
+
+catalog_lookup_test() ->
+    {ok, Meta} = erlkoenig_error:lookup('EK_RUNTIME_SOCKET_CONNECT_FAILED'),
+    ?assertEqual(runtime, maps:get(component, Meta)),
+    ?assertEqual(socket_connect_failed, maps:get(reason, Meta)),
+    ?assertEqual('EK_RUNTIME_SOCKET_CONNECT_FAILED', maps:get(code, Meta)),
+    ?assert(maps:is_key(operator_action, Meta)).
+
+wave1_runtime_codes_are_cataloged_test() ->
+    Codes = [
+        erlkoenig_error:code(runtime, binary_quarantined),
+        erlkoenig_error:code(runtime, socket_connect_failed),
+        erlkoenig_error:code(runtime, spawn_failed),
+        erlkoenig_error:code(runtime, unexpected_spawn_reply)
+    ],
+    [?assertMatch({ok, _}, erlkoenig_error:lookup(Code)) || Code <- Codes].
+
+format_cataloged_code_test() ->
+    Text = iolist_to_binary(
+             erlkoenig_error:format(
+               'EK_RUNTIME_SOCKET_CONNECT_FAILED',
+               #{socket_path => <<"/run/erlkoenig/demo.sock">>,
+                 reason => timeout})),
+    ?assertMatch(<<"EK_RUNTIME_SOCKET_CONNECT_FAILED", _/binary>>, Text),
+    ?assertNotEqual(nomatch, binary:match(Text, <<"action: ">>)),
+    ?assertNotEqual(nomatch, binary:match(Text, <<"socket_path">>)).

@@ -38,6 +38,8 @@ stays consistent under concurrent registrations.
 
 -behaviour(gen_server).
 
+-include("erlkoenig_error.hrl").
+
 -export([start_link/0, stop/0,
          register_allowlist/2,
          unregister/1,
@@ -141,6 +143,8 @@ compile_patterns(Hosts) ->
 filter_valid_patterns(Patterns, SourceLabel) ->
     lists:filtermap(fun
         ({error, invalid_host}) ->
+            _ = dns_filter_error(invalid_host_pattern,
+                                 #{source => SourceLabel}),
             logger:warning(
                 "[dns_filter] invalid host pattern dropped from ~s "
                 "allowlist (entry has no effect)", [SourceLabel]),
@@ -191,17 +195,27 @@ recover_from_running_containers() ->
       end, 0, Pids).
 
 recover_one(Pid) ->
-    case erlkoenig_ct:dns_filter_state(Pid) of
+    try erlkoenig_ct:dns_filter_state(Pid) of
         {Ip, Hosts} when is_list(Hosts), Hosts =/= [] ->
-            Label = iolist_to_binary(io_lib:format(
-                "recovered-ip-~s", [inet:ntoa(Ip)])),
-            Patterns = filter_valid_patterns(
-                         compile_patterns(Hosts), Label),
-            true = ets:insert(?TAB, {Ip, Patterns}),
-            ok;
+            recover_allowlist(Ip, Hosts);
         _ ->
             skip
+    catch
+        Class:Reason ->
+            _ = dns_filter_error(recovery_failed,
+                                 #{pid => Pid,
+                                   class => Class,
+                                   reason => Reason}),
+            skip
     end.
+
+recover_allowlist(Ip, Hosts) ->
+    Label = iolist_to_binary(io_lib:format(
+        "recovered-ip-~s", [inet:ntoa(Ip)])),
+    Patterns = filter_valid_patterns(
+                 compile_patterns(Hosts), Label),
+    true = ets:insert(?TAB, {Ip, Patterns}),
+    ok.
 
 handle_call({register, Ip, Hosts}, _From, State) ->
     Label = iolist_to_binary(io_lib:format(
@@ -227,6 +241,17 @@ handle_info(_Info, State) ->
 terminate(_Reason, _State) ->
     %% Table is owned by this process and auto-deleted on exit.
     ok.
+
+dns_filter_error(invalid_host_pattern, Data) ->
+    Err = ?EK_ERROR_S(warn, dns, invalid_host_pattern,
+                      "DNS allowlist host pattern is invalid", Data),
+    erlkoenig_error:emit(Err),
+    Err;
+dns_filter_error(recovery_failed, Data) ->
+    Err = ?EK_ERROR(dns, recovery_failed,
+                    "DNS filter recovery from running container failed", Data),
+    erlkoenig_error:emit(Err),
+    Err.
 
 %%%===================================================================
 %%% Internals

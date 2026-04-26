@@ -52,7 +52,8 @@ Usage:
     retries   :: pos_integer(),
     failures  = 0 :: non_neg_integer(),
     last      :: ok | fail | undefined,
-    timer     :: reference() | undefined
+    timer     :: reference() | undefined,
+    monitor   :: reference() | undefined
 }).
 
 %% =================================================================
@@ -87,6 +88,8 @@ init([]) ->
 handle_call({add, Pid, Opts}, _From, State) ->
     case get_container_ip(Pid) of
         {ok, Ip} ->
+            State1 = cancel_and_remove(Pid, State),
+            MRef = monitor(process, Pid),
             Check = #check{
                 pid      = Pid,
                 ip       = Ip,
@@ -94,11 +97,11 @@ handle_call({add, Pid, Opts}, _From, State) ->
                 port     = maps:get(port, Opts, 80),
                 interval = maps:get(interval, Opts, 5000),
                 timeout  = maps:get(timeout, Opts, 2000),
-                retries  = maps:get(retries, Opts, 3)
+                retries  = maps:get(retries, Opts, 3),
+                monitor  = MRef
             },
             Check2 = schedule_check(Check),
-            monitor(process, Pid),
-            {reply, ok, State#{Pid => Check2}};
+            {reply, ok, State1#{Pid => Check2}};
         {error, _} = Err ->
             {reply, Err, State}
     end;
@@ -121,25 +124,31 @@ handle_call(status, _From, State) ->
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
-handle_info({check, Pid}, State) ->
+handle_info({timeout, Ref, {check, Pid}}, State) ->
     case maps:find(Pid, State) of
-        {ok, Check} ->
+        {ok, #check{timer = Ref} = Check} ->
             Check2 = run_check(Check),
             Check3 = schedule_check(Check2),
             {noreply, State#{Pid := Check3}};
-        error ->
+        _ ->
             {noreply, State}
     end;
 
-handle_info({'DOWN', _Ref, process, Pid, _Reason}, State) ->
-    {noreply, cancel_and_remove(Pid, State)};
+handle_info({'DOWN', Ref, process, Pid, _Reason}, State) ->
+    case maps:find(Pid, State) of
+        {ok, #check{monitor = Ref}} ->
+            {noreply, cancel_and_remove(Pid, State)};
+        _ ->
+            {noreply, State}
+    end;
 
 handle_info(_Msg, State) ->
     {noreply, State}.
 
 terminate(_Reason, State) ->
-    maps:foreach(fun(_Pid, #check{timer = T}) ->
-        cancel_timer(T)
+    maps:foreach(fun(_Pid, #check{timer = T, monitor = MRef}) ->
+        cancel_timer(T),
+        cancel_monitor(MRef)
     end, State),
     ok.
 
@@ -167,18 +176,23 @@ get_container_ip(Pid) ->
 
 -spec schedule_check(#check{}) -> #check{}.
 schedule_check(#check{interval = Interval, pid = Pid} = Check) ->
-    Ref = erlang:send_after(Interval, self(), {check, Pid}),
+    Ref = erlang:start_timer(Interval, self(), {check, Pid}),
     Check#check{timer = Ref}.
 
 -spec cancel_timer(reference() | undefined) -> ok.
 cancel_timer(undefined) -> ok;
 cancel_timer(Ref) -> _ = erlang:cancel_timer(Ref), ok.
 
+-spec cancel_monitor(reference() | undefined) -> ok.
+cancel_monitor(undefined) -> ok;
+cancel_monitor(Ref) -> _ = erlang:demonitor(Ref, [flush]), ok.
+
 -spec cancel_and_remove(pid(), map()) -> map().
 cancel_and_remove(Pid, State) ->
     case maps:find(Pid, State) of
-        {ok, #check{timer = T}} ->
+        {ok, #check{timer = T, monitor = MRef}} ->
             cancel_timer(T),
+            cancel_monitor(MRef),
             maps:remove(Pid, State);
         error ->
             State

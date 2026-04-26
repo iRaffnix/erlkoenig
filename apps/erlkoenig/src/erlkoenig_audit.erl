@@ -33,6 +33,8 @@ to support external log rotation (logrotate copytruncate).
 
 -behaviour(gen_server).
 
+-include("erlkoenig_error.hrl").
+
 %% API
 -export([start_link/0, log/1, query/1,
          verify_chain/1, verify_chain/2,
@@ -85,7 +87,7 @@ Options:
   type  => atom() (filter by event type)
   limit => pos_integer() (max results, default 100)
 """.
--spec query(map()) -> {ok, [map()]} | {error, term()}.
+-spec query(map()) -> {ok, [map()]} | {error, erlkoenig_error:error_map()}.
 query(Opts) when is_map(Opts) ->
     gen_server:call(?MODULE, {query, Opts}, 30_000).
 
@@ -106,13 +108,14 @@ Walks the file, recomputes `this_hash` for every line, checks that
 each event's `prev_hash` matches the previous event's `this_hash`,
 and that the genesis event has the all-zero predecessor.
 
-Returns `{ok, EventCount}` on success or `{error, {chain_break,
-LineNumber, Reason}}` on failure.
+Returns `{ok, EventCount}` on success or `{error, ErrorMap}` on
+failure. Chain and signature failures carry stable public codes such
+as `EK_AUDIT_CHAIN_BROKEN` and `EK_AUDIT_SIGNATURE_INVALID`.
 
 Does NOT verify Ed25519 signatures. Use `verify_chain/2` with the
 node's audit public key to additionally check signatures.
 """.
--spec verify_chain(string()) -> {ok, non_neg_integer()} | {error, term()}.
+-spec verify_chain(string()) -> {ok, non_neg_integer()} | {error, erlkoenig_error:error_map()}.
 verify_chain(Path) ->
     verify_chain(Path, undefined).
 
@@ -122,44 +125,23 @@ Verify hash chain integrity AND Ed25519 signatures.
 `PubKey` is the raw 32-byte Ed25519 public key. If `undefined`,
 behaves identically to `verify_chain/1` (chain only).
 
-Returns `{ok, EventCount}` on success or `{error, {chain_break |
-signature_invalid, LineNumber, Reason}}`.
+Returns `{ok, EventCount}` on success or `{error, ErrorMap}`.
+Tamper-evidence failures use stable public codes and include the
+line number and verifier reason in the evidence map.
 """.
 -spec verify_chain(string(), binary() | undefined) ->
-    {ok, non_neg_integer()} | {error, term()}.
+    {ok, non_neg_integer()} | {error, erlkoenig_error:error_map()}.
 verify_chain(Path, PubKey) ->
-    case file:read_file(Path) of
+    RawResult = case file:read_file(Path) of
         {ok, Bin} ->
             Lines = [L || L <- binary:split(Bin, <<"\n">>, [global]),
                           L =/= <<>>],
             Result = verify_lines(Lines, ?GENESIS_HASH, PubKey, 1, 0),
-            case Result of
-                {error, {What, Line, Reason}}
-                  when What =:= chain_break;
-                       What =:= signature_invalid ->
-                    %% Surface to AMQP — security-relevant: external
-                    %% verifier (or future periodic self-check) just
-                    %% found tampering. Page-on-this material — the
-                    %% one event we MUST NOT silently drop. Log at
-                    %% `critical' if notify itself fails so the
-                    %% operator at least sees the tampering finding
-                    %% in local logs when the event bus is down.
-                    try erlkoenig_events:notify(
-                          {audit_chain_break,
-                           #{path => Path, line => Line,
-                             reason => {What, Reason}}})
-                    catch NClass:NReason ->
-                        logger:critical(
-                          "[audit] tampering notification lost: "
-                          "~p:~p; path=~p line=~p reason=~p",
-                          [NClass, NReason, Path, Line,
-                           {What, Reason}])
-                    end;
-                _ -> ok
-            end,
             Result;
-        {error, _} = Err -> Err
-    end.
+        {error, Reason} -> {error, {read_failed, Reason}}
+    end,
+    maybe_notify_verify_failure(Path, RawResult),
+    wrap_verify_chain_result(Path, RawResult).
 
 -doc """
 Return the running gen_server's audit signing public key (raw 32
@@ -184,9 +166,9 @@ and references it via `prev_hash`, so the chain crosses the file
 boundary without a break.
 
 Returns `{ok, #{sealed_path, event_count, byte_count, anchor}}` on
-success, or `{error, Reason}`.
+success, or `{error, ErrorMap}` with `EK_AUDIT_SEAL_FAILED`.
 """.
--spec seal_day() -> {ok, map()} | {error, term()}.
+-spec seal_day() -> {ok, map()} | {error, erlkoenig_error:error_map()}.
 seal_day() ->
     gen_server:call(?MODULE, seal_day, 60_000).
 
@@ -197,13 +179,16 @@ HMAC over the preceding `byte_count` bytes. `HmacKey` is the same
 32-byte symmetric key that produced the seal.
 
 Returns `{ok, #{event_count, byte_count, anchor}}` on success or
-`{error, Reason}`.
+`{error, ErrorMap}`. HMAC mismatches use
+`EK_AUDIT_SEAL_HMAC_MISMATCH`.
 """.
--spec verify_seal(string(), binary()) -> {ok, map()} | {error, term()}.
+-spec verify_seal(string(), binary()) -> {ok, map()} | {error, erlkoenig_error:error_map()}.
 verify_seal(Path, HmacKey) when is_binary(HmacKey), byte_size(HmacKey) =:= 32 ->
     case file:read_file(Path) of
-        {ok, Bin} -> do_verify_seal(Bin, HmacKey);
-        {error, _} = Err -> Err
+        {ok, Bin} -> wrap_verify_seal_result(Path, do_verify_seal(Bin, HmacKey));
+        {error, Reason} -> audit_error(read_failed,
+                                       "audit sealed file could not be read",
+                                       #{path => Path, reason => Reason})
     end.
 
 %%%===================================================================
@@ -256,12 +241,16 @@ handle_call(seal_day, _From, State) ->
         %% because the seal line is already written to disk and the
         %% chain must reflect that. See the rename_failed / reopen_failed
         %% branches for the rationale.
-        {error, Reason, NewState} -> {reply, {error, Reason}, NewState};
-        {error, _} = Err -> {reply, Err, State}
+        {error, Reason, NewState} ->
+            {reply, audit_seal_error(State#state.path, Reason), NewState};
+        {error, Reason} ->
+            {reply, audit_seal_error(State#state.path, Reason), State}
     end;
 
 handle_call(_Request, _From, State) ->
-    {reply, {error, unknown_call}, State}.
+    {reply, audit_error(unknown_call,
+                        "unknown audit gen_server call",
+                        #{}), State}.
 
 handle_cast({log, Event}, #state{fd = undefined, path = Path} = State) ->
     %% Try to re-open the log file (maybe dir was created since startup)
@@ -488,6 +477,8 @@ escape_str(B) ->
 
 -spec encode_result(term()) -> binary() | null.
 encode_result(ok) -> <<"ok">>;
+encode_result({error, #{code := Code}}) ->
+    <<"error:", (atom_to_binary(Code))/binary>>;
 encode_result({error, Reason}) ->
     <<"error:", (to_bin(Reason))/binary>>;
 encode_result(undefined) -> null;
@@ -708,6 +699,86 @@ append_line(Path, Data) ->
         {error, _} = Err -> Err
     end.
 
+%% --- Public error wrapping ---
+
+maybe_notify_verify_failure(Path, {error, {What, Line, Reason}})
+  when What =:= chain_break; What =:= signature_invalid ->
+    %% Surface to AMQP — security-relevant: external verifier (or
+    %% future periodic self-check) just found tampering. Page-on-this
+    %% material. Log at `critical' if notify itself fails so the
+    %% operator still sees the tampering finding locally.
+    Code = case What of
+        chain_break -> erlkoenig_error:code(audit, chain_broken);
+        signature_invalid -> erlkoenig_error:code(audit, signature_invalid)
+    end,
+    Evidence = #{path => Path, line => Line, reason => Reason, code => Code},
+    try erlkoenig_events:notify({audit_chain_break, Evidence})
+    catch NClass:NReason ->
+        logger:critical(
+          "[audit] tampering notification lost: "
+          "~p:~p; path=~p line=~p reason=~p code=~p",
+          [NClass, NReason, Path, Line, {What, Reason}, Code])
+    end;
+maybe_notify_verify_failure(_Path, _Result) ->
+    ok.
+
+wrap_verify_chain_result(_Path, {ok, _} = Ok) ->
+    Ok;
+wrap_verify_chain_result(Path, {error, {chain_break, Line, Reason}}) ->
+    audit_error_s(critical, chain_broken,
+                  "audit hash chain verification failed",
+                  #{path => Path, line => Line, reason => Reason});
+wrap_verify_chain_result(Path, {error, {signature_invalid, Line, Reason}}) ->
+    audit_error_s(critical, signature_invalid,
+                  "audit event signature verification failed",
+                  #{path => Path, line => Line, reason => Reason});
+wrap_verify_chain_result(Path, {error, {read_failed, Reason}}) ->
+    audit_error(read_failed,
+                "audit log could not be read",
+                #{path => Path, reason => Reason}).
+
+wrap_verify_seal_result(_Path, {ok, _} = Ok) ->
+    Ok;
+wrap_verify_seal_result(Path, {error, seal_hmac_mismatch}) ->
+    audit_error_s(critical, seal_hmac_mismatch,
+                  "audit sealed file HMAC did not match",
+                  #{path => Path});
+wrap_verify_seal_result(Path, {error, Reason}) ->
+    audit_error(seal_invalid,
+                "audit sealed file verification failed",
+                #{path => Path, reason => Reason}).
+
+audit_seal_error(Path, no_hmac_key) ->
+    audit_error(seal_failed,
+                "audit day seal failed",
+                #{path => Path, reason => no_hmac_key});
+audit_seal_error(Path, no_log_file) ->
+    audit_error(seal_failed,
+                "audit day seal failed",
+                #{path => Path, reason => no_log_file});
+audit_seal_error(Path, Reason) ->
+    audit_error(seal_failed,
+                "audit day seal failed",
+                #{path => Path, reason => Reason}).
+
+audit_error(read_failed, Context, Data) ->
+    {error, ?EK_ERROR(audit, read_failed, Context, Data)};
+audit_error(seal_failed, Context, Data) ->
+    {error, ?EK_ERROR(audit, seal_failed, Context, Data)};
+audit_error(seal_invalid, Context, Data) ->
+    {error, ?EK_ERROR(audit, seal_invalid, Context, Data)};
+audit_error(query_failed, Context, Data) ->
+    {error, ?EK_ERROR(audit, query_failed, Context, Data)};
+audit_error(unknown_call, Context, Data) ->
+    {error, ?EK_ERROR(audit, unknown_call, Context, Data)}.
+
+audit_error_s(critical, chain_broken, Context, Data) ->
+    {error, ?EK_ERROR_S(critical, audit, chain_broken, Context, Data)};
+audit_error_s(critical, signature_invalid, Context, Data) ->
+    {error, ?EK_ERROR_S(critical, audit, signature_invalid, Context, Data)};
+audit_error_s(critical, seal_hmac_mismatch, Context, Data) ->
+    {error, ?EK_ERROR_S(critical, audit, seal_hmac_mismatch, Context, Data)}.
+
 %% --- Seal verification ---
 
 do_verify_seal(Bin, HmacKey) ->
@@ -883,7 +954,9 @@ do_query(Path, Opts) ->
         {error, enoent} ->
             {ok, []};
         {error, Reason} ->
-            {error, Reason}
+            audit_error(query_failed,
+                        "audit log query failed",
+                        #{path => Path, reason => Reason})
     end.
 
 %% Render a unix-seconds timestamp in the same ISO-8601 format used by

@@ -6,6 +6,7 @@
 
 -module(erlkoenig_threat_mesh_tests).
 -include_lib("eunit/include/eunit.hrl").
+-include("erlkoenig_error_test.hrl").
 
 %% ===================================================================
 %% Test Setup
@@ -197,3 +198,32 @@ reconfigure_leaves_non_whitelisted_bans_alone_test() ->
     ?assert(maps:is_key(Banned, BansAfter)),
     ?assertNot(maps:is_key(Whitelisted, BansAfter)),
     stop_mesh(Pid).
+
+kernel_ban_rejected_wraps_nft_error_test() ->
+    setup(),
+    NftErr = #{code => 'EK_NFT_BATCH_REJECTED',
+               data => #{errno => -22, errno_name => einval}},
+    Result = {error, erlkoenig_threat_mesh:kernel_ban_error(
+                       <<60, 61, 62, 63>>, port_scan, NftErr)},
+    ?assertErrorCode('EK_THREAT_KERNEL_BAN_REJECTED', Result),
+    {error, #{data := Data}} = Result,
+    ?assertMatch(#{nft_code := 'EK_NFT_BATCH_REJECTED',
+                   reason := port_scan}, Data).
+
+kernel_ban_timeout_gets_specific_code_test() ->
+    setup(),
+    NftErr = #{code => 'EK_NFT_TIMEOUT', data => #{pending_acks => 1}},
+    Result = {error, erlkoenig_threat_mesh:kernel_ban_error(
+                       <<70, 71, 72, 73>>, flood, NftErr)},
+    ?assertErrorCode('EK_THREAT_KERNEL_BAN_TIMEOUT', Result).
+
+kernel_unban_timeout_gets_specific_code_test() ->
+    setup(),
+    NftErr = #{code => 'EK_NFT_TIMEOUT', data => #{pending_acks => 1}},
+    Result = {error, erlkoenig_threat_mesh:kernel_unban_error(
+                       <<80, 81, 82, 83>>, NftErr)},
+    ?assertErrorCode('EK_THREAT_KERNEL_UNBAN_TIMEOUT', Result).
+
+normalize_whitelist_invalid_entry_is_ignored_test() ->
+    setup(),
+    ?assertEqual([], erlkoenig_threat_mesh:normalize_whitelist(["not-an-ip"])).

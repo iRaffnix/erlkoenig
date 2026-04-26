@@ -27,6 +27,7 @@ The state machine orchestrates both.
 """.
 
 -include("erlkoenig_ct_state.hrl").
+-include("erlkoenig_error.hrl").
 
 -export([
     do_container_setup/1,
@@ -79,8 +80,11 @@ do_container_setup(#ct_data{id = Id, os_pid = OsPid,
             erlkoenig_ct_net:do_container_net_setup(Data2);
         {error, FuseReason} ->
             _ = erlkoenig_cgroup:destroy(Id),
+            Err = ?EK_ERROR(ct, rootfs_setup_failed,
+                            "container rootfs setup failed",
+                            #{reason => FuseReason}),
             {next_state, failed,
-             Data#ct_data{error_reason = {rootfs_setup_failed, FuseReason}}}
+             Data#ct_data{error_reason = Err}}
     end.
 
 -spec destroy_cgroup(#ct_data{}) -> ok | {error, term()}.

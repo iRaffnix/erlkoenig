@@ -43,6 +43,8 @@ Two touch points in `erlkoenig_ct`:
 
 -behaviour(gen_server).
 
+-include("erlkoenig_error.hrl").
+
 -export([start_link/0,
          check/1,
          record_crash/1,
@@ -95,9 +97,16 @@ check(BinaryPath) ->
         {ok, Hash} ->
             case is_quarantined(Hash) of
                 false         -> ok;
-                {true, Since} -> {error, {quarantined, Hash, Since}}
+                {true, Since} ->
+                    quarantine_error(binary_quarantined,
+                                     #{path => path_binary(BinaryPath),
+                                       hash => Hash, since => Since}),
+                    {error, {quarantined, Hash, Since}}
             end;
         {error, Reason} ->
+            quarantine_error(hash_failed,
+                             #{path => path_binary(BinaryPath),
+                               reason => Reason}),
             {error, {hash_failed, Reason}}
     end.
 
@@ -181,6 +190,9 @@ handle_cast({crash, BinaryPath}, State) ->
             logger:warning(
                 "quarantine: unattributable crash — path=~p reason=~p",
                 [BinaryPath, Reason]),
+            quarantine_error(unattributable_crash,
+                             #{path => path_binary(BinaryPath),
+                               reason => Reason}),
             {noreply, State}
     end;
 handle_cast(_, State) -> {noreply, State}.
@@ -228,6 +240,7 @@ do_quarantine(Hash, Reason, #state{quarantined = Q} = State) ->
             Now = erlang:system_time(millisecond),
             Entry = #{reason => Reason, since => Now},
             emit_event({binary_quarantined, Hash, Reason}),
+            quarantine_reason_error(Reason, Hash, Now),
             State#state{quarantined = Q#{Hash => Entry}}
     end.
 
@@ -235,3 +248,35 @@ emit_event(Event) ->
     try erlkoenig_events:notify(Event)
     catch _:_ -> ok
     end.
+
+quarantine_reason_error({crashloop, Count, WindowMs}, Hash, Since) ->
+    quarantine_error(crash_loop_detected,
+                     #{hash => Hash, crash_count => Count,
+                       window_ms => WindowMs, since => Since});
+quarantine_reason_error(Reason, Hash, Since) ->
+    quarantine_error(binary_quarantined,
+                     #{hash => Hash, reason => Reason, since => Since}).
+
+quarantine_error(binary_quarantined, Data) ->
+    erlkoenig_error:emit(
+      ?EK_ERROR(quarantine, binary_quarantined,
+                "binary is quarantined", Data));
+quarantine_error(hash_failed, Data) ->
+    erlkoenig_error:emit(
+      ?EK_ERROR(quarantine, hash_failed,
+                "binary hash could not be computed", Data));
+quarantine_error(crash_loop_detected, Data) ->
+    erlkoenig_error:emit(
+      ?EK_ERROR(quarantine, crash_loop_detected,
+                "binary entered crash-loop quarantine", Data));
+quarantine_error(unattributable_crash, Data) ->
+    erlkoenig_error:emit(
+      ?EK_ERROR(quarantine, unattributable_crash,
+                "container crash could not be attributed to a binary hash", Data)).
+
+path_binary(Path) when is_binary(Path) ->
+    Path;
+path_binary(Path) when is_atom(Path) ->
+    atom_to_binary(Path, utf8);
+path_binary(Path) ->
+    unicode:characters_to_binary(Path).

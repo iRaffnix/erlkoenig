@@ -1,5 +1,6 @@
 -module(nfnl_server_tests).
 -include_lib("eunit/include/eunit.hrl").
+-include("erlkoenig_error_test.hrl").
 
 %% --- next_seq ---
 
@@ -25,14 +26,18 @@ process_acks_first_error_kept_test() ->
     {Remaining, Result} = nfnl_server:process_acks(
         [{1, ok}, {2, {error, {-2, enoent}}}, {3, ok}], Expected, ok),
     ?assertEqual(#{}, Remaining),
-    ?assertEqual({error, {-2, enoent}}, Result).
+    ?assertErrorCode('EK_NFT_BATCH_REJECTED', Result),
+    {error, #{data := Data}} = Result,
+    ?assertMatch(#{errno := -2, errno_name := enoent, seq := 2}, Data).
 
 process_acks_second_error_ignored_test() ->
     Expected = #{1 => true, 2 => true},
     {Remaining, Result} = nfnl_server:process_acks(
         [{1, {error, {-2, enoent}}}, {2, {error, {-17, eexist}}}], Expected, ok),
     ?assertEqual(#{}, Remaining),
-    ?assertEqual({error, {-2, enoent}}, Result).
+    ?assertErrorCode('EK_NFT_BATCH_REJECTED', Result),
+    {error, #{data := Data}} = Result,
+    ?assertMatch(#{errno := -2, errno_name := enoent, seq := 1}, Data).
 
 process_acks_stale_seq_discarded_test() ->
     Expected = #{1 => true, 2 => true},
@@ -60,6 +65,46 @@ process_acks_preserves_existing_error_test() ->
         [{1, ok}], Expected, {error, previous}),
     ?assertEqual(#{}, Remaining),
     ?assertEqual({error, previous}, Result).
+
+%% --- query wrappers ---
+
+wrap_query_error_ok_passthrough_test() ->
+    ?assertEqual(
+        {ok, #{packets => 1, bytes => 2}},
+        nfnl_server:wrap_query_error(
+            counter_query_failed,
+            {ok, #{packets => 1, bytes => 2}},
+            #{})).
+
+wrap_query_error_counter_code_test() ->
+    Result = nfnl_server:wrap_query_error(
+        counter_query_failed,
+        {error, invalid_response},
+        #{family => 1, table => <<"fw">>, name => <<"ssh">>, seq => 42}),
+    ?assertErrorCode('EK_NFT_COUNTER_QUERY_FAILED', Result),
+    {error, #{data := Data}} = Result,
+    ?assertMatch(#{reason := invalid_response, seq := 42}, Data).
+
+wrap_query_error_set_elems_code_test() ->
+    Result = nfnl_server:wrap_query_error(
+        list_set_elems_failed,
+        {error, timeout},
+        #{family => 1, table => <<"fw">>, set => <<"block">>, seq => 43}),
+    ?assertErrorCode('EK_NFT_LIST_SET_ELEMS_FAILED', Result).
+
+wrap_query_error_chains_code_test() ->
+    Result = nfnl_server:wrap_query_error(
+        list_chains_failed,
+        {error, enoent},
+        #{family => 1, table => <<"fw">>, seq => 44}),
+    ?assertErrorCode('EK_NFT_LIST_CHAINS_FAILED', Result).
+
+wrap_query_error_ruleset_code_test() ->
+    Result = nfnl_server:wrap_query_error(
+        ruleset_query_failed,
+        {error, invalid_response},
+        #{family => 1, seq => 45}),
+    ?assertErrorCode('EK_NFT_RULESET_QUERY_FAILED', Result).
 
 %% --- Unified Seq: verify exports exist ---
 

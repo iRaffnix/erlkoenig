@@ -176,8 +176,101 @@ help_output_test() ->
     ?assert(string:find(Output, "ek:events") =/= nomatch).
 
 %% =================================================================
+%% ek.escript explain
+%% =================================================================
+
+escript_explain_plain_test() ->
+    {0, Output} = run_ek_escript(["explain", "EK_CT_SPAWN_TIMEOUT"]),
+    ?assert(string:find(Output, "EK_CT_SPAWN_TIMEOUT") =/= nomatch),
+    ?assert(string:find(Output, "component: ct") =/= nomatch),
+    ?assert(string:find(Output, "operator action:") =/= nomatch),
+    ?assert(string:find(Output, "evidence fields you will see:") =/= nomatch).
+
+escript_explain_accepts_code_without_prefix_test() ->
+    {0, Output} = run_ek_escript(["explain", "CT_SPAWN_TIMEOUT"]),
+    ?assert(string:find(Output, "EK_CT_SPAWN_TIMEOUT") =/= nomatch).
+
+escript_explain_json_test() ->
+    {0, Output} = run_ek_escript(["--format", "json", "explain", "EK_CT_SPAWN_TIMEOUT"]),
+    Json = json:decode(list_to_binary(Output)),
+    ?assertEqual(<<"EK_CT_SPAWN_TIMEOUT">>, maps:get(<<"code">>, Json)),
+    ?assertEqual(<<"ct">>, maps:get(<<"component">>, Json)).
+
+escript_explain_critical_includes_iron_rule_test() ->
+    {0, Output} = run_ek_escript(["explain", "EK_AUDIT_CHAIN_BROKEN"]),
+    ?assert(string:find(Output, "severity:  critical") =/= nomatch),
+    ?assert(string:find(Output, "iron rule:") =/= nomatch).
+
+escript_explain_list_test() ->
+    {0, Output} = run_ek_escript(["explain", "--list"]),
+    ?assert(string:find(Output, "EK_CT_SPAWN_TIMEOUT") =/= nomatch),
+    ?assert(string:find(Output, "EK_AUDIT_CHAIN_BROKEN") =/= nomatch),
+    ?assert(string:find(Output, "description") =/= nomatch).
+
+escript_explain_component_filter_test() ->
+    {0, Output} = run_ek_escript(["explain", "--component", "ct"]),
+    ?assert(string:find(Output, "EK_CT_SPAWN_TIMEOUT") =/= nomatch),
+    ?assertEqual(nomatch, string:find(Output, "EK_AUDIT_CHAIN_BROKEN")).
+
+escript_explain_list_json_test() ->
+    {0, Output} = run_ek_escript(["--format", "json", "explain", "--component", "audit"]),
+    Rows = json:decode(list_to_binary(Output)),
+    ?assert(is_list(Rows)),
+    ?assert(lists:any(fun(#{<<"code">> := <<"EK_AUDIT_CHAIN_BROKEN">>}) -> true;
+                         (_) -> false
+                      end, Rows)),
+    ?assert(lists:all(fun(#{<<"component">> := <<"audit">>}) -> true;
+                         (_) -> false
+                      end, Rows)).
+
+escript_explain_unknown_code_fails_test() ->
+    {Status, Output} = run_ek_escript(["explain", "DOES_NOT_EXIST"]),
+    ?assertNotEqual(0, Status),
+    ?assert(string:find(Output, "unknown error code") =/= nomatch).
+
+escript_doctor_json_uses_catalog_codes_test() ->
+    {0, Output} = run_ek_escript(
+        ["--format", "json", "doctor"],
+        [{"ERLKOENIG_PROTOCOL_VECTORS", "/tmp/erlkoenig_missing_vectors"}]),
+    Rows = json:decode(list_to_binary(Output)),
+    ?assert(is_list(Rows)),
+    Protocol = lists:filter(
+        fun(#{<<"check">> := <<"protocol_vectors">>}) -> true;
+           (_) -> false
+        end, Rows),
+    ?assertMatch([_], Protocol),
+    [Row] = Protocol,
+    ?assertEqual(<<"warn">>, maps:get(<<"status">>, Row)),
+    ?assertEqual(<<"EK_HOST_PROTOCOL_VECTORS_MISSING">>, maps:get(<<"code">>, Row)),
+    ?assert(maps:is_key(<<"action">>, Row)),
+    ?assert(maps:is_key(<<"evidence">>, Row)).
+
+%% =================================================================
 %% IO capture helpers
 %% =================================================================
+
+run_ek_escript(Args) ->
+    run_ek_escript(Args, []).
+
+run_ek_escript(Args, Env) ->
+    Escript = os:find_executable("escript"),
+    ?assert(is_list(Escript)),
+    Script = filename:absname("dist/ek.escript"),
+    Port = open_port({spawn_executable, Escript},
+                     [binary, exit_status, stderr_to_stdout, use_stdio,
+                      {env, Env},
+                      {args, [Script | Args]}]),
+    collect_port(Port, []).
+
+collect_port(Port, Acc) ->
+    receive
+        {Port, {data, Data}} ->
+            collect_port(Port, [Data | Acc]);
+        {Port, {exit_status, Status}} ->
+            {Status, unicode:characters_to_list(lists:reverse(Acc))}
+    after 5000 ->
+        exit({ek_escript_timeout, Port})
+    end.
 
 io_capture_get(Pid) ->
     Ref = make_ref(),

@@ -46,6 +46,8 @@ netns. The C runtime is link-agnostic.
          teardown_container_net/1,
          teardown_container_veth/1]).
 
+-include("erlkoenig_error.hrl").
+
 %% setup_container_net/3 — allocate from default zone (legacy)
 %% setup_container_net/4 — (Port, Id, OsPid, Zone) allocate from zone
 %%                       — (Port, Id, OsPid, Ip)   explicit IP, default zone
@@ -84,7 +86,9 @@ setup_container_net(Port, ContainerId, OsPid) ->
     {ok, map()} | {error, term()}.
 setup_container_net(Port, ContainerId, OsPid, ZoneName) when is_atom(ZoneName) ->
     case erlkoenig_ip_pool:allocate(ZoneName) of
-        {error, _} = Err -> Err;
+        {error, Reason} ->
+            {error, net_error(ip_alloc_failed,
+                              #{zone => ZoneName, reason => Reason})};
         {ok, Ip} ->
             %% If the subsequent setup fails, the IP we just allocated
             %% would otherwise stay in the pool's `used` set forever
@@ -136,9 +140,9 @@ setup_container_net(Port, ContainerId, OsPid, Ip, ZoneName, Name) ->
                host_veth => maps:get(host_veth, AttachInfo, undefined),
                container_veth => maps:get(peer_veth, AttachInfo, IfName)}}
     else
-        {error, _} = Err ->
+        {error, Reason} ->
             _ = erlkoenig_zone_link:detach_container(LinkRef, #{slave => IfName}),
-            Err
+            {error, setup_error(Reason, ZoneName, IfName, Ip)}
     end.
 
 -doc "Tear down a container's network (link + IP release).".
@@ -183,14 +187,34 @@ do_netns_setup({socket, Sock}, IfName, Ip, Gateway, Prefixlen) ->
                 {ok, reply_ok, _} ->
                     ok;
                 {ok, reply_error, #{code := Code, message := Msg}} ->
-                    {error, {net_setup_failed, Code, Msg}};
+                    {error, net_error(netns_setup_failed,
+                                      #{reason => {net_setup_failed, Code, Msg},
+                                        ifname => IfName,
+                                        ip => Ip,
+                                        gateway => Gateway,
+                                        prefixlen => Prefixlen})};
                 Other ->
-                    {error, {unexpected_reply, Other}}
+                    {error, net_error(netns_setup_failed,
+                                      #{reason => {unexpected_reply, Other},
+                                        ifname => IfName,
+                                        ip => Ip,
+                                        gateway => Gateway,
+                                        prefixlen => Prefixlen})}
             end;
         {error, timeout} ->
-            {error, net_setup_timeout};
+            {error, net_error(netns_setup_timeout,
+                              #{ifname => IfName,
+                                ip => Ip,
+                                gateway => Gateway,
+                                prefixlen => Prefixlen,
+                                timeout_ms => 10000})};
         {error, Reason} ->
-            {error, {net_setup_socket_error, Reason}}
+            {error, net_error(netns_setup_socket_error,
+                              #{reason => Reason,
+                                ifname => IfName,
+                                ip => Ip,
+                                gateway => Gateway,
+                                prefixlen => Prefixlen})}
     end;
 do_netns_setup(Port, IfName, Ip, Gateway, Prefixlen) when is_port(Port) ->
     Cmd = erlkoenig_proto:encode_cmd_net_setup(IfName, Ip, Prefixlen, Gateway),
@@ -201,13 +225,58 @@ do_netns_setup(Port, IfName, Ip, Gateway, Prefixlen) when is_port(Port) ->
                 {ok, reply_ok, _} ->
                     ok;
                 {ok, reply_error, #{code := Code, message := Msg}} ->
-                    {error, {net_setup_failed, Code, Msg}};
+                    {error, net_error(netns_setup_failed,
+                                      #{reason => {net_setup_failed, Code, Msg},
+                                        ifname => IfName,
+                                        ip => Ip,
+                                        gateway => Gateway,
+                                        prefixlen => Prefixlen})};
                 Other ->
-                    {error, {unexpected_reply, Other}}
+                    {error, net_error(netns_setup_failed,
+                                      #{reason => {unexpected_reply, Other},
+                                        ifname => IfName,
+                                        ip => Ip,
+                                        gateway => Gateway,
+                                        prefixlen => Prefixlen})}
             end
     after 10000 ->
-        {error, net_setup_timeout}
+        {error, net_error(netns_setup_timeout,
+                          #{ifname => IfName,
+                            ip => Ip,
+                            gateway => Gateway,
+                            prefixlen => Prefixlen,
+                            timeout_ms => 10000})}
     end.
+
+setup_error(#{code := _} = Err, _ZoneName, _IfName, _Ip) ->
+    Err;
+setup_error(Reason, ZoneName, IfName, Ip) ->
+    net_error(attach_failed,
+              #{zone => ZoneName,
+                ifname => IfName,
+                ip => Ip,
+                reason => Reason}).
+
+net_error(ip_alloc_failed, Evidence) ->
+    ?EK_ERROR(network, ip_alloc_failed,
+              "container IP allocation failed",
+              Evidence);
+net_error(attach_failed, Evidence) ->
+    ?EK_ERROR(network, attach_failed,
+              "container network link attach failed",
+              Evidence);
+net_error(netns_setup_failed, Evidence) ->
+    ?EK_ERROR(network, netns_setup_failed,
+              "runtime rejected container network namespace setup",
+              Evidence);
+net_error(netns_setup_timeout, Evidence) ->
+    ?EK_ERROR(network, netns_setup_timeout,
+              "container network namespace setup timed out",
+              Evidence);
+net_error(netns_setup_socket_error, Evidence) ->
+    ?EK_ERROR(network, netns_setup_socket_error,
+              "container network namespace setup socket failed",
+              Evidence).
 
 %%%===================================================================
 %%% Internal: Helpers

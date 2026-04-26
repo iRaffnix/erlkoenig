@@ -105,6 +105,43 @@ make tag VERSION=X.Y.Z  # Bump + tag (main only)
 make clean         # Remove all build artifacts
 ```
 
+## Error Handling Contract
+
+Structured operator diagnostics are keyed by stable `EK_*` error
+codes. New production error producers must use `?EK_ERROR(...)`,
+`?EK_ERROR_S(...)`, or `erlkoenig_error:make(...)` with literal
+component and reason atoms, and every generated code must be present
+in `apps/erlkoenig/priv/error_catalog.term`. `make error-catalog-check`
+enforces this source-to-catalog contract.
+
+Choose the return-shape by boundary:
+
+- Internal Erlkoenig OTP boundaries may cut over to `{error, ErrorMap}`.
+  Callers should match on the stable code, for example
+  `{error, #{code := 'EK_RUNTIME_NOT_CONNECTED'}}`, not on free-form
+  `reason` data. This is appropriate for modules only called by other
+  erlkoenig modules, such as `erlkoenig_ct_rt:send_to_rt/2`.
+
+- Public APIs should preserve their existing return shape unless a major
+  version explicitly breaks it. Emit the structured error for
+  observability, but keep legacy tuples for callers. For example,
+  `erlkoenig_config:parse/1` emits `EK_CONFIG_PARSE_FAILED` while still
+  returning `{error, {invalid_format, Path}}` or
+  `{error, {read_failed, Path, Reason}}`.
+
+During migrations, consumers should accept both legacy and structured
+forms until a grep proves the legacy producers are gone. Add the
+`{error, #{code := 'EK_*'}}` clause first, keep the old tuple clauses
+beside it, and remove the legacy clauses only in a later cleanup. For
+example, retry loops may need to handle both
+`{error, #{code := 'EK_NETWORK_NETNS_SETUP_FAILED'}}` and older
+`{error, {net_setup_failed, -98, _}}` shapes while adjacent modules are
+being migrated.
+
+When the boundary is unclear, treat it as public. It is cheaper to add
+structured emit first and change the API later than to break external
+scripts or OTP applications by accident.
+
 ## Setting up `gh` CLI
 
 The `gh` CLI is needed for downloading CI artifacts and creating PRs.

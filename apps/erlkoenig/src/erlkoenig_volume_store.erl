@@ -58,6 +58,7 @@ store is authoritative.
          terminate/2, code_change/3]).
 
 -include_lib("kernel/include/file.hrl").
+-include("erlkoenig_error.hrl").
 
 -define(SERVER, ?MODULE).
 -define(TABLE, erlkoenig_volumes).
@@ -245,6 +246,9 @@ init([]) ->
         {ok, ?TABLE} ->
             {ok, #{}};
         {error, Reason} ->
+            volume_store_error(index_open_failed,
+                               #{path => iolist_to_binary(IndexFile),
+                                 reason => Reason}),
             {stop, {dets_open_failed, Reason}}
     end.
 
@@ -321,7 +325,12 @@ do_ensure(#{container := Container, persist := Persist,
                     ok = dets:insert(?TABLE, {Uuid, Record}),
                     _ = maybe_ensure_by_name_symlink(Container, Persist, Uuid),
                     {ok, Record};
-                {error, _} = Err ->
+                {error, Reason} = Err ->
+                    volume_store_error(backing_create_failed,
+                                       #{uuid => Uuid, host_path => HostPath,
+                                         container => Container,
+                                         persist => Persist,
+                                         reason => Reason}),
                     Err
             end
     end.
@@ -417,9 +426,16 @@ do_destroy(Uuid) ->
                     logger:error("volume_store: rm_rf ~s (uuid=~s) "
                                  "failed: ~p — metadata kept for retry",
                                  [HostPath, Uuid, Reason]),
+                    volume_store_error(destroy_rm_rf_failed,
+                                       #{uuid => Uuid, host_path => HostPath,
+                                         container => Container,
+                                         persist => Persist,
+                                         reason => Reason}),
                     {error, {rm_rf_failed, Reason}}
             end;
         [] ->
+            volume_store_error(volume_not_found, #{uuid => Uuid,
+                                                  operation => destroy}),
             {error, not_found}
     end.
 
@@ -478,6 +494,10 @@ do_cleanup_ephemeral(Container) ->
                                  "for ~s: destroy ~s failed: ~p "
                                  "(volume retained in store)",
                                  [Container, Uuid, Reason]),
+                    volume_store_error(cleanup_ephemeral_partial_failed,
+                                       #{container => Container,
+                                         uuid => Uuid,
+                                         reason => Reason}),
                     Acc
             end
         end, [], Targets),
@@ -542,6 +562,10 @@ chown_and_mode(Path, Uid, Gid) ->
             %% usable. If writes fail later, that's caught elsewhere.
             logger:warning("volume_store: chown ~s to ~p:~p failed: ~p",
                           [Path, Uid, Gid, Reason]),
+            volume_store_error(ownership_reconcile_failed,
+                               #{path => iolist_to_binary(Path),
+                                 uid => Uid, gid => Gid,
+                                 reason => Reason}),
             ok
     end.
 
@@ -575,6 +599,9 @@ maybe_ensure_by_name_symlink(Container, Persist, Uuid) ->
             logger:error(
                 "volume_store: rejecting by-name symlink for unsafe "
                 "container name: ~p", [Container]),
+            volume_store_error(by_name_path_invalid,
+                               #{container => Container,
+                                 persist => Persist}),
             {error, {invalid_container_name, Container}}
     end.
 
@@ -684,6 +711,9 @@ run_xfs_quota(Cmd, Tag) ->
                 Msg ->
                     logger:warning("volume_store: xfs_quota ~p failed: ~s",
                                    [Tag, Msg]),
+                    volume_store_error(quota_apply_failed,
+                                       #{tag => Tag,
+                                         message => unicode:characters_to_binary(Msg)}),
                     ok
             end
     end.
@@ -713,3 +743,36 @@ do_check_xfs_quota() ->
         _ ->
             false
     end.
+
+volume_store_error(index_open_failed, Data) ->
+    erlkoenig_error:emit(
+      ?EK_ERROR(volume, index_open_failed,
+                "volume metadata index could not be opened", Data));
+volume_store_error(backing_create_failed, Data) ->
+    erlkoenig_error:emit(
+      ?EK_ERROR(volume, backing_create_failed,
+                "volume backing directory could not be created", Data));
+volume_store_error(destroy_rm_rf_failed, Data) ->
+    erlkoenig_error:emit(
+      ?EK_ERROR(volume, destroy_rm_rf_failed,
+                "volume destroy could not remove backing directory", Data));
+volume_store_error(cleanup_ephemeral_partial_failed, Data) ->
+    erlkoenig_error:emit(
+      ?EK_ERROR(volume, cleanup_ephemeral_partial_failed,
+                "ephemeral volume cleanup partially failed", Data));
+volume_store_error(volume_not_found, Data) ->
+    erlkoenig_error:emit(
+      ?EK_ERROR(volume, volume_not_found,
+                "volume metadata entry was not found", Data));
+volume_store_error(ownership_reconcile_failed, Data) ->
+    erlkoenig_error:emit(
+      ?EK_ERROR(volume, ownership_reconcile_failed,
+                "volume ownership reconciliation failed", Data));
+volume_store_error(by_name_path_invalid, Data) ->
+    erlkoenig_error:emit(
+      ?EK_ERROR(volume, by_name_path_invalid,
+                "volume by-name symlink path is invalid", Data));
+volume_store_error(quota_apply_failed, Data) ->
+    erlkoenig_error:emit(
+      ?EK_ERROR(volume, quota_apply_failed,
+                "volume quota command failed", Data)).

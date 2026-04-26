@@ -31,7 +31,7 @@
 #   make clean        — Alles aufraeumen
 
 .PHONY: all check erl test dialyzer integration release \
-        dsl dsl-escript test-dsl docs go-demos \
+        dsl dsl-escript test-dsl docs docs-erlang docs-error-codes go-demos \
         fmt fmt-check xref lint error-catalog-check \
         install uninstall fetch-artifacts \
         tag clean clean-erl clean-dsl
@@ -113,6 +113,23 @@ dsl-escript: dsl
 
 docs: dsl
 	cd dsl && mix docs
+
+# Erlang-side ExDoc: HTML reference for all OTP modules + extras
+# (README, QUICKSTART, ERROR_CODES, CONTRIBUTING). Always rebuild
+# the catalog markdown first so it stays in sync with the live
+# error_catalog.term.
+docs-erlang: docs-error-codes erl
+	rebar3 ex_doc
+
+# Render priv/error_catalog.term as docs/ERROR_CODES.md. Idempotent;
+# stays in sync with the live catalog because it is regenerated on
+# every docs-erlang invocation.
+docs-error-codes: docs/ERROR_CODES.md
+
+docs/ERROR_CODES.md: apps/erlkoenig/priv/error_catalog.term tools/render-error-catalog.escript
+	@mkdir -p docs
+	escript tools/render-error-catalog.escript > $@
+	@echo "  generated: $@ ($$(wc -l < $@) lines)"
 
 test-dsl:
 	cd dsl && mix test

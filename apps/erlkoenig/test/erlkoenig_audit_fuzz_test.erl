@@ -4,8 +4,8 @@
 %%% The audit log is tamper-evident via a SHA-256 hash chain + optional
 %%% Ed25519 signatures.  A malformed log line (corruption, partial
 %%% write, attacker injection) must:
-%%%   1. NEVER crash the verifier — it must return {error, {chain_break,
-%%%      LineNo, Reason}} cleanly
+%%%   1. NEVER crash the verifier — it must return {error, ErrorMap}
+%%%      with an audit code cleanly
 %%%   2. NEVER succeed when the chain is actually broken
 %%%
 %%% Targets:
@@ -158,8 +158,8 @@ prop_chain_mutation_detected() ->
             _ = file:delete(Path),
 
             case Result of
-                {error, {chain_break, _L, _R}} -> true;
-                {error, {signature_invalid, _, _}} -> true;
+                {error, #{code := 'EK_AUDIT_CHAIN_BROKEN'}} -> true;
+                {error, #{code := 'EK_AUDIT_SIGNATURE_INVALID'}} -> true;
                 {ok, _} ->
                     io:format(user,
                               "MUTATION NOT DETECTED at line ~p of ~p~n"

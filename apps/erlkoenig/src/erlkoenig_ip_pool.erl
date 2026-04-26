@@ -224,7 +224,8 @@ handle_cast({release, {A, B, C, D}},
     Abs = (A bsl 24) bor (B bsl 16) bor (C bsl 8) bor D,
     AlreadyKnown = lists:member(Abs, Free)
                    orelse lists:keymember(Abs, 1, Cooldown),
-    case Abs >= First andalso Abs =< Last andalso not AlreadyKnown of
+    WasHandedOut = Abs >= First andalso Abs < S#state.next,
+    case WasHandedOut andalso Abs =< Last andalso not AlreadyKnown of
         true ->
             Eligible = erlang:monotonic_time(millisecond) + ?IP_COOLDOWN_MS,
             {noreply, S#state{cooldown = [{Abs, Eligible} | Cooldown]}};

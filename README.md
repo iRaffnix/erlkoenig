@@ -99,6 +99,11 @@ ek config load /opt/stack.term
 
 ## Install
 
+Erlkoenig targets Linux hosts. The installer aims to be distro-agnostic
+across systemd Linux distributions, but the runtime depends on Linux kernel
+features such as namespaces, cgroups v2, capabilities, seccomp, Landlock, and
+nftables. macOS and BSD are not supported runtime targets.
+
 ```bash
 # From GitHub release (production):
 sudo sh install.sh --version v0.8.0
@@ -115,7 +120,22 @@ sudo make install          # nach /opt/erlkoenig
 sudo systemctl start erlkoenig
 ```
 
-Requires: Linux 6.x, Erlang/OTP 28+, Elixir 1.18+, musl-gcc (für C-Runtime), nftables, cgroups v2.
+Release installs bundle ERTS, so target hosts do not need a system Erlang
+installation. Source builds require Erlang/OTP 28+, Elixir 1.18+, rebar3,
+cmake, and musl-gcc.
+
+Requires on target hosts: Linux 6.x, nftables, cgroups v2, file capabilities,
+and systemd for managed service installation.
+
+Manual installer smoke baseline for a fresh VM/LXC:
+
+```bash
+gh run download <run-id> -D /tmp/erlkoenig-artifacts
+sudo sh tests/install/test-install-smoke.sh --artifacts /tmp/erlkoenig-artifacts
+```
+
+Run this before and after installer changes. It installs via `install.sh
+--local`, restarts `erlkoenig.service`, then checks `ek node ping` and `ek ps`.
 
 ## Build
 

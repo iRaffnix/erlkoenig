@@ -6,7 +6,9 @@
 #
 # Cookie resolution order:
 #   1. RELX_COOKIE environment variable (explicit, e.g. from systemd)
-#   2. Cookie file at $RELEASE_ROOT/cookie (default)
+#   2. ERLKOENIG_COOKIE_FILE
+#   3. /etc/erlkoenig/cookie
+#   4. ~/.config/erlkoenig/cookie
 
 set -e
 
@@ -16,17 +18,34 @@ RELEASE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 
 # ── Cookie ──────────────────────────────────────────────────────────
 
+resolve_cookie_file() {
+    if [ -n "${ERLKOENIG_COOKIE_FILE:-}" ]; then
+        echo "$ERLKOENIG_COOKIE_FILE"
+        return 0
+    fi
+    if [ -f /etc/erlkoenig/cookie ]; then
+        echo /etc/erlkoenig/cookie
+        return 0
+    fi
+    if [ -n "${HOME:-}" ] && [ -f "$HOME/.config/erlkoenig/cookie" ]; then
+        echo "$HOME/.config/erlkoenig/cookie"
+        return 0
+    fi
+    return 1
+}
+
 if [ -z "$RELX_COOKIE" ]; then
-    COOKIE_FILE="$RELEASE_ROOT/cookie"
-    if [ -f "$COOKIE_FILE" ] && [ -r "$COOKIE_FILE" ]; then
+    if COOKIE_FILE="$(resolve_cookie_file)" && [ -r "$COOKIE_FILE" ]; then
         RELX_COOKIE="$(cat "$COOKIE_FILE")"
         export RELX_COOKIE
+        echo "erlkoenig: using cookie file $COOKIE_FILE" >&2
     else
         echo "FATAL: No Erlang cookie found." >&2
         echo "" >&2
-        echo "  Generate one:" >&2
-        echo "    head -c 32 /dev/urandom | base64 | tr -d '/+=\\n' | head -c 32 > $RELEASE_ROOT/cookie" >&2
-        echo "    chmod 440 $RELEASE_ROOT/cookie" >&2
+        echo "  Resolution order:" >&2
+        echo "    ERLKOENIG_COOKIE_FILE" >&2
+        echo "    /etc/erlkoenig/cookie" >&2
+        echo "    ~/.config/erlkoenig/cookie" >&2
         exit 1
     fi
 fi

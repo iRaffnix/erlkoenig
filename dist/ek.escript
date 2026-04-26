@@ -3,9 +3,9 @@
 %%
 %% ek — operator CLI for an erlkoenig runtime.
 %%
-%% Speaks to the local node via Erlang distribution. Reads the cookie
-%% from /etc/erlkoenig/cookie by default; override with --cookie-file
-%% or the ERLKOENIG_COOKIE_FILE environment variable. The target node
+%% Speaks to the local node via Erlang distribution. Resolves the cookie
+%% from ERLKOENIG_COOKIE_FILE, /etc/erlkoenig/cookie, then
+%% ~/.config/erlkoenig/cookie; override with --cookie-file. The target node
 %% defaults to erlkoenig@$(hostname); override with --node.
 %%
 %% Subcommand grouping mirrors the book chapters: ct (containers),
@@ -977,17 +977,19 @@ default_target_node() ->
 default_cookie_file() ->
     case os:getenv("ERLKOENIG_COOKIE_FILE") of
         false ->
-            %% Try the canonical install paths in order. The relx
-            %% release writes its cookie to /opt/erlkoenig/cookie;
-            %% /etc/erlkoenig/cookie is an older convention some
-            %% installers used.
-            Candidates = ["/opt/erlkoenig/cookie",
-                          "/etc/erlkoenig/cookie"],
+            Candidates = ["/etc/erlkoenig/cookie",
+                          user_cookie_file()],
             case lists:filter(fun filelib:is_regular/1, Candidates) of
                 [P | _] -> P;
                 []      -> hd(Candidates)  %% best guess for error msg
             end;
         Path -> Path
+    end.
+
+user_cookie_file() ->
+    case os:getenv("HOME") of
+        false -> filename:join([".", ".config", "erlkoenig", "cookie"]);
+        Home  -> filename:join([Home, ".config", "erlkoenig", "cookie"])
     end.
 
 %%====================================================================
@@ -1134,7 +1136,7 @@ print_usage() ->
         "~n"
         "Global options:~n"
         "  --node <name>        Target node (default: erlkoenig@$hostname)~n"
-        "  --cookie-file <path> Cookie file (default: /etc/erlkoenig/cookie)~n"
+        "  --cookie-file <path> Cookie file (default: ERLKOENIG_COOKIE_FILE, /etc/erlkoenig/cookie, ~~/.config/erlkoenig/cookie)~n"
         "  --format <fmt>       Output format: table | json | plain (default: table)~n"
         "~n"
         "Areas and commands:~n"

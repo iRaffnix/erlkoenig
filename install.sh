@@ -23,6 +23,7 @@ ERLKOENIG_TAR=""
 RT_TAR=""
 RT_BIN=""
 FORCE=false
+FIX_HOSTS=false
 
 # ── Helpers ──────────────────────────────────────────────
 
@@ -45,6 +46,7 @@ usage() {
     echo "  --rt-bin PATH       Use exact erlkoenig_rt binary"
     echo "  --prefix DIR        Installation directory (default: /opt/erlkoenig)"
     echo "  --force             Force reinstall even if same version"
+    echo "  --fix-hosts         Rewrite 127.0.1.1 hostname entries to 127.0.0.1"
     echo "  --help              Show this help"
     echo ""
     echo "Examples:"
@@ -65,6 +67,7 @@ while [ $# -gt 0 ]; do
         --rt-bin)        RT_BIN="$2"; shift 2 ;;
         --prefix)        PREFIX="$2"; shift 2 ;;
         --force)         FORCE=true; shift ;;
+        --fix-hosts)     FIX_HOSTS=true; shift ;;
         --help|-h)       usage ;;
         *)               err "Unknown option: $1"; exit 1 ;;
     esac
@@ -542,23 +545,32 @@ fi
 
 # ── Generate cookie if missing ──────────────────────────
 
-COOKIE_FILE="$PREFIX/cookie"
-if [ ! -f "$COOKIE_FILE" ]; then
-    head -c 32 /dev/urandom | base64 | tr -d '/+=' | head -c 32 > "$COOKIE_FILE"
-    chmod 440 "$COOKIE_FILE"
-    chown root:"$SERVICE_USER" "$COOKIE_FILE"
-    ok "Cookie generated: $COOKIE_FILE"
-fi
-
-# Operator cookie path — `ek` CLI defaults to /etc/erlkoenig/cookie.
-# Keep them in sync so operators can run `ek node ping` without any
-# --cookie-file flag.
 mkdir -p /etc/erlkoenig
-if [ ! -f /etc/erlkoenig/cookie ] || ! cmp -s "$COOKIE_FILE" /etc/erlkoenig/cookie; then
-    cp "$COOKIE_FILE" /etc/erlkoenig/cookie
-    chmod 440 /etc/erlkoenig/cookie
-    chown root:"$SERVICE_USER" /etc/erlkoenig/cookie
-    ok "Operator cookie synced: /etc/erlkoenig/cookie"
+COOKIE_FILE="/etc/erlkoenig/cookie"
+LEGACY_COOKIE_FILE="$PREFIX/cookie"
+
+if [ ! -f "$COOKIE_FILE" ]; then
+    if [ -f "$LEGACY_COOKIE_FILE" ] && [ ! -L "$LEGACY_COOKIE_FILE" ]; then
+        cp "$LEGACY_COOKIE_FILE" "$COOKIE_FILE"
+        ok "Cookie migrated: $LEGACY_COOKIE_FILE -> $COOKIE_FILE"
+    else
+        head -c 32 /dev/urandom | base64 | tr -d '/+=' | head -c 32 > "$COOKIE_FILE"
+        ok "Cookie generated: $COOKIE_FILE"
+    fi
+fi
+chmod 440 "$COOKIE_FILE"
+chown root:"$SERVICE_USER" "$COOKIE_FILE"
+
+if [ -e "$LEGACY_COOKIE_FILE" ] || [ -L "$LEGACY_COOKIE_FILE" ]; then
+    if [ ! -L "$LEGACY_COOKIE_FILE" ] || [ "$(readlink "$LEGACY_COOKIE_FILE" 2>/dev/null || true)" != "$COOKIE_FILE" ]; then
+        rm -f "$LEGACY_COOKIE_FILE"
+    fi
+fi
+ln -s "$COOKIE_FILE" "$LEGACY_COOKIE_FILE" 2>/dev/null || true
+ok "Cookie source: $COOKIE_FILE ($LEGACY_COOKIE_FILE symlink)"
+
+if [ -f /root/.erlang.cookie ]; then
+    warn "/root/.erlang.cookie exists but is ignored; erlkoenig uses $COOKIE_FILE"
 fi
 
 # ── Fix hostname resolution for epmd ────────────────────
@@ -568,8 +580,13 @@ fi
 
 HOSTNAME=$(hostname)
 if grep -q "127\.0\.1\.1.*$HOSTNAME" /etc/hosts 2>/dev/null; then
-    sed -i "s/127\.0\.1\.1\(.*$HOSTNAME\)/127.0.0.1\1/" /etc/hosts
-    ok "Fixed /etc/hosts: $HOSTNAME → 127.0.0.1 (was 127.0.1.1)"
+    if [ "$FIX_HOSTS" = true ]; then
+        sed -i "s/127\.0\.1\.1\(.*$HOSTNAME\)/127.0.0.1\1/" /etc/hosts
+        ok "Fixed /etc/hosts: $HOSTNAME -> 127.0.0.1 (was 127.0.1.1)"
+    else
+        warn "/etc/hosts maps $HOSTNAME to 127.0.1.1; Erlang distribution may be unreachable"
+        warn "Re-run with --fix-hosts to rewrite that entry to 127.0.0.1"
+    fi
 fi
 
 # ── Restart daemon if it was running ─────────────────────

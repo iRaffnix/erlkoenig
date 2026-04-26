@@ -61,6 +61,23 @@ done
 systemctl is-active --quiet "$SERVICE"
 systemctl --no-pager --full status "$SERVICE"
 
+echo "==> cookie source"
+CANONICAL_COOKIE="/etc/erlkoenig/cookie"
+LEGACY_COOKIE="$PREFIX/cookie"
+[ -f "$CANONICAL_COOKIE" ] || { echo "error: canonical cookie missing: $CANONICAL_COOKIE" >&2; exit 1; }
+[ -L "$LEGACY_COOKIE" ] || { echo "error: legacy cookie path is not a symlink: $LEGACY_COOKIE" >&2; exit 1; }
+[ "$(readlink "$LEGACY_COOKIE")" = "$CANONICAL_COOKIE" ] || {
+    echo "error: legacy cookie path does not point to $CANONICAL_COOKIE" >&2
+    exit 1
+}
+cmp -s "$CANONICAL_COOKIE" "$LEGACY_COOKIE" || {
+    echo "error: canonical and legacy cookie contents differ" >&2
+    exit 1
+}
+if [ -f /root/.erlang.cookie ]; then
+    echo "    note: /root/.erlang.cookie exists but is ignored by erlkoenig"
+fi
+
 EK="$PREFIX/bin/ek"
 [ -x "$EK" ] || { echo "error: ek CLI not executable at $EK" >&2; exit 1; }
 

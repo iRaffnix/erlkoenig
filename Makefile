@@ -32,7 +32,7 @@
 
 .PHONY: all check erl test dialyzer integration release \
         dsl dsl-escript test-dsl docs go-demos \
-        fmt fmt-check xref lint \
+        fmt fmt-check xref lint error-catalog-check \
         install uninstall fetch-artifacts \
         tag clean clean-erl clean-dsl
 
@@ -52,7 +52,7 @@ all: erl check release
 
 # ── Alle Tests (kein Root) ──────────────────────────────
 
-check: lint test dialyzer test-dsl
+check: lint error-catalog-check test dialyzer test-dsl
 
 # ── Quality ──────────────────────────────────────────────
 
@@ -66,6 +66,9 @@ xref: erl
 	rebar3 xref
 
 lint: fmt-check xref dialyzer
+
+error-catalog-check: erl
+	rebar3 eunit --module=erlkoenig_error_catalog_check_tests
 
 # ── Erlang ───────────────────────────────────────────────
 

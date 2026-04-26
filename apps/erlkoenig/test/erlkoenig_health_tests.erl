@@ -29,7 +29,8 @@
     retries   :: pos_integer(),
     failures  = 0 :: non_neg_integer(),
     last      :: ok | fail | undefined,
-    timer     :: reference() | undefined
+    timer     :: reference() | undefined,
+    monitor   :: reference() | undefined
 }).
 
 %% =================================================================
@@ -77,7 +78,8 @@ schedule_sets_timer_test() ->
 
 cancel_and_remove_cleans_state_test() ->
     Ref = erlang:send_after(60000, self(), test),
-    State = #{self() => #check{pid = self(), timer = Ref}},
+    MRef = monitor(process, self()),
+    State = #{self() => #check{pid = self(), timer = Ref, monitor = MRef}},
     Result = cancel_and_remove(self(), State),
     ?assertEqual(#{}, Result),
     %% Timer should be cancelled (no message arrives)
@@ -98,10 +100,31 @@ down_removes_check_test() ->
     %% Simulate a monitored process dying
     Ref = erlang:send_after(60000, self(), test),
     FakePid = spawn(fun() -> ok end),
-    State = #{FakePid => #check{pid = FakePid, timer = Ref}},
+    MRef = monitor(process, FakePid),
+    State = #{FakePid => #check{pid = FakePid, timer = Ref, monitor = MRef}},
     %% Simulate the DOWN message handling
     Result = cancel_and_remove(FakePid, State),
     ?assertEqual(#{}, Result).
+
+stale_down_ref_is_ignored_test() ->
+    Ref = erlang:send_after(60000, self(), test),
+    Pid = spawn(fun() -> receive stop -> ok end end),
+    OldRef = monitor(process, Pid),
+    erlang:demonitor(OldRef, [flush]),
+    NewRef = monitor(process, Pid),
+    State = #{Pid => #check{pid = Pid, timer = Ref, monitor = NewRef}},
+    Result = handle_down(Pid, OldRef, State),
+    Pid ! stop,
+    ?assertEqual(State, Result),
+    cancel_and_remove(Pid, State).
+
+stale_check_timer_ref_is_ignored_test() ->
+    Pid = self(),
+    OldRef = make_ref(),
+    CurrentRef = make_ref(),
+    State = #{Pid => #check{pid = Pid, timer = CurrentRef}},
+    {ignored, Result} = handle_check_timer(Pid, OldRef, State),
+    ?assertEqual(State, Result).
 
 %% =================================================================
 %% gen_server integration (start/stop)
@@ -144,7 +167,8 @@ make_check(Failures, Retries) ->
         retries  = Retries,
         failures = Failures,
         last     = undefined,
-        timer    = undefined
+        timer    = undefined,
+        monitor  = undefined
     }.
 
 %% Simulates handle_failure/1 without logger/events/stop side effects
@@ -158,14 +182,15 @@ simulate_failure(#check{failures = F, retries = Max} = Check) ->
 
 %% Mirror of schedule_check/1
 schedule_check(#check{interval = Interval, pid = Pid} = Check) ->
-    Ref = erlang:send_after(Interval, self(), {check, Pid}),
+    Ref = erlang:start_timer(Interval, self(), {check, Pid}),
     Check#check{timer = Ref}.
 
 %% Mirror of cancel_and_remove/2
 cancel_and_remove(Pid, State) ->
     case maps:find(Pid, State) of
-        {ok, #check{timer = T}} ->
+        {ok, #check{timer = T, monitor = MRef}} ->
             cancel_timer(T),
+            cancel_monitor(MRef),
             maps:remove(Pid, State);
         error ->
             State
@@ -173,3 +198,18 @@ cancel_and_remove(Pid, State) ->
 
 cancel_timer(undefined) -> ok;
 cancel_timer(Ref) -> erlang:cancel_timer(Ref), ok.
+
+cancel_monitor(undefined) -> ok;
+cancel_monitor(Ref) -> erlang:demonitor(Ref, [flush]), ok.
+
+handle_down(Pid, Ref, State) ->
+    case maps:find(Pid, State) of
+        {ok, #check{monitor = Ref}} -> cancel_and_remove(Pid, State);
+        _ -> State
+    end.
+
+handle_check_timer(Pid, Ref, State) ->
+    case maps:find(Pid, State) of
+        {ok, #check{timer = Ref}} -> {run, State};
+        _ -> {ignored, State}
+    end.

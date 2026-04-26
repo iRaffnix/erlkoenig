@@ -15,18 +15,47 @@
 
 -include_lib("eunit/include/eunit.hrl").
 
+-record(state, {
+    container_name,
+    container_id,
+    instance,
+    boot,
+    seq,
+    stream_name,
+    retention,
+    channels,
+    in_flight,
+    channel,
+    connected,
+    stdout_buf,
+    stdout_bytes,
+    stderr_buf,
+    stderr_bytes,
+    flush_timer_out,
+    flush_timer_err,
+    queue,
+    queue_len,
+    max_queue_len,
+    draining,
+    dropped_count,
+    dropped_bytes
+}).
+
 %% Start the publisher directly (no AMQP — it will run in the
 %% "disconnected" branch, which is exactly what the unit test wants).
 %% The publisher also calls erlkoenig_events:notify/1 on drop/disconnect,
 %% so we make sure that gen_event manager is alive for the test. If it
 %% already exists (e.g. from a prior test), we reuse it.
 start_publisher(Channels) ->
+    start_publisher(Channels, 1).
+
+start_publisher(Channels, RetentionDays) ->
     ensure_events(),
     InFlight = atomics:new(1, [{signed, false}]),
     ContainerId = <<"test-container-id-12345">>,
     ContainerName = <<"test_ct">>,
     {ok, Pid} = erlkoenig_log_publisher:start_link(
-        ContainerId, ContainerName, Channels, 1, InFlight),
+        ContainerId, ContainerName, Channels, RetentionDays, InFlight),
     {Pid, InFlight}.
 
 ensure_events() ->
@@ -123,4 +152,31 @@ in_flight_balanced_mixed_streams_test() ->
     end, lists:seq(1, 40)),
     sync(Pid),
     ?assertEqual(0, atomics:get(InFlight, 1)),
+    stop_publisher(Pid).
+
+stale_stdout_flush_timer_is_ignored_test() ->
+    {Pid, InFlight} = start_publisher([stdout]),
+    simulate_forward(Pid, InFlight, stdout, <<"partial">>),
+    sync(Pid),
+    State1 = sys:get_state(Pid),
+    ?assertEqual(<<"partial">>, iolist_to_binary(State1#state.stdout_buf)),
+    ?assertEqual(7, State1#state.stdout_bytes),
+    ?assertEqual(0, State1#state.queue_len),
+
+    %% Keep the real timer from firing while we inject a stale timer
+    %% message. The production bug was accepting any flush_stdout atom;
+    %% with ref-keyed timer messages, a wrong ref must be ignored.
+    _ = erlang:cancel_timer(State1#state.flush_timer_out),
+    Pid ! {timeout, make_ref(), flush_stdout},
+    sync(Pid),
+    State2 = sys:get_state(Pid),
+    ?assertEqual(<<"partial">>, iolist_to_binary(State2#state.stdout_buf)),
+    ?assertEqual(7, State2#state.stdout_bytes),
+    ?assertEqual(0, State2#state.queue_len),
+    stop_publisher(Pid).
+
+retention_is_kept_in_state_for_reconnect_test() ->
+    {Pid, _InFlight} = start_publisher([stdout], 7),
+    State = sys:get_state(Pid),
+    ?assertEqual(<<"7D">>, State#state.retention),
     stop_publisher(Pid).

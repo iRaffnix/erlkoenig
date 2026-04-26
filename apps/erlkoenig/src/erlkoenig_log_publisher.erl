@@ -38,6 +38,7 @@ The pipeline is at-most-once. Container I/O is never blocked.
     boot            :: non_neg_integer(),
     seq             :: non_neg_integer(),
     stream_name     :: binary(),
+    retention       :: binary(),
     channels        :: [stdout | stderr],
     in_flight       :: atomics:atomics_ref(),
     %% Connection
@@ -109,6 +110,7 @@ init({ContainerId, ContainerName, Channels, RetentionDays, InFlight}) ->
         boot = 0,
         seq = 0,
         stream_name = StreamName,
+        retention = RetentionStr,
         channels = Channels,
         in_flight = InFlight,
         channel = Channel,
@@ -174,13 +176,21 @@ handle_cast(_, State) ->
 
 %% --- Timers ---
 
-handle_info(flush_stdout, State) ->
+handle_info({timeout, Ref, flush_stdout},
+            #state{flush_timer_out = Ref} = State) ->
     State2 = flush_buffer(stdout, State),
     {noreply, State2#state{flush_timer_out = undefined}};
 
-handle_info(flush_stderr, State) ->
+handle_info({timeout, _StaleRef, flush_stdout}, State) ->
+    {noreply, State};
+
+handle_info({timeout, Ref, flush_stderr},
+            #state{flush_timer_err = Ref} = State) ->
     State2 = flush_buffer(stderr, State),
     {noreply, State2#state{flush_timer_err = undefined}};
+
+handle_info({timeout, _StaleRef, flush_stderr}, State) ->
+    {noreply, State};
 
 %% --- Drain loop ---
 
@@ -219,7 +229,7 @@ handle_info(try_reconnect, State) ->
             erlang:send_after(5000, self(), try_reconnect),
             {noreply, State};
         Channel ->
-            ensure_stream(Channel, State#state.stream_name, <<"90D">>),
+            ensure_stream(Channel, State#state.stream_name, State#state.retention),
             self() ! drain,
             {noreply, State#state{channel = Channel, connected = true}}
     end;
@@ -248,7 +258,7 @@ buffer_stdout(Chunk, #state{stdout_buf = Buf, stdout_bytes = Bytes} = State) ->
         State2#state{flush_timer_out = undefined};
        true ->
         Timer = case State#state.flush_timer_out of
-            undefined -> erlang:send_after(?STDOUT_FLUSH_MS, self(), flush_stdout);
+            undefined -> erlang:start_timer(?STDOUT_FLUSH_MS, self(), flush_stdout);
             Existing -> Existing
         end,
         State#state{stdout_buf = NewBuf, stdout_bytes = NewBytes, flush_timer_out = Timer}
@@ -265,7 +275,7 @@ buffer_stderr(Chunk, #state{stderr_buf = Buf, stderr_bytes = Bytes} = State) ->
         State2#state{flush_timer_err = undefined};
        true ->
         Timer = case State#state.flush_timer_err of
-            undefined -> erlang:send_after(?STDERR_FLUSH_MS, self(), flush_stderr);
+            undefined -> erlang:start_timer(?STDERR_FLUSH_MS, self(), flush_stderr);
             Existing -> Existing
         end,
         State#state{stderr_buf = NewBuf, stderr_bytes = NewBytes, flush_timer_err = Timer}

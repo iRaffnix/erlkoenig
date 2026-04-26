@@ -12,11 +12,16 @@
 set -eu
 
 REPO="iRaffnix/erlkoenig"
+RT_REPO="iRaffnix/erlkoenig_rt"
 PREFIX="/opt/erlkoenig"
 RT_DIR=""   # set after PREFIX is final
 SERVICE_USER="erlkoenig"
 VERSION=""
+RT_VERSION=""
 LOCAL_DIR=""
+ERLKOENIG_TAR=""
+RT_TAR=""
+RT_BIN=""
 FORCE=false
 
 # ── Helpers ──────────────────────────────────────────────
@@ -33,7 +38,11 @@ usage() {
     echo ""
     echo "Options:"
     echo "  --version VERSION   Download release from GitHub (e.g., v0.2.0)"
+    echo "  --rt-version VERSION Download erlkoenig_rt release tag (default: --version)"
     echo "  --local DIR         Install from local directory (CI artifacts)"
+    echo "  --erlkoenig-tar PATH Use exact erlkoenig release tarball"
+    echo "  --rt-tar PATH       Use exact erlkoenig_rt release tarball"
+    echo "  --rt-bin PATH       Use exact erlkoenig_rt binary"
     echo "  --prefix DIR        Installation directory (default: /opt/erlkoenig)"
     echo "  --force             Force reinstall even if same version"
     echo "  --help              Show this help"
@@ -48,12 +57,16 @@ usage() {
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --version) VERSION="$2"; shift 2 ;;
-        --local)   LOCAL_DIR="$2"; shift 2 ;;
-        --prefix)  PREFIX="$2"; shift 2 ;;
-        --force)   FORCE=true; shift ;;
-        --help|-h) usage ;;
-        *)         err "Unknown option: $1"; exit 1 ;;
+        --version)       VERSION="$2"; shift 2 ;;
+        --rt-version)    RT_VERSION="$2"; shift 2 ;;
+        --local)         LOCAL_DIR="$2"; shift 2 ;;
+        --erlkoenig-tar) ERLKOENIG_TAR="$2"; shift 2 ;;
+        --rt-tar)        RT_TAR="$2"; shift 2 ;;
+        --rt-bin)        RT_BIN="$2"; shift 2 ;;
+        --prefix)        PREFIX="$2"; shift 2 ;;
+        --force)         FORCE=true; shift ;;
+        --help|-h)       usage ;;
+        *)               err "Unknown option: $1"; exit 1 ;;
     esac
 done
 
@@ -66,19 +79,39 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-if [ -z "$VERSION" ] && [ -z "$LOCAL_DIR" ]; then
-    err "--version or --local is required"
+if [ -z "$VERSION" ] && [ -z "$LOCAL_DIR" ] && [ -z "$ERLKOENIG_TAR" ]; then
+    err "--version, --local, or --erlkoenig-tar is required"
     echo "  Run: sh install.sh --help" >&2
     exit 1
 fi
 
-if [ -z "$LOCAL_DIR" ] && ! command -v curl >/dev/null 2>&1; then
-    err "curl is required for remote install (or use --local)"
+if [ -z "$LOCAL_DIR" ] && [ -z "$ERLKOENIG_TAR" ] && ! command -v curl >/dev/null 2>&1; then
+    err "curl is required for remote install (or use --local/--erlkoenig-tar)"
     exit 1
 fi
 
 if [ -n "$LOCAL_DIR" ] && [ ! -d "$LOCAL_DIR" ]; then
     err "Local directory not found: $LOCAL_DIR"
+    exit 1
+fi
+
+if [ -n "$ERLKOENIG_TAR" ] && [ ! -f "$ERLKOENIG_TAR" ]; then
+    err "erlkoenig tarball not found: $ERLKOENIG_TAR"
+    exit 1
+fi
+
+if [ -n "$RT_TAR" ] && [ ! -f "$RT_TAR" ]; then
+    err "erlkoenig_rt tarball not found: $RT_TAR"
+    exit 1
+fi
+
+if [ -n "$RT_BIN" ] && [ ! -f "$RT_BIN" ]; then
+    err "erlkoenig_rt binary not found: $RT_BIN"
+    exit 1
+fi
+
+if [ -n "$RT_VERSION" ] && [ -z "$VERSION" ] && [ -z "$RT_TAR" ] && [ -z "$RT_BIN" ] && [ -z "$LOCAL_DIR" ]; then
+    err "--rt-version requires --version unless an RT artifact is supplied locally"
     exit 1
 fi
 
@@ -103,6 +136,15 @@ detect_target() {
     fi
 
     echo "${arch}-${libc}"
+}
+
+detect_rt_target() {
+    arch=$(uname -m)
+    case "$arch" in
+        x86_64|amd64)  echo "linux-amd64" ;;
+        aarch64|arm64) echo "linux-arm64" ;;
+        *) err "Unsupported runtime architecture: $arch"; exit 1 ;;
+    esac
 }
 
 # ── Read installed version ───────────────────────────────
@@ -222,30 +264,75 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if [ -n "$LOCAL_DIR" ]; then
-    info "Installing from local artifacts: $LOCAL_DIR"
+copy_rt_from_tar() {
+    tarball="$1"
+    extract_dir="$TMPDIR/rt"
+
+    rm -rf "$extract_dir"
+    mkdir -p "$extract_dir"
+    if ! tar xzf "$tarball" -C "$extract_dir"; then
+        err "erlkoenig_rt tarball is corrupt: $tarball"
+        exit 1
+    fi
+
+    rt_from_tar=$(find "$extract_dir" -type f -name 'erlkoenig_rt' -print -quit 2>/dev/null || true)
+    if [ -z "$rt_from_tar" ]; then
+        err "No erlkoenig_rt binary found inside $(basename "$tarball")"
+        exit 1
+    fi
+
+    cp "$rt_from_tar" "$TMPDIR/erlkoenig_rt"
+}
+
+if [ -n "$LOCAL_DIR" ] || [ -n "$ERLKOENIG_TAR" ]; then
+    if [ -n "$LOCAL_DIR" ]; then
+        info "Installing from local artifacts: $LOCAL_DIR"
+    else
+        info "Installing from explicit local artifacts"
+    fi
 
     # Find the release tarball
-    TARBALL=$(find "$LOCAL_DIR" -name 'erlkoenig-*.tar.gz' -not -name 'static-demo*' -print -quit 2>/dev/null || true)
+    if [ -n "$ERLKOENIG_TAR" ]; then
+        TARBALL="$ERLKOENIG_TAR"
+    else
+        TARBALL=$(find "$LOCAL_DIR" -type f -name 'erlkoenig-*.tar.gz' -not -name 'static-demo*' -print -quit 2>/dev/null || true)
+    fi
     if [ -z "$TARBALL" ]; then
         err "No erlkoenig-*.tar.gz found in $LOCAL_DIR"
         exit 1
     fi
 
     # Find C runtime
-    RT_BIN=$(find "$LOCAL_DIR" -name 'erlkoenig_rt' -o -name 'erlkoenig_rt-linux-amd64' | head -1)
-    if [ -z "$RT_BIN" ]; then
-        err "No erlkoenig_rt found in $LOCAL_DIR"
+    if [ -n "$RT_BIN" ]; then
+        cp "$RT_BIN" "$TMPDIR/erlkoenig_rt"
+    elif [ -n "$RT_TAR" ]; then
+        copy_rt_from_tar "$RT_TAR"
+    elif [ -n "$LOCAL_DIR" ]; then
+        FOUND_RT_BIN=$(find "$LOCAL_DIR" -type f \( -name 'erlkoenig_rt' -o -name 'erlkoenig_rt-linux-*' \) -print -quit 2>/dev/null || true)
+        if [ -n "$FOUND_RT_BIN" ]; then
+            cp "$FOUND_RT_BIN" "$TMPDIR/erlkoenig_rt"
+        else
+            FOUND_RT_TAR=$(find "$LOCAL_DIR" -type f -name 'erlkoenig_rt-*.tar.gz' -print -quit 2>/dev/null || true)
+            if [ -n "$FOUND_RT_TAR" ]; then
+                copy_rt_from_tar "$FOUND_RT_TAR"
+            else
+                err "No erlkoenig_rt binary or erlkoenig_rt-*.tar.gz found in $LOCAL_DIR"
+                exit 1
+            fi
+        fi
+    else
+        err "--erlkoenig-tar requires --rt-bin, --rt-tar, or --local for the runtime artifact"
         exit 1
     fi
 
     cp "$TARBALL" "$TMPDIR/erlkoenig-release.tar.gz"
-    cp "$RT_BIN" "$TMPDIR/erlkoenig_rt"
 
     # Optional: demo binaries
-    DEMO_TAR=$(find "$LOCAL_DIR" -name 'static-demo-binaries-*.tar.gz' | head -1)
-    if [ -n "$DEMO_TAR" ]; then
-        cp "$DEMO_TAR" "$TMPDIR/static-demo-binaries.tar.gz"
+    if [ -n "$LOCAL_DIR" ]; then
+        DEMO_TAR=$(find "$LOCAL_DIR" -type f -name 'static-demo-binaries-*.tar.gz' -print -quit 2>/dev/null || true)
+        if [ -n "$DEMO_TAR" ]; then
+            cp "$DEMO_TAR" "$TMPDIR/static-demo-binaries.tar.gz"
+        fi
     fi
 
     # Detect version from tarball content
@@ -272,15 +359,31 @@ else
         exit 1
     fi
 
-    # C runtime (architecture-independent — static musl binary)
-    if ! curl -fsSL "https://github.com/${REPO}/releases/download/${VERSION}/erlkoenig_rt-linux-amd64" \
-            -o "$TMPDIR/erlkoenig_rt"; then
-        err "Failed to download erlkoenig_rt"
-        if [ "$DAEMON_WAS_RUNNING" = true ]; then
-            warn "Restarting daemon with previous version ..."
-            start_daemon
+    if [ -n "$RT_BIN" ]; then
+        info "Using local C runtime: $RT_BIN"
+        cp "$RT_BIN" "$TMPDIR/erlkoenig_rt"
+    elif [ -n "$RT_TAR" ]; then
+        info "Using local C runtime archive: $RT_TAR"
+        copy_rt_from_tar "$RT_TAR"
+    else
+        RT_VERSION_EFFECTIVE="${RT_VERSION:-$VERSION}"
+        RT_TARGET=$(detect_rt_target)
+        RT_ARCHIVE="erlkoenig_rt-${RT_VERSION_EFFECTIVE}-${RT_TARGET}.tar.gz"
+        RT_URL="https://github.com/${RT_REPO}/releases/download/${RT_VERSION_EFFECTIVE}/${RT_ARCHIVE}"
+
+        info "Downloading ${RT_ARCHIVE} ..."
+        if curl -fsSL "$RT_URL" -o "$TMPDIR/erlkoenig_rt.tar.gz"; then
+            copy_rt_from_tar "$TMPDIR/erlkoenig_rt.tar.gz"
+        elif ! curl -fsSL "https://github.com/${RT_REPO}/releases/download/${RT_VERSION_EFFECTIVE}/erlkoenig_rt-${RT_TARGET}" \
+                -o "$TMPDIR/erlkoenig_rt"; then
+            err "Failed to download erlkoenig_rt"
+            err "Available at: https://github.com/${RT_REPO}/releases/tag/${RT_VERSION_EFFECTIVE}"
+            if [ "$DAEMON_WAS_RUNNING" = true ]; then
+                warn "Restarting daemon with previous version ..."
+                start_daemon
+            fi
+            exit 1
         fi
-        exit 1
     fi
 
     # Optional: demo binaries

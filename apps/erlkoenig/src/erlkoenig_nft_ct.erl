@@ -286,6 +286,13 @@ handle_info({'$socket', Sock, select, _Ref}, #{socket := Sock} = State) ->
     State2 = recv_loop(Sock, State),
     request_recv(Sock),
     {noreply, State2};
+%% request_recv/1 drains the socket non-blocking and queues any freshly
+%% arrived data to self as {ct_data, _}. Previously this clause did
+%% not exist — the catch-all below silently discarded the queued data,
+%% so CT events delivered in the race window between recv_loop's last
+%% select and request_recv's first call were LOST. Process them here.
+handle_info({ct_data, Data}, State) ->
+    {noreply, process_messages(Data, State)};
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -541,12 +548,38 @@ send_ct_delete(Sock, {Proto, SrcIP, SrcPort, DstIP, DstPort}) ->
             Payload/binary>>,
     case socket:send(Sock, Msg) of
         ok ->
-            %% Drain ACK
-            _ = socket:recv(Sock, 0, 500),
+            %% Drain ACK. The socket is ALSO subscribed to NEW/DESTROY
+            %% multicast groups, so whatever arrives in the next 500ms
+            %% could be our CT_DELETE ACK or an unrelated CT event.
+            %% Previously `_ = socket:recv(...)` threw away whichever
+            %% came first — if it was a multicast event, that event
+            %% never reached process_messages and was silently lost
+            %% (one kill_by_src = potentially one dropped CT event).
+            %% Requeue non-ACK payloads to self via the {ct_data, _}
+            %% handler so handle_info processes them normally.
+            case socket:recv(Sock, 0, 500) of
+                {ok, Data} ->
+                    case is_our_ack(Data, Seq) of
+                        true -> ok;
+                        false -> self() ! {ct_data, Data}
+                    end;
+                {error, _} ->
+                    ok
+            end,
             ok;
         Err ->
             Err
     end.
+
+%% True iff Data is an NLMSG_ERROR with the given Seq — i.e. an ACK for
+%% the CT_DELETE request we just sent. Any other shape (multicast
+%% NEW/DESTROY event, ACK for a different request, malformed frame)
+%% gets requeued for the normal event path.
+is_our_ack(<<_Len:32/little, 2:16/little, _Flags:16/little,
+             Seq:32/little, _Pid:32/little, _/binary>>, Seq) ->
+    true;
+is_our_ack(_, _) ->
+    false.
 
 %% --- Internal: CT Event Parsing ---
 

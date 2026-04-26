@@ -394,9 +394,19 @@ flag_val(concat, Acc) -> Acc bor ?NFT_SET_CONCAT.
 %% Build a composite key type for concatenated sets.
 %% The kernel uses: key_type = type1 | (type2 << 8) | (type3 << 16) ...
 %% This matches libnftnl's nftnl_set_concat_hash().
+%%
+%% The composite is serialized as u32 (NFTA_SET_KEY_TYPE). With 4
+%% fields × 8 bits = 32 bits, the set is exactly full. A 5th field
+%% would shift its type byte into bit 32+ — Erlang's bignum keeps it,
+%% but `<<Acc:32/big>>' in encode_u32 silently truncates, so the
+%% kernel's composite type differs from what we declared. Set lookups
+%% then match against the wrong type_of semantics (observable as
+%% "set key size mismatch" or silent miss). Fail loud at the source.
 -spec concat_key_type([{non_neg_integer(), 1 | 2 | 4 | 6 | 16}]) -> non_neg_integer().
+concat_key_type(FieldInfos) when length(FieldInfos) =< 4 ->
+    concat_key_type(FieldInfos, 0, 0);
 concat_key_type(FieldInfos) ->
-    concat_key_type(FieldInfos, 0, 0).
+    error({concat_too_many_fields, length(FieldInfos), max_4}).
 
 concat_key_type([], _Shift, Acc) ->
     Acc;
@@ -432,7 +442,15 @@ build_concat_userdata(FieldInfos) ->
         udata_entry(6, <<0:32/little>>)         %% MERGE_ELEMENTS = 0
     ]).
 
-udata_entry(Type, Data) ->
+%% libnftnl udata TLV: 1-byte type + 1-byte length + payload. The
+%% length byte can only express 0..255; a Data binary larger than that
+%% would silently truncate `byte_size(Data):8` to `byte_size rem 256`,
+%% producing a corrupt udata blob that nft CLI parses as garbage (wrong
+%% chain type display, sometimes segfaults in libnftnl). Current
+%% callers stay well under this but the ceiling is real — fail loud
+%% here so a future caller with a large concat chain gets an
+%% immediate error rather than a silent wire-format bug.
+udata_entry(Type, Data) when byte_size(Data) =< 255 ->
     <<Type:8, (byte_size(Data)):8, Data/binary>>.
 
 %% Build USERDATA for simple (non-concat) verdict maps.

@@ -119,12 +119,35 @@ check(Ip, Name) when is_tuple(Ip), is_binary(Name) ->
 -doc """
 Compile a user-facing host list into internal patterns.
 
+Raw compiler — errors may appear in the result list as
+`{error, invalid_host}`. Filtering of invalids happens at the
+registration seam (`handle_call({register, ...})`) so tests can
+assert the per-entry outcome.
+
 Exported so the DSL (or tests) can pre-validate a list without
 registering it.
 """.
--spec compile_patterns([binary()]) -> [host_pattern()].
+-spec compile_patterns([binary()]) -> [host_pattern() | {error, invalid_host}].
 compile_patterns(Hosts) ->
     [compile_one(H) || H <- Hosts].
+
+%% Drop `{error, invalid_host}' entries and log each one — called
+%% right before ETS insert. Previously these errors flowed into the
+%% ETS value as-is, and `matches_any/2`'s generic catch-all clause
+%% silently treated them as non-matching patterns → operator writes
+%% 5 hosts, 2 are typos, allowlist silently behaves as 3 patterns.
+-spec filter_valid_patterns([host_pattern() | {error, invalid_host}], binary()) ->
+    [host_pattern()].
+filter_valid_patterns(Patterns, SourceLabel) ->
+    lists:filtermap(fun
+        ({error, invalid_host}) ->
+            logger:warning(
+                "[dns_filter] invalid host pattern dropped from ~s "
+                "allowlist (entry has no effect)", [SourceLabel]),
+            false;
+        ({exact, _} = P) -> {true, P};
+        ({suffix, _} = P) -> {true, P}
+    end, Patterns).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -170,7 +193,10 @@ recover_from_running_containers() ->
 recover_one(Pid) ->
     case erlkoenig_ct:dns_filter_state(Pid) of
         {Ip, Hosts} when is_list(Hosts), Hosts =/= [] ->
-            Patterns = compile_patterns(Hosts),
+            Label = iolist_to_binary(io_lib:format(
+                "recovered-ip-~s", [inet:ntoa(Ip)])),
+            Patterns = filter_valid_patterns(
+                         compile_patterns(Hosts), Label),
             true = ets:insert(?TAB, {Ip, Patterns}),
             ok;
         _ ->
@@ -178,7 +204,10 @@ recover_one(Pid) ->
     end.
 
 handle_call({register, Ip, Hosts}, _From, State) ->
-    Patterns = compile_patterns(Hosts),
+    Label = iolist_to_binary(io_lib:format(
+        "ip-~s", [inet:ntoa(Ip)])),
+    Patterns = filter_valid_patterns(
+                 compile_patterns(Hosts), Label),
     true = ets:insert(?TAB, {Ip, Patterns}),
     {reply, ok, State};
 
@@ -229,12 +258,26 @@ ascii_lowercase(Bin) ->
 -spec compile_one(binary()) -> host_pattern() | {error, invalid_host}.
 compile_one(<<"*.", Rest/binary>>) when byte_size(Rest) > 0 ->
     {suffix, normalise(Rest)};
+%% Any OTHER `*`-prefixed input (`"*"`, `"*."`, `"**.foo"`, `"*abc"`)
+%% is a malformed wildcard. The only legal shape is `*.<non-empty>`,
+%% handled by the clause above. Without this explicit rejection,
+%% `"*."` falls through to the exact-match clause and gets stored
+%% as `{exact, <<"*">>}` — a pattern that can never match a real DNS
+%% query (star isn't a valid label character), so the operator's
+%% intended wildcard becomes a silently dead entry in the allowlist.
+%% The DSL-side regex in dsl/lib/erlkoenig/pod/builder.ex rejects
+%% these, but this module is also callable programmatically and
+%% defense-in-depth belongs at every layer (same Muster-9 class of
+%% clause-ordering bugs we fixed in erlkoenig_nft_container and
+%% erlkoenig_config.expand_nft_rule).
+compile_one(<<$*, _/binary>>) ->
+    {error, invalid_host};
 compile_one(Host) when is_binary(Host), byte_size(Host) > 0 ->
     {exact, normalise(Host)};
 compile_one(_) ->
-    %% Empty binary, lone "*.", anything else — never silently
-    %% accept. Callers that produced this garbage should get a
-    %% clean tagged error rather than a function_clause.
+    %% Empty binary or non-binary — never silently accept. Callers
+    %% that produced this garbage should get a clean tagged error
+    %% rather than a function_clause.
     {error, invalid_host}.
 
 -spec matches_any(binary(), [host_pattern()]) -> boolean().

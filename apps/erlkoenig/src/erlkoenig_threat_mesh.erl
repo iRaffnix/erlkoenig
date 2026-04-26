@@ -189,7 +189,36 @@ handle_call(active_bans, _From, State) ->
 
 handle_call({reconfigure, Config}, _From, State) ->
     Whitelist = normalize_whitelist(maps:get(whitelist, Config, [])),
-    {reply, ok, State#state{whitelist = Whitelist}};
+    %% If an operator adds an IP to the whitelist to correct a
+    %% wrongful ban, the natural expectation is "ban lifted now" —
+    %% not "ban lifted in up to 24 hours when the timer finally
+    %% fires". Walk active_bans, drop any kernel ban for IPs that
+    %% the new whitelist covers, cancel their unban timers, and
+    %% broadcast the unban so peer nodes converge. Non-whitelisted
+    %% bans stay untouched.
+    WhitelistSet = sets:from_list(Whitelist, [{version, 2}]),
+    {CleanedBans, CleanedTimers} =
+        maps:fold(
+            fun(IP, _Sources, {BansAcc, TimersAcc}) ->
+                case sets:is_element(IP, WhitelistSet) of
+                    true ->
+                        do_kernel_unban(IP),
+                        case maps:find(IP, TimersAcc) of
+                            {ok, Ref} -> _ = erlang:cancel_timer(Ref), ok;
+                            error -> ok
+                        end,
+                        pg_send({unban, IP, node()}),
+                        {maps:remove(IP, BansAcc),
+                         maps:remove(IP, TimersAcc)};
+                    false ->
+                        {BansAcc, TimersAcc}
+                end
+            end,
+            {State#state.active_bans, State#state.unban_timers},
+            State#state.active_bans),
+    {reply, ok, State#state{whitelist = Whitelist,
+                            active_bans = CleanedBans,
+                            unban_timers = CleanedTimers}};
 
 handle_call(_, _From, State) ->
     {reply, {error, unknown}, State}.
@@ -258,8 +287,18 @@ do_kernel_ban(IP, _EffectiveExpiry, Reason) ->
             broadcast_guard({ct_guard_ban_failed, #{ip => IP, reason => Reason}})
     catch
         C:R ->
+            %% Crash path also emits ct_guard_ban_failed — dashboards
+            %% subscribed to this event need to see kernel-ban failures
+            %% regardless of whether they manifested as {error, _} or
+            %% as an exception from erlkoenig_nft:ban/1 (e.g. nfnl_server
+            %% crashed, call timeout). Previously only the error-return
+            %% branch notified, so a crashed nft gen_server silently
+            %% produced no dashboard signal.
             logger:warning("[threat_mesh] ban crashed ~s: ~p:~p",
-                           [erlkoenig_nft_ip:format(IP), C, R])
+                           [erlkoenig_nft_ip:format(IP), C, R]),
+            broadcast_guard({ct_guard_ban_failed,
+                             #{ip => IP, reason => Reason,
+                               error => {C, R}}})
     end,
     ok.
 

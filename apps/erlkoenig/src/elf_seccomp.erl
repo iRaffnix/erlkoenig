@@ -69,12 +69,19 @@ from_binary(#elf{} = Elf) ->
              || N <- maps:values(Resolved),
                 N =/= <<"unknown">>
             ]),
+            %% Number of Nrs whose DB name was missing. Previously only
+            %% callsite-unresolved was tracked here, which diverged from
+            %% `from_syscalls/2` (which counts unnamed-Nrs into the same
+            %% field). Name-less Nrs are still allowed in the BPF but
+            %% filtered from `Names`; counting them here makes the gap
+            %% between BPF enforcement and the OCI JSON export visible.
+            UnnamedCount = maps:size(Resolved) - length(Names),
             {ok, #seccomp_profile{
                 arch = Arch,
                 default_action = kill_process,
                 syscalls = Nrs,
                 names = Names,
-                unresolved = Unresolved
+                unresolved = Unresolved + UnnamedCount
             }};
         {error, _} = Err ->
             Err

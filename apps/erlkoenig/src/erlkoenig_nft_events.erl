@@ -102,7 +102,7 @@ notify_nflog(Msg) ->
 Publish a counter event to the `counter_events` pg group.
 
 Generic pass-through — carries both `{counter_event, Name, Data}`
-and `{threshold_event, Id, Name, Metric, Current, Threshold}`
+and `{threshold_event, Name, Metric, Current, Threshold}`
 with unchanged message format. No wrapping, no rewriting.
 """.
 -spec notify_counter_event(term()) -> ok.

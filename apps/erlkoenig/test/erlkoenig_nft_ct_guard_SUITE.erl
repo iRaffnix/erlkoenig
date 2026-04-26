@@ -19,6 +19,7 @@ all() ->
         whitelist_string_format,
         whitelisted_ip_not_banned,
         cleanup_old_events,
+        cleanup_old_events_across_ips,
         cleanup_expired_bans
     ].
 
@@ -124,9 +125,31 @@ cleanup_old_events(_) ->
     insert_events(C, IP, Now - 120, 20, 80),
     insert_events(C, IP, Now, 5, 80),
     ?assertEqual(25, ets:info(C, size)),
-    Deleted = delete_before(C, ets:first(C), Now - 60, 0),
+    Deleted = select_delete_before(C, Now - 60),
     ?assertEqual(20, Deleted),
     ?assertEqual(5, ets:info(C, size)),
+    cleanup_tables(C, B).
+
+%% Regression guard: the original ets:first/next walker bailed at the
+%% first non-expired entry, which — in an ordered_set keyed by
+%% {SrcIP, Ts, _} — leaks ALL subsequent IPs' expired entries once
+%% ONE IP's cursor landed on a fresh timestamp. select_delete does
+%% the whole pass atomically, regardless of key order.
+cleanup_old_events_across_ips(_) ->
+    {C, B} = make_tables(),
+    Now = erlang:system_time(second),
+    IpA = <<10, 0, 0, 1>>,   %% sorts before IpB
+    IpB = <<10, 0, 0, 2>>,
+    %% IpA has some expired AND some fresh entries (walker would bail
+    %% at the first fresh one and never reach IpB).
+    insert_events(C, IpA, Now - 120, 3, 80),  %% expired
+    insert_events(C, IpA, Now,       2, 80),  %% fresh
+    insert_events(C, IpB, Now - 300, 5, 80),  %% ALL expired
+    ?assertEqual(10, ets:info(C, size)),
+
+    Deleted = select_delete_before(C, Now - 60),
+    ?assertEqual(8, Deleted),           %% 3 (A expired) + 5 (B expired)
+    ?assertEqual(2, ets:info(C, size)), %% only IpA fresh entries remain
     cleanup_tables(C, B).
 
 cleanup_expired_bans(_) ->
@@ -180,14 +203,14 @@ collect_ports(C, {IP, _, _} = K, IP, P) ->
 collect_ports(_, _, _, P) ->
     sets:to_list(P).
 
-delete_before(_, '$end_of_table', _, Cnt) ->
-    Cnt;
-delete_before(C, {_, Ts, _} = K, Cutoff, Cnt) when Ts < Cutoff ->
-    Next = ets:next(C, K),
-    ets:delete(C, K),
-    delete_before(C, Next, Cutoff, Cnt + 1);
-delete_before(_, _, _, Cnt) ->
-    Cnt.
+%% Mirror of the production do_cleanup's select_delete. Writing it here
+%% rather than exporting from the module keeps the suite self-contained
+%% while matching the module's behaviour line-for-line.
+select_delete_before(Table, Cutoff) ->
+    MatchSpec = [{{{'_', '$1', '_'}, '_'},
+                  [{'<', '$1', Cutoff}],
+                  [true]}],
+    ets:select_delete(Table, MatchSpec).
 
 cleanup_bans(B, Now) ->
     ets:foldl(

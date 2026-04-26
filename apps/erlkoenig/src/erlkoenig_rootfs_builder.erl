@@ -154,15 +154,51 @@ resolve_seccomp(Config, BinaryPath, Opts) ->
 
 -spec generate_seccomp(binary() | undefined) -> map().
 generate_seccomp(undefined) ->
+    %% `auto' requested but no binary to analyze — no actionable
+    %% info to log, just return empty.
     #{};
 generate_seccomp(BinaryPath) ->
+    %% Operator explicitly asked for `seccomp: auto' — they want an
+    %% ELF-derived restrictive profile. Every failure path below used
+    %% to silently return `#{}' which downstream interprets as "no
+    %% seccomp filter at all". That means a declared strict boundary
+    %% (auto-generated syscall allowlist) silently becomes NO boundary
+    %% — classic glasbox violation, security-relevant.
+    %%
+    %% We still return `#{}' on failure (changing semantics would
+    %% break containers running on non-ELF binaries or interpreted
+    %% workloads), but we LOG the failure loudly so an operator
+    %% reviewing audit/syslog notices the seccomp didn't land.
     case erlkoenig_elf:parse(BinaryPath) of
         {ok, Elf} ->
             case erlkoenig_elf:seccomp_profile(Elf) of
-                {ok, Profile} -> Profile;
-                _ -> #{}
+                {ok, Profile} ->
+                    Profile;
+                {error, Reason} ->
+                    logger:warning(
+                        "rootfs_builder: seccomp:auto for ~s — "
+                        "ELF parsed but profile generation failed: ~p "
+                        "(container will run WITHOUT seccomp filter)",
+                        [BinaryPath, Reason]),
+                    #{};
+                _ ->
+                    logger:warning(
+                        "rootfs_builder: seccomp:auto for ~s — "
+                        "seccomp_profile/1 returned unexpected shape "
+                        "(container will run WITHOUT seccomp filter)",
+                        [BinaryPath]),
+                    #{}
             end;
-        _ -> #{}
+        {error, Reason} ->
+            logger:warning(
+                "rootfs_builder: seccomp:auto for ~s — ELF parse "
+                "failed: ~p (container will run WITHOUT seccomp "
+                "filter; use explicit `seccomp: default' for "
+                "non-ELF or interpreted workloads)",
+                [BinaryPath, Reason]),
+            #{};
+        _ ->
+            #{}
     end.
 
 -spec lookup_cached_seccomp(binary()) -> map().

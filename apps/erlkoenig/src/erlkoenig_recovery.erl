@@ -171,7 +171,7 @@ verify_network(_) ->
 -spec rebuild_firewall(binary(), map()) -> ok.
 rebuild_firewall(_Id, #{config := _Config}) ->
     %% Placeholder: full implementation in SPEC-NFT-018 (firewall-rebuild).
-    %% erlkoenig_firewall_nft:add_container(Id, ...) will be called here.
+    %% erlkoenig_ct_firewall:add_container(Id, ...) will be called here.
     ok;
 rebuild_firewall(_, _) -> ok.
 

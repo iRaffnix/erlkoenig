@@ -196,9 +196,13 @@ echo_test(Ip, Port, Msg) ->
             {error, {connect, Ip, Port, R}}
     end.
 
-%% @doc Stop all pids and exit cleanly.
+%% @doc Stop all pids and exit cleanly. Accepts both bare pids (from
+%% `erlkoenig:spawn/2') and `{Name, Pid}' tuples (from
+%% `erlkoenig_config:load/1') so tests can pass either shape.
 cleanup(Pids) ->
-    lists:foreach(fun(Pid) ->
-        catch erlkoenig:stop(Pid)
+    lists:foreach(fun
+        ({_Name, Pid}) when is_pid(Pid) -> catch erlkoenig:stop(Pid);
+        (Pid) when is_pid(Pid)          -> catch erlkoenig:stop(Pid);
+        (_)                             -> ok
     end, Pids),
     timer:sleep(300).

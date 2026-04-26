@@ -22,8 +22,13 @@ Transport: Erlang Port with {packet, 4} or Unix Domain Socket.
 Wire format: Tag:8 | Version:8 | [TLV Attributes]
 TLV: Type:16/big | Len:16/big | Value:Len/binary
 
-The C runtime (erlkoenig_rt) parses all commands as TLV.
-Replies from the C runtime use a simpler positional format.
+The C runtime (erlkoenig_rt) parses all commands as TLV **and**
+emits all structured replies (REPLY_OK, REPLY_ERROR,
+REPLY_CONTAINER_PID, REPLY_EXITED, REPLY_STATUS,
+REPLY_METRICS_EVENT) as TLV. The only positional replies are the
+streaming frames REPLY_STDOUT / REPLY_STDERR — those are raw
+`<<Tag:8, Data/binary>>` without a version byte, because the C
+runtime forwards child output without framing overhead.
 """.
 
 %% Decode
@@ -190,8 +195,23 @@ check_handshake_reply(_) ->
 %% =================================================================
 
 -spec tlv(non_neg_integer(), binary()) -> binary().
+tlv(Type, Value) when byte_size(Value) =< 65535 ->
+    <<Type:16/big, (byte_size(Value)):16/big, Value/binary>>;
 tlv(Type, Value) ->
-    <<Type:16/big, (byte_size(Value)):16/big, Value/binary>>.
+    %% The wire format has a 16-bit length field — values over 65535
+    %% bytes silently truncated before via `(byte_size(Value)):16/big`,
+    %% producing a frame where Len = byte_size rem 65536 while the
+    %% data that follows was still the full binary. The C runtime
+    %% then read Len bytes and left the rest as a "payload" of the
+    %% next TLV (or crashed parsing). Fail loud here — the caller
+    %% should chunk large payloads (file contents, env vars, nft
+    %% batches > 64 KiB) at its own layer.
+    error({tlv_value_too_large,
+           #{type => Type,
+             size => byte_size(Value),
+             limit => 65535,
+             hint => <<"chunk at caller or lift field to u32 in "
+                       "wire protocol revision">>}}).
 
 tlv_u8(Type, Val)  -> tlv(Type, <<Val:8>>).
 tlv_u16(Type, Val) -> tlv(Type, <<Val:16/big>>).
@@ -386,23 +406,45 @@ encode_cmd_nft_setup(BatchBinary) when is_binary(BatchBinary) ->
 
 -spec encode_cmd_write_file(binary(), non_neg_integer(), binary()) -> binary().
 encode_cmd_write_file(Path, Mode, Data) ->
-    msg(?TAG_CMD_WRITE_FILE, [
-        tlv_str(?EK_ATTR_FILE_PATH, Path),
-        tlv_u16(?EK_ATTR_FILE_MODE, Mode),
-        tlv_str(?EK_ATTR_CONTENT, Data)
-    ]).
+    %% Wire (must match C runtime handle_cmd_write_file):
+    %%     <<Path:str16, Mode:u16, DataLen:u32, Data/binary>>
+    %% The C side does NOT parse this as TLV — it's a positional
+    %% frame with `buf_read_str16 / buf_read_u16 / buf_read_u32'.
+    %% Using `tlv_str/tlv_u16/tlv_str' here (Type+Len prefixes per
+    %% field) had the C runtime read the `EK_ATTR_FILE_PATH' u16
+    %% type (1) as the path length and fail with "data truncated".
+    PathBin = iolist_to_binary(Path),
+    DataBin = iolist_to_binary(Data),
+    PathLen = byte_size(PathBin),
+    DataLen = byte_size(DataBin),
+    PathLen =< 65535 orelse error({file_path_too_long, PathLen}),
+    DataLen =< 16#FFFFFFFF orelse error({file_data_too_large, DataLen}),
+    Mode =< 16#FFFF orelse error({file_mode_out_of_range, Mode}),
+    <<?TAG_CMD_WRITE_FILE:8, ?PROTOCOL_VERSION:8,
+      PathLen:16/big, PathBin/binary,
+      Mode:16/big,
+      DataLen:32/big, DataBin/binary>>.
 
 -spec encode_cmd_query_status() -> binary().
 encode_cmd_query_status() ->
     msg(?TAG_CMD_QUERY_STATUS, []).
 
 -spec encode_cmd_stdin(binary()) -> binary().
-encode_cmd_stdin(Data) ->
+encode_cmd_stdin(Data) when byte_size(Data) =< 65535 ->
     %% Wire: Tag + Ver + <<DataLen:16/big, Data/binary>>
     %% The C runtime's handle_cmd_stdin reads a 16-bit length prefix,
     %% not a bare payload (see erlkoenig_rt.c::handle_cmd_stdin).
     DataLen = byte_size(Data),
-    <<?TAG_CMD_STDIN, ?PROTOCOL_VERSION, DataLen:16/big, Data/binary>>.
+    <<?TAG_CMD_STDIN, ?PROTOCOL_VERSION, DataLen:16/big, Data/binary>>;
+encode_cmd_stdin(Data) ->
+    %% Same 16-bit-length-truncation trap as in tlv/2. An attach
+    %% client pushing a paste > 64 KiB would silently corrupt the
+    %% frame; the C runtime then reads a wrong byte count and
+    %% desyncs the socket until a reconnect. Fail at the caller.
+    error({stdin_chunk_too_large,
+           #{size => byte_size(Data),
+             limit => 65535,
+             hint => <<"chunk at the attach-client layer">>}}).
 
 -spec encode_cmd_resize(non_neg_integer(), non_neg_integer()) -> binary().
 encode_cmd_resize(Rows, Cols) ->
@@ -508,10 +550,29 @@ decode_tag(?TAG_REPLY_EXITED, Bin) ->
     end,
     {ok, reply_exited, #{exit_code => ExitCode, term_signal => Signal}};
 
-decode_tag(?TAG_REPLY_STATUS, <<State:8, Pid:32/big, Uptime:64/big, _/binary>>) ->
-    {ok, reply_status, #{state => State, child_pid => Pid, uptime_ms => Uptime}};
-decode_tag(?TAG_REPLY_STATUS, _) ->
-    {error, {malformed, reply_status}};
+decode_tag(?TAG_REPLY_STATUS, Bin) ->
+    %% TLV: Attr 1 = state (uint8), Attr 2 = child_pid (uint32),
+    %%      Attr 3 = uptime_ms (uint64).
+    %% The C runtime (erlkoenig_rt.c::send_reply_status) emits these as
+    %% proper TLVs; treating the payload as positional <<State:8,
+    %% Pid:32, Uptime:64>> silently reads the TLV type/length bytes
+    %% as State/Pid, so the recovery path in erlkoenig_ct:recovering/3
+    %% would see State=0 and never take the "container alive" branch.
+    Attrs = decode_tlv_attrs(Bin),
+    State = case maps:find(1, Attrs) of
+        {ok, <<S:8>>} -> S;
+        _ -> 0
+    end,
+    Pid = case maps:find(2, Attrs) of
+        {ok, <<P:32/big>>} -> P;
+        _ -> 0
+    end,
+    Uptime = case maps:find(3, Attrs) of
+        {ok, <<U:64/big>>} -> U;
+        _ -> 0
+    end,
+    {ok, reply_status, #{state => State, child_pid => Pid,
+                         uptime_ms => Uptime}};
 
 decode_tag(?TAG_REPLY_STDOUT, Data) ->
     {ok, reply_stdout, #{data => Data}};
@@ -659,6 +720,17 @@ encode_volume_tlv(#{host := H, container := C} = V) ->
     PropInt = propagation_to_int(Prop),
     RecInt  = if Rec -> 1; true -> 0 end,
     DataLen = byte_size(Data),
+    %% DataLen is packed as u16 on the wire — guard against the same
+    %% silent truncation that tlv/2 used to have.  Mount-options
+    %% strings > 64 KiB aren't realistic, but fail loud so a bad
+    %% caller can't corrupt the frame.
+    case DataLen =< 65535 of
+        true -> ok;
+        false ->
+            error({volume_data_too_large,
+                   #{host => HB, container => CB,
+                     size => DataLen, limit => 65535}})
+    end,
     <<HB/binary, 0,
       CB/binary, 0,
       Flags:32/big,

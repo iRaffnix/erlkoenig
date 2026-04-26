@@ -77,7 +77,7 @@ Accepts IPv4 or IPv6 as tuple, binary, or string:
 """.
 -spec ban(inet:ip_address() | binary() | string()) -> ok | {error, term()}.
 ban(IP) ->
-    IPBin = iolist_to_binary(io_lib:format("~s", [IP])),
+    IPBin = format_ip_for_event(IP),
     Result =
         case erlkoenig_nft_firewall:ban(IP) of
             ok ->
@@ -103,7 +103,7 @@ ban(IP) ->
 -doc "Remove an IP address from the blocklist (IPv4 or IPv6).".
 -spec unban(inet:ip_address() | binary() | string()) -> ok | {error, term()}.
 unban(IP) ->
-    IPBin = iolist_to_binary(io_lib:format("~s", [IP])),
+    IPBin = format_ip_for_event(IP),
     Result =
         case erlkoenig_nft_firewall:unban(IP) of
             ok -> ok;
@@ -111,6 +111,24 @@ unban(IP) ->
         end,
     erlkoenig_nft_events:notify_control(unban, Result, #{ip => IPBin}),
     Result.
+
+%% Render an IP for AMQP/audit events. The previous helper used
+%% `io_lib:format("~s", [IP])` which crashes `badarg` on tuples (the
+%% canonical shape per the `-spec'!) and produces garbage on 4-byte
+%% raw binaries. `erlkoenig_nft_ip:format/1` handles tuples and
+%% binaries correctly; strings pass through unchanged.
+-spec format_ip_for_event(inet:ip_address() | binary() | string()) -> binary().
+format_ip_for_event(IP) when is_tuple(IP) ->
+    erlkoenig_nft_ip:format(IP);
+format_ip_for_event(IP) when is_binary(IP), byte_size(IP) =:= 4 ->
+    erlkoenig_nft_ip:format(IP);
+format_ip_for_event(IP) when is_binary(IP), byte_size(IP) =:= 16 ->
+    erlkoenig_nft_ip:format(IP);
+format_ip_for_event(IP) when is_binary(IP) ->
+    %% Already a human-readable "10.0.0.5" or similar — keep as-is.
+    IP;
+format_ip_for_event(IP) when is_list(IP) ->
+    iolist_to_binary(IP).
 
 -doc "Get current rates for all watched counters.".
 -spec rates() -> #{binary() => map()}.

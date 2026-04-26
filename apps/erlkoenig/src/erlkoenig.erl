@@ -159,7 +159,17 @@ list() ->
     Pids = try pg:get_members(erlkoenig_pg, erlkoenig_cts)
            catch error:_ -> []
            end,
-    [erlkoenig_ct:get_info(Pid) || Pid <- Pids].
+    %% A container that died between pg:get_members and get_info
+    %% raises exit:noproc — the old list comprehension propagated
+    %% that up and crashed whichever CLI command called us
+    %% (ek:ps, ek:top, ek:events, ...). Filter dead/wedged pids so
+    %% the operator gets the best-effort snapshot instead of an
+    %% unhelpful exception. Mirrors the erlkoenig_zone fix (#50).
+    lists:filtermap(fun(Pid) ->
+        try {true, erlkoenig_ct:get_info(Pid)}
+        catch _:_ -> false
+        end
+    end, Pids).
 
 -doc "Get detailed info about a container.".
 -spec inspect(container_pid()) -> container_info() | {error, not_found}.

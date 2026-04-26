@@ -179,6 +179,21 @@ defmodule Erlkoenig.Nft.TableBuilder do
     # Check chain name uniqueness
     Erlkoenig.Validation.check_uniqueness(t.chains, :name, "chain names in nft_table #{inspect(t.name)}")
 
+    # Check name uniqueness across every named object in the table.
+    # The kernel rejects a batch containing two NEWSET / NEWMAP / NEWFLOWTABLE
+    # with the same name (EEXIST) and rolls the ENTIRE atomic transaction
+    # back — the operator then sees "batch failed" without a pointer at
+    # the actual collision. Catching here moves the diagnostic to compile
+    # time and names the offender.
+    ensure_unique_names!(t.counters, "counter names in nft_table #{inspect(t.name)}")
+    ensure_unique_names!(set_names(t.sets), "set names in nft_table #{inspect(t.name)}")
+    ensure_unique_names!(Enum.map(t.maps, & &1.name),
+                         "map names in nft_table #{inspect(t.name)}")
+    ensure_unique_names!(Enum.map(t.vmaps, & &1.name),
+                         "vmap names in nft_table #{inspect(t.name)}")
+    ensure_unique_names!(Enum.map(t.flowtables, & &1.name),
+                         "flowtable names in nft_table #{inspect(t.name)}")
+
     # Check counter references exist
     declared_counters = MapSet.new(t.counters)
     all_rules = Enum.flat_map(t.chains, & &1.rules)
@@ -229,6 +244,31 @@ defmodule Erlkoenig.Nft.TableBuilder do
     end)
 
     :ok
+  end
+
+  # Check a flat list of names for duplicates and raise a named
+  # CompileError. Used for collections whose entries are bare strings
+  # (counters) or where the :name field has already been projected.
+  defp ensure_unique_names!(names, context) do
+    dupes = names -- Enum.uniq(names)
+
+    if dupes != [] do
+      raise CompileError,
+        description:
+          "duplicate #{context}: #{inspect(Enum.uniq(dupes))}"
+    end
+
+    :ok
+  end
+
+  # Sets are stored as tuples — either {name, type} or {name, type, meta}
+  # depending on whether any meta options were supplied. Project just the
+  # name.
+  defp set_names(sets) do
+    Enum.map(sets, fn
+      {name, _type} -> name
+      {name, _type, _meta} -> name
+    end)
   end
 
   def to_term(%__MODULE__{} = t) do

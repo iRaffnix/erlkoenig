@@ -159,12 +159,20 @@ banned(state_timeout, unban, #data{ip = IP} = Data) ->
 %% ===================================================================
 
 probation(cast, {connection, DstPort}, Data) ->
-    %% Repeat offender: back to observing with incremented ban_count
+    %% Repeat offender: back to observing with incremented ban_count.
+    %% first_seen MUST be reset too — otherwise check_slow_scan sees
+    %% Elapsed = Now - original_first_seen (which can easily exceed
+    %% SlowWindow after a long ban), the `Elapsed =< SlowWindow'
+    %% guard fails, and slow_scan detection is effectively disabled
+    %% for the second offense. Resetting keeps every post-probation
+    %% observation window detection-capable.
+    Now = erlang:system_time(second),
     Data2 = Data#data{
         ban_count = Data#data.ban_count + 1,
         ports_seen = sets:from_list([DstPort], [{version, 2}]),
-        conn_timestamps = [erlang:system_time(second)],
-        last_seen = erlang:system_time(second)
+        conn_timestamps = [Now],
+        first_seen = Now,
+        last_seen = Now
     },
     {next_state, observing, Data2,
      [{state_timeout, idle_timeout_ms(Data2#data.config), idle_expire}]};
@@ -254,10 +262,18 @@ check_suspect(#data{ports_seen = Ports, config = Config}) ->
         false -> clear
     end.
 
-escalate(_BaseDuration, #data{ban_count = BanCount, config = Config}) ->
-    %% Escalation list from DSL config: [3600, 21600, 86400, 604800]
-    %% Each entry is the absolute ban duration for that ban number.
-    Escalation = maps:get(escalation, Config, [3600, 21600, 86400, 604800]),
+escalate(BaseDuration, #data{ban_count = BanCount, config = Config}) ->
+    %% Escalation list: absolute ban duration per offense number.
+    %% If the operator didn't provide an explicit `escalation' list,
+    %% derive it from `ban_duration' so `ban_duration: 7200' actually
+    %% produces a 7200s first ban instead of silently becoming the
+    %% hardcoded 3600. The multipliers [1x, 6x, 24x, 168x] mirror
+    %% the original defaults (1h / 6h / 24h / 1w for BaseDuration=3600).
+    Default = [BaseDuration,
+               BaseDuration * 6,
+               BaseDuration * 24,
+               BaseDuration * 168],
+    Escalation = maps:get(escalation, Config, Default),
     Idx = min(BanCount + 1, length(Escalation)),
     lists:nth(Idx, Escalation).
 

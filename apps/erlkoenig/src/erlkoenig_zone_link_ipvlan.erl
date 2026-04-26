@@ -30,6 +30,14 @@ in the multi-threaded BEAM.
 
 -export([init/1, attach_container/3, detach_container/2]).
 
+%% host_slave_name carries the only non-trivial length arithmetic in
+%% this module: `h.<dummy>' must fit IFNAMSIZ (15 visible bytes).
+%% Export under TEST so the edge cases can be pinned without going
+%% through ensure_dummy (which shells out via os:cmd).
+-ifdef(TEST).
+-export([host_slave_name/1]).
+-endif.
+
 %%%===================================================================
 %%% Behaviour callbacks
 %%%===================================================================
@@ -186,11 +194,27 @@ host_slave_name(DummyName) ->
 -spec create_host_slave(string(), string(), string()) -> ok.
 create_host_slave(DummyStr, HostSlaveStr, GwCidr) ->
     %% Use `ip' for slave creation — terse, well-supported for IPVLAN L3S.
+    %% The individual commands remain "best-effort" (tolerates EEXIST
+    %% on re-runs where the slave was pre-created by a prior attempt),
+    %% but we MUST verify the end-state: without /sys/class/net/<slave>
+    %% the host cannot reach the container netns at all, and the
+    %% previous all-`ok'-return masked that as success. Operators saw
+    %% "container started" logs while TCP from host hung.
     os_cmd_ok("ip link add link " ++ DummyStr ++ " name " ++ HostSlaveStr ++
               " type ipvlan mode l3s"),
     os_cmd_ok("ip addr add " ++ GwCidr ++ " dev " ++ HostSlaveStr),
     os_cmd_ok("ip link set " ++ HostSlaveStr ++ " up"),
-    ok.
+    case filelib:is_dir("/sys/class/net/" ++ HostSlaveStr) of
+        true ->
+            ok;
+        false ->
+            logger:error("[zone_link_ipvlan] host slave ~s was not "
+                         "created — host→container reachability will "
+                         "be broken (check `ip link' for cmd failures "
+                         "above)",
+                         [HostSlaveStr]),
+            {error, {host_slave_missing, HostSlaveStr}}
+    end.
 
 -spec os_cmd_ok(string()) -> ok.
 os_cmd_ok(Cmd) ->
@@ -202,6 +226,6 @@ os_cmd_ok(Cmd) ->
                 _   ->
                     logger:error("[zone_link_ipvlan] cmd failed: ~s -> ~s",
                                  [Cmd, Result]),
-                    ok  %% best-effort
+                    ok  %% best-effort; end-state verified at caller
             end
     end.

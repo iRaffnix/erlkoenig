@@ -558,7 +558,12 @@ queue_flags(Flags) when is_list(Flags) ->
             (bypass, Acc) -> Acc bor 16#01;
             %% NFT_QUEUE_FLAG_CPU_FANOUT
             (fanout, Acc) -> Acc bor 16#02;
-            (_, Acc) -> Acc
+            %% Fail loud on unknown flag atoms: silently dropping them
+            %% lets a typo like `[byepass]` produce flags=0, which flips
+            %% queue-full behavior from "accept (bypass)" to "drop". That
+            %% turns a missing userspace consumer into silent packet loss
+            %% instead of the fallthrough the operator declared.
+            (Other, _Acc) -> error({unknown_queue_flag, Other})
         end,
         0,
         Flags

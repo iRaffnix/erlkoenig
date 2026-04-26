@@ -305,17 +305,23 @@ prop_encode_cmd_spawn_is_deterministic() ->
             A =:= B andalso B =:= C
         end).
 
-%% REPLY_STATUS requires a fixed-size payload: State(1) + Pid(4) +
-%% Uptime(8).  Feed random shorter payloads and assert the decoder
-%% returns malformed-error, not a crash or ghost value.
+%% REPLY_STATUS is now a TLV payload (state u8, pid u32, uptime u64 —
+%% each as an independent attribute). Feed random short payloads and
+%% assert the decoder never crashes or returns a ghost value. Any
+%% subset of missing TLVs must fall back to zero defaults. This is the
+%% regression harness for the positional-vs-TLV drift that silently
+%% broke the recovery path.
 prop_decode_reply_status_short_frames() ->
     ?FORALL(Payload, short_payload_gen(),
         begin
-            Bin = <<16#06, 0, Payload/binary>>, %% TAG_REPLY_STATUS
+            Bin = <<16#06, 1, Payload/binary>>, %% TAG_REPLY_STATUS, ver=1
             case erlkoenig_proto:decode(Bin) of
-                {ok, reply_status, _} when byte_size(Payload) >= 13 -> true;
-                {error, {malformed, reply_status}} when byte_size(Payload) < 13 -> true;
-                {error, _} -> true;
+                {ok, reply_status, #{state := S, child_pid := P,
+                                     uptime_ms := U}}
+                  when is_integer(S), is_integer(P), is_integer(U) ->
+                    true;
+                {error, _} ->
+                    true;
                 Other ->
                     io:format(user,
                               "BUG: REPLY_STATUS ~p-byte payload -> ~p~n",

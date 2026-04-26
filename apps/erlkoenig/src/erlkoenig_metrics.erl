@@ -142,9 +142,21 @@ handle_event({container_metrics, Id, #{type := oom} = Ev}, State) ->
 
 handle_event({container_stopped, Id, _Name, _}, State) ->
     %% Clean up metrics 30s after stop (allows post-mortem inspection).
-    %% Timer is fire-and-forget; if handler restarts, entries are orphaned
-    %% but bounded by container count.
-    erlang:send_after(30_000, erlkoenig_events, {cleanup_metrics, Id}),
+    %% Tag the message with a stop_epoch so a restart within 30s
+    %% doesn't wipe the NEW instance's metrics when this timer fires.
+    %% Without the epoch, a crashloop (stop → start → stop → start)
+    %% would see each newborn instance's metrics silently deleted
+    %% by a stale cleanup from a prior cycle.
+    StopEpoch = erlang:monotonic_time(millisecond),
+    update_metrics(Id, fun(M) -> M#metrics{last_exit_ts = StopEpoch} end),
+    erlang:send_after(30_000, erlkoenig_events,
+                      {cleanup_metrics, Id, StopEpoch}),
+    {ok, State};
+
+handle_event({container_started, Id, _Name, _Pid}, State) ->
+    %% Reset the exit-epoch so a pending cleanup_metrics from a
+    %% previous lifecycle no longer matches.
+    update_metrics(Id, fun(M) -> M#metrics{last_exit_ts = 0} end),
     {ok, State};
 
 handle_event(_, State) ->
@@ -160,6 +172,18 @@ handle_call({stats, Id}, State) ->
 handle_call(_, State) ->
     {ok, {error, unknown_call}, State}.
 
+handle_info({cleanup_metrics, Id, StopEpoch}, State) ->
+    %% Only clean up if the container's exit epoch still matches —
+    %% a restart would have reset last_exit_ts to 0 (new lifecycle)
+    %% and the stale cleanup falls through harmlessly.
+    case ets:lookup(?TABLE, Id) of
+        [#metrics{last_exit_ts = StopEpoch}] ->
+            ets:delete(?TABLE, Id);
+        _ ->
+            ok  %% restarted or already gone — keep fresh metrics
+    end,
+    {ok, State};
+%% Legacy 2-tuple variant from in-flight timers at upgrade time.
 handle_info({cleanup_metrics, Id}, State) ->
     ets:delete(?TABLE, Id),
     {ok, State};

@@ -172,9 +172,15 @@ handle_cast({crash, BinaryPath}, State) ->
     case hash_path(BinaryPath) of
         {ok, Hash} ->
             {noreply, observe_crash(Hash, State)};
-        {error, _} ->
-            %% Binary vanished between crash and hashing. Nothing we can
-            %% attribute the crash to — drop silently.
+        {error, Reason} ->
+            %% Binary vanished between crash and hashing. Can't
+            %% attribute the crash, so no quarantine bookkeeping —
+            %% but log it so repeated unattributable crashes (e.g. a
+            %% binary being replaced by an attacker) become visible
+            %% in the event stream.
+            logger:warning(
+                "quarantine: unattributable crash — path=~p reason=~p",
+                [BinaryPath, Reason]),
             {noreply, State}
     end;
 handle_cast(_, State) -> {noreply, State}.

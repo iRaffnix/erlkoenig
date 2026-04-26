@@ -372,15 +372,27 @@ cert_entry_type(_) -> 'Certificate'.
 parse_git_sha(<<>>) ->
     <<0:160>>;
 parse_git_sha(Hex) when byte_size(Hex) =:= 40 ->
-    %% `hex_to_bin` calls `binary_to_integer(<<H,L>>, 16)` which
-    %% raises badarg on non-hex bytes.  A 40-byte non-hex input
-    %% used to crash the caller; now we fall back to zeroes.
+    %% `hex_to_bin' raises badarg on non-hex bytes. This parser is
+    %% fuzz-contract (see erlkoenig_sig_fuzz_test) — arbitrary input
+    %% must not crash, so non-hex falls back to zeroes. Log it though:
+    %% previously the fallback was silent, which meant a signer passing
+    %% corrupted hex saw "00000..." in verifier metadata with no clue
+    %% their git_sha was rejected.
     try hex_to_bin(Hex)
-    catch _:_ -> <<0:160>>
+    catch _:Reason ->
+        logger:warning(
+            "[sig] parse_git_sha: ~B-byte input not valid hex (~p), "
+            "falling back to zero-sha; signer attribution lost",
+            [byte_size(Hex), Reason]),
+        <<0:160>>
     end;
 parse_git_sha(Raw) when byte_size(Raw) =:= 20 ->
     Raw;
-parse_git_sha(_) ->
+parse_git_sha(Other) ->
+    logger:warning(
+        "[sig] parse_git_sha: rejected ~B-byte input "
+        "(expected 0, 20, or 40 bytes); using zero-sha",
+        [byte_size(Other)]),
     <<0:160>>.
 
 -spec hex(binary()) -> binary().

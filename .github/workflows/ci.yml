@@ -33,6 +33,151 @@ jobs:
       - name: CI gate
         run: make test dialyzer
 
+  # ── Wire-Protocol Change Gate (SPEC-PROTO-001 policy) ───────────
+  # Enforces: if a PR touches the files that define the BEAM<->C
+  # wire protocol, the author MUST either (a) update/add golden
+  # vectors in the sibling erlkoenigin repo, OR (b) justify the
+  # exception with an explicit bypass token in the PR body.
+  #
+  # This codifies the lesson from the REPLY_STATUS TLV drift and
+  # handshake-on-reconnect bugs: wire-protocol changes that slip
+  # through without vector updates are the single highest-impact
+  # regression class in this codebase.
+  wire-protocol-gate:
+    name: Wire-Protocol Change Gate
+    runs-on: ubuntu-22.04
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect wire-protocol + vector changes
+        id: detect
+        run: |
+          BASE='${{ github.event.pull_request.base.sha }}'
+          HEAD='${{ github.event.pull_request.head.sha }}'
+          CHANGED=$(git diff --name-only "$BASE" "$HEAD")
+          echo "Files changed in this PR:"
+          echo "$CHANGED"
+          echo
+          WIRE_RE='^apps/erlkoenig/src/erlkoenig_proto\.erl$|^apps/erlkoenig/include/.*proto.*|^apps/erlkoenig/include/.*tlv.*'
+          VEC_RE='^apps/erlkoenig/test/protocol_vectors/'
+
+          if echo "$CHANGED" | grep -qE "$WIRE_RE"; then
+            echo "wire_changed=true" >> "$GITHUB_OUTPUT"
+            echo "Matched wire-protocol files:"
+            echo "$CHANGED" | grep -E "$WIRE_RE"
+          else
+            echo "wire_changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if echo "$CHANGED" | grep -qE "$VEC_RE"; then
+            echo "vectors_changed=true" >> "$GITHUB_OUTPUT"
+            echo "Matched vector files:"
+            echo "$CHANGED" | grep -E "$VEC_RE"
+          else
+            echo "vectors_changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Enforce vector-update discipline
+        if: steps.detect.outputs.wire_changed == 'true' && steps.detect.outputs.vectors_changed == 'false'
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          echo
+          echo "============================================================"
+          echo "  WIRE-PROTOCOL CHANGE WITHOUT VECTOR UPDATE"
+          echo "============================================================"
+          echo
+          echo "This PR modifies files that define the BEAM <-> C wire"
+          echo "protocol but does NOT touch any vector in"
+          echo "apps/erlkoenig/test/protocol_vectors/. Per SPEC-PROTO-001"
+          echo "and ADR-0021, every such change MUST be paired with a"
+          echo "golden-vector update."
+          echo
+          echo "Why: the REPLY_STATUS TLV drift and handshake-on-reconnect"
+          echo "bugs were BOTH invisible because Erlang-encoder and C-parser"
+          echo "drifted apart without any cross-boundary test catching it."
+          echo "Golden vectors are the contract that makes drift fail loud."
+          echo
+          echo "What to do:"
+          echo "  1. Add or update .bin + .expected.term under"
+          echo "     apps/erlkoenig/test/protocol_vectors/v1/{replies,cmds}/"
+          echo "     that covers the new/changed shape."
+          echo "  2. (Optional, same PR) mirror the update into the"
+          echo "     erlkoenigin spec repo at specs/protocol/vectors/v1/"
+          echo "     for cross-reference; code-side vendor is what CI runs."
+          echo "  3. Verify locally: rebar3 eunit --module=erlkoenig_proto_golden_tests"
+          echo
+          echo "Bypass (document-only):"
+          echo "  For trivial changes that genuinely do not shift wire"
+          echo "  semantics (comment-only, whitespace, pure rename) add"
+          echo "  to the PR body:"
+          echo
+          echo "    [wire-gate: bypass <short reason>]"
+          echo
+          echo "  Bypasses are searchable in git log forever:"
+          echo "    git log -S '[wire-gate: bypass'"
+          echo
+          echo "============================================================"
+          echo
+          # tr '\n' ' ' flattens newlines so a multi-line bypass token
+          # (operator wraps a long reason across two lines) is detected.
+          # grep is line-oriented by default and [^]] doesn't bridge \n.
+          BODY_FLAT=$(echo "$PR_BODY" | tr '\n' ' ')
+          if echo "$BODY_FLAT" | grep -qE '\[wire-gate:\s*bypass[^]]+\]'; then
+            BYPASS=$(echo "$BODY_FLAT" | grep -oE '\[wire-gate:\s*bypass[^]]+\]' | head -1)
+            echo "Bypass token detected: $BYPASS"
+            echo "Gate passed via documented exception."
+            exit 0
+          fi
+          echo "::error::Wire-protocol file touched without golden vector update or bypass token"
+          exit 1
+
+      - name: Gate satisfied
+        if: steps.detect.outputs.wire_changed == 'false' || steps.detect.outputs.vectors_changed == 'true'
+        run: |
+          if [ "${{ steps.detect.outputs.wire_changed }}" = "false" ]; then
+            echo "No wire-protocol files touched — gate passes trivially."
+          else
+            echo "Wire-protocol change paired with vector update — gate satisfied."
+          fi
+
+  # ── Protocol Golden Vectors (SPEC-PROTO-001) ─────────────────────
+  # Fast, self-contained regression gate for the BEAM<->C wire
+  # protocol. Runs the vendored vectors in
+  # apps/erlkoenig/test/protocol_vectors/v1/ through
+  # erlkoenig_proto:decode/1. Source of the vectors remains the
+  # erlkoenigin spec repo; the code-repo copy is the
+  # runtime-consumed artefact so CI is self-contained.
+  # Deliberately separate from the main `erlang` job so the signal
+  # is obvious in CI logs.
+  proto-golden:
+    name: Protocol Golden Vectors
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Beam
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: '28'
+          rebar3-version: '3.24'
+
+      - name: Cache rebar3
+        uses: actions/cache@v4
+        with:
+          path: |
+            _build
+            ~/.cache/rebar3
+          key: erlang-${{ hashFiles('rebar.lock', 'rebar.config') }}
+          restore-keys: |
+            erlang-
+
+      - name: Run golden tests
+        run: rebar3 eunit --module=erlkoenig_proto_golden_tests
+
   # ── Elixir DSL ────────────────────────────────────────────
   dsl:
     name: Elixir DSL Tests

@@ -160,18 +160,20 @@ start_link(Config) when is_map(Config) ->
 
 handle_call({register, Name, Ip}, _From, #state{tab = Tab, domain = Domain} = State) ->
     FqName = <<Name/binary, ".", Domain/binary>>,
+    %% Replace any prior entries for this name first — the ETS is a
+    %% bag, so `ets:insert` adds without removing old rows. A
+    %% re-register with a new IP (container recreated, address pool
+    %% recycled) would otherwise leave both (name, FqName, OldIp)
+    %% and (name, FqName, NewIp) behind, and lookup/unregister's
+    %% `[{name, _, Ip}]' match would case_clause-crash on that
+    %% 2-element list → the DNS gen_server dies → zone loses DNS.
+    remove_all_name(Tab, FqName),
     ets:insert(Tab, [{name, FqName, Ip}, {ip, Ip, FqName}]),
     {reply, ok, State};
 
 handle_call({unregister, Name}, _From, #state{tab = Tab, domain = Domain} = State) ->
     FqName = <<Name/binary, ".", Domain/binary>>,
-    case ets:match_object(Tab, {name, FqName, '_'}) of
-        [{name, _, Ip}] ->
-            ets:delete_object(Tab, {name, FqName, Ip}),
-            ets:delete_object(Tab, {ip, Ip, FqName});
-        [] ->
-            ok
-    end,
+    remove_all_name(Tab, FqName),
     {reply, ok, State};
 
 handle_call({lookup, Name}, _From, #state{tab = Tab, domain = Domain} = State) ->
@@ -179,9 +181,10 @@ handle_call({lookup, Name}, _From, #state{tab = Tab, domain = Domain} = State) -
         nomatch -> <<Name/binary, ".", Domain/binary>>;
         _       -> Name
     end,
+    %% Robust to accidental bag-duplicates: pick first, ignore rest.
     case ets:match_object(Tab, {name, FqName, '_'}) of
-        [{name, _, Ip}] -> {reply, {ok, Ip}, State};
-        []              -> {reply, not_found, State}
+        [{name, _, Ip} | _] -> {reply, {ok, Ip}, State};
+        []                  -> {reply, not_found, State}
     end;
 
 handle_call(_Req, _From, State) ->
@@ -472,6 +475,24 @@ encode_ptr_reply(Id, QueryPacket, PtrName) ->
 %% Helpers
 %% =================================================================
 
+%% Remove every {name, FqName, _} tuple (plus the matching reverse
+%% {ip, _, FqName}) from the bag ETS. Called before register to give
+%% register replace-semantics, and as the unregister body. Iterates
+%% the match list so multiple entries are all cleaned up — a bag can
+%% legitimately hold several if a prior register ran without a
+%% matching unregister first (container crash mid-lifecycle).
+-spec remove_all_name(ets:tid(), binary()) -> ok.
+remove_all_name(Tab, FqName) ->
+    case ets:match_object(Tab, {name, FqName, '_'}) of
+        [] -> ok;
+        Matches ->
+            [begin
+                 ets:delete_object(Tab, {name, FqName, Ip}),
+                 ets:delete_object(Tab, {ip, Ip, FqName})
+             end || {name, _, Ip} <- Matches],
+            ok
+    end.
+
 -spec is_internal_name(binary(), binary()) -> boolean().
 is_internal_name(Name, Domain) ->
     Suffix = <<".", Domain/binary>>,
@@ -485,13 +506,24 @@ ptr_to_ip(Name) ->
     case binary:split(Name, <<".in-addr.arpa">>) of
         [Reversed, <<>>] ->
             Parts = binary:split(Reversed, <<".">>, [global]),
-            case [binary_to_integer(P) || P <- lists:reverse(Parts)] of
+            %% `binary_to_integer/1` raises badarg on any non-numeric
+            %% part (label with letters, empty label, utf-8 garbage).
+            %% Previously that propagated up through the list
+            %% comprehension → resolve_internal → handle_dns_query
+            %% → gen_server handle_info, which crashed the whole DNS
+            %% resolver for the zone. A single attacker packet with
+            %% "foo.bar.in-addr.arpa" as the query name was enough to
+            %% force a supervisor restart. Keep the resolver alive
+            %% and return `error' so the caller sends NXDOMAIN.
+            try [binary_to_integer(P) || P <- lists:reverse(Parts)] of
                 [A, B, C, D] when A >= 0, A =< 255,
                                   B >= 0, B =< 255,
                                   C >= 0, C =< 255,
                                   D >= 0, D =< 255 ->
                     {ok, {A, B, C, D}};
                 _ -> error
+            catch
+                error:badarg -> error
             end;
         _ -> error
     end.

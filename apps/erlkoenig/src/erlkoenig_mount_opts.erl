@@ -318,18 +318,42 @@ classify(Token, FT, PT) ->
          {?MS_REMOUNT,      set,   <<"remount">>},
          {?MS_SILENT,       set,   <<"silent">>}]).
 
-flags_to_tokens(Flags, _Clear) ->
+%% Tokens to emit when a flag bit is explicitly CLEARED (inverse
+%% of the set-forms in the flag_table above). Previously format/1
+%% ignored the Clear bitmask entirely; an input like `"nosuid,suid"'
+%% parsed to `flags=0, clear=MS_NOSUID' but round-tripped back as
+%% `""', hiding the explicit hardening-weakening from operator
+%% logs and diffs. Any bit here must correspond to an inverse token
+%% recognized by flag_table/0 so format→parse round-trips.
+-define(CLEAR_ORDER,
+        [{?MS_RDONLY,       <<"rw">>},
+         {?MS_NOSUID,       <<"suid">>},
+         {?MS_NODEV,        <<"dev">>},
+         {?MS_NOEXEC,       <<"exec">>},
+         {?MS_SYNCHRONOUS,  <<"async">>},
+         {?MS_MANDLOCK,     <<"nomand">>},
+         {?MS_NODIRATIME,   <<"diratime">>},
+         {?MS_RELATIME,     <<"norelatime">>},
+         {?MS_I_VERSION,    <<"noiversion">>},
+         {?MS_LAZYTIME,     <<"nolazytime">>},
+         {?MS_SILENT,       <<"loud">>}]).
+
+flags_to_tokens(Flags, Clear) ->
     %% `bind` + `rec` combined -> rbind (canonical short form).
     Has = fun(B) -> (Flags band B) =/= 0 end,
-    case {Has(?MS_BIND), Has(?MS_REC)} of
-        {true, true}  ->
-            Rest = [Tok || {B, set, Tok} <- ?FORMAT_ORDER,
-                           B =/= ?MS_BIND, B =/= ?MS_REC,
-                           Has(B)],
-            Rest ++ [<<"rbind">>];
-        _ ->
-            [Tok || {B, set, Tok} <- ?FORMAT_ORDER, Has(B)]
-    end.
+    Cleared = fun(B) -> (Clear band B) =/= 0 end,
+    SetToks =
+        case {Has(?MS_BIND), Has(?MS_REC)} of
+            {true, true}  ->
+                Rest = [Tok || {B, set, Tok} <- ?FORMAT_ORDER,
+                               B =/= ?MS_BIND, B =/= ?MS_REC,
+                               Has(B)],
+                Rest ++ [<<"rbind">>];
+            _ ->
+                [Tok || {B, set, Tok} <- ?FORMAT_ORDER, Has(B)]
+        end,
+    ClearToks = [Tok || {B, Tok} <- ?CLEAR_ORDER, Cleared(B)],
+    SetToks ++ ClearToks.
 
 propagation_to_token(none, _)       -> [];
 propagation_to_token(private, true) -> [<<"rprivate">>];

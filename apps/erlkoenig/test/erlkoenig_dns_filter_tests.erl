@@ -41,6 +41,47 @@ compile_strips_trailing_dot_test() ->
         erlkoenig_dns_filter:compile_patterns([<<"api.openai.com.">>]).
 
 %% =================================================================
+%% compile_one — rejection of malformed wildcards (Muster 9)
+%% =================================================================
+%%
+%% Regression guard: `"*."`, `"*"`, `"**.foo"`, `"*abc"` all used to
+%% fall through to the generic exact-match clause (the first-clause
+%% guard `byte_size(Rest) > 0` failed, the next clause took anything
+%% non-empty), producing silently-dead patterns like `{exact, <<"*">>}`
+%% that can't match any real DNS query. Operators writing a typo in
+%% the wildcard got no feedback and an allowlist entry that did
+%% nothing. DSL rejects these via regex; the module-level parser now
+%% follows suit.
+
+compile_rejects_lone_star_test() ->
+    ?assertEqual([{error, invalid_host}],
+                 erlkoenig_dns_filter:compile_patterns([<<"*">>])).
+
+compile_rejects_star_dot_test() ->
+    ?assertEqual([{error, invalid_host}],
+                 erlkoenig_dns_filter:compile_patterns([<<"*.">>])).
+
+compile_rejects_double_star_wildcard_test() ->
+    ?assertEqual([{error, invalid_host}],
+                 erlkoenig_dns_filter:compile_patterns([<<"**.foo">>])).
+
+compile_rejects_star_prefix_no_dot_test() ->
+    %% "*abc" is neither "*.<rest>" nor a valid literal hostname.
+    ?assertEqual([{error, invalid_host}],
+                 erlkoenig_dns_filter:compile_patterns([<<"*abc">>])).
+
+compile_rejects_empty_binary_test() ->
+    ?assertEqual([{error, invalid_host}],
+                 erlkoenig_dns_filter:compile_patterns([<<>>])).
+
+compile_accepts_valid_wildcard_after_star_rejection_test() ->
+    %% Sanity: the valid `*.rest` shape still compiles correctly
+    %% now that the stricter clause exists.
+    ?assertEqual([{suffix, <<"example.com">>}],
+                 erlkoenig_dns_filter:compile_patterns(
+                     [<<"*.example.com">>])).
+
+%% =================================================================
 %% Lifecycle (start / register / check / unregister)
 %% =================================================================
 

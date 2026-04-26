@@ -220,9 +220,17 @@ parse_dump(
             <<_NfGenMsg:4/binary, AttrBin/binary>> = Payload,
             %% nfnl_attr:decode raises on malformed NLA — treat as
             %% skip rather than propagate out of a dump parser.
+            %% Log the error: silently skipping lets a compromised or
+            %% buggy kernel hide rules from the operator's view without
+            %% any signal that the dump was partial.
             try nfnl_attr:decode(AttrBin) of
                 Attrs -> parse_dump(Tail, [Attrs | Acc])
-            catch _:_ -> parse_dump(Tail, Acc)
+            catch Class:Reason:Stack ->
+                logger:warning(
+                    "nft_query: skipping malformed nftables dump entry "
+                    "(~p:~p, attrs=~B bytes); stack=~p",
+                    [Class, Reason, byte_size(AttrBin), Stack]),
+                parse_dump(Tail, Acc)
             end;
         _ ->
             parse_dump(Tail, Acc)

@@ -220,20 +220,31 @@ load_node_cert_hash(Path, Roots, Mode) ->
                                         [Path, short_hex(Hash)]),
                             Hash;
                         {error, Reason} when Mode =:= on ->
-                            logger:error("[pki] node cert ~s: chain invalid: ~p",
+                            %% strict mode: same semantics as a missing
+                            %% node cert. sig-verify in strict mode
+                            %% rejects an invalid chain; the node cert
+                            %% hash must not silently report "valid cert
+                            %% present" when the chain it claims to
+                            %% anchor is broken. Emitting <<0:256>>
+                            %% here keeps the pki_loaded audit event's
+                            %% `node_cert_present` flag honest and
+                            %% matches the file-not-found branch below.
+                            logger:error("[pki] node cert ~s: chain invalid: "
+                                         "~p (mode=on → identity disabled)",
                                          [Path, Reason]),
                             erlkoenig_audit:log(#{
                                 type => node_cert_rejected,
                                 subject => <<"pki">>,
                                 result => {error, Reason},
-                                details => #{path => list_to_binary(Path)}
+                                details => #{path => list_to_binary(Path),
+                                             mode => on}
                             }),
-                            %% In strict mode, return the hash anyway
-                            %% so the handshake runs — but log the error.
-                            %% The operator must fix the chain.
-                            Hash = crypto:hash(sha256, PemBin),
-                            Hash;
+                            <<0:256>>;
                         {error, Reason} ->
+                            %% warn/off: permissive — return the hash
+                            %% so AMQP/handshake paths that haven't
+                            %% been strictly gated yet keep working,
+                            %% but log loudly so the operator sees it.
                             logger:warning("[pki] node cert ~s: chain invalid: ~p "
                                            "(mode=~p, continuing)", [Path, Reason, Mode]),
                             Hash = crypto:hash(sha256, PemBin),

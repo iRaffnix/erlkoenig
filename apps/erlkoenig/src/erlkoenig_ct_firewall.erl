@@ -14,7 +14,7 @@
 %% limitations under the License.
 %%
 
--module(erlkoenig_firewall_nft).
+-module(erlkoenig_ct_firewall).
 -moduledoc """
 nf_tables operations for per-container firewall chains.
 
@@ -71,8 +71,18 @@ setup_table() ->
     %% Selective cleanup: flush own chains instead of deleting the entire table.
     %% Other subsystems (erlkoenig_config/DSL) may have chains/maps in this table.
     flush_own_chains(),
-    %% Enable IP forwarding
-    _ = file:write_file(?IP_FORWARD_PATH, <<"1">>),
+    %% Enable IP forwarding. Silent failure here means masquerade and
+    %% cross-netns routing don't work; log so an operator chasing
+    %% "containers can't reach internet" in a dev/unprivileged setup
+    %% finds the root cause instead of debugging the nft rules.
+    case file:write_file(?IP_FORWARD_PATH, <<"1">>) of
+        ok -> ok;
+        {error, IpFwdReason} ->
+            logger:warning("erlkoenig_ct_firewall: cannot enable "
+                           "ip_forward (~s): ~p — masquerade/routing "
+                           "will not work",
+                           [?IP_FORWARD_PATH, IpFwdReason])
+    end,
     nfnl_server:apply_msgs(?SERVER, [
         fun(S) -> nft_table:add(?FAMILY, ?TABLE, S) end,
 
@@ -309,18 +319,31 @@ add_container(ContainerId, Ip, HostVeth, Ports, FirewallTerm, Name) ->
      || {HostPort, ContainerPort} <- Ports
     ]),
 
-    %% Store container info for rebuild on remove
-    ets:insert(erlkoenig_firewall_ports, {ContainerId, HostVeth, Ip, Ports, Chain}),
+    %% Apply kernel-level config FIRST. Only record in ETS and start the
+    %% nflog receiver when the batch committed — otherwise a mid-batch
+    %% kernel rejection leaves ETS claiming this container is firewalled
+    %% (with chain name X, ports Y) while no chain actually exists.
+    %% The next remove_container would then try to flush+delete a chain
+    %% that was never created and rebuild jump/DNAT rules that refer to
+    %% a nonexistent target — cascading kernel ENOENT errors.
     Result = nfnl_server:apply_msgs(?SERVER, Msgs ++ DnatMsgs),
-
-    %% Start NFLOG receiver for this container's drop events
-    case erlkoenig_nft_nflog:start_link(NflogGroup) of
-        {ok, _} ->
-            logger:info("erlkoenig_firewall_nft: nflog group ~p for ~s",
-                        [NflogGroup, Chain]);
-        {error, Reason} ->
-            logger:warning("erlkoenig_firewall_nft: nflog start failed for ~s: ~p",
-                            [Chain, Reason])
+    case Result of
+        ok ->
+            ets:insert(erlkoenig_firewall_ports,
+                       {ContainerId, HostVeth, Ip, Ports, Chain}),
+            case erlkoenig_nft_nflog:start_link(NflogGroup) of
+                {ok, _} ->
+                    logger:info("erlkoenig_ct_firewall: nflog group ~p for ~s",
+                                [NflogGroup, Chain]);
+                {error, Reason} ->
+                    logger:warning("erlkoenig_ct_firewall: nflog start failed "
+                                   "for ~s: ~p",
+                                   [Chain, Reason])
+            end;
+        {error, ApplyReason} ->
+            logger:warning("erlkoenig_ct_firewall: add_container ~s batch "
+                           "failed: ~p (ETS + nflog left untouched)",
+                           [Chain, ApplyReason])
     end,
     Result.
 
@@ -340,11 +363,14 @@ remove_container(ContainerId) ->
         [{_, _, _, _}] -> chain_name(ContainerId);  %% old format
         _ -> chain_name(ContainerId)
     end,
-    %% Remove this container from ETS
-    ets:delete(erlkoenig_firewall_ports, ContainerId),
-    %% Remaining containers (filter out metadata entries like nflog_group_counter)
+    %% Build the "remaining containers" snapshot from the ETS state WITHOUT
+    %% mutating it yet. Mirrors the fix in add_container: if the kernel
+    %% batch is rejected, we must not have deleted ETS first — that would
+    %% leave kernel rules for this container live while ETS claims it's
+    %% gone, and future rebuilds would miss those orphaned rules forever.
     Remaining = [R || R <- ets:tab2list(erlkoenig_firewall_ports),
-                      is_tuple(R), tuple_size(R) =:= 5],
+                      is_tuple(R), tuple_size(R) =:= 5,
+                      element(1, R) =/= ContainerId],
     %% 1. Flush shared chains + container chain, then delete container chain
     FlushMsgs = [
         fun(S) -> nft_delete:flush_chain(?FAMILY, ?TABLE, ?FORWARD_CHAIN, S) end,
@@ -360,7 +386,17 @@ remove_container(ContainerId) ->
     ],
     %% 3. Re-add jump + DNAT rules for remaining containers
     RebuildMsgs = lists:append([rebuild_shared_rules(R) || R <- Remaining]),
-    nfnl_server:apply_msgs(?SERVER, FlushMsgs ++ BaseMsgs ++ RebuildMsgs).
+    Result = nfnl_server:apply_msgs(?SERVER, FlushMsgs ++ BaseMsgs ++ RebuildMsgs),
+    case Result of
+        ok ->
+            ets:delete(erlkoenig_firewall_ports, ContainerId);
+        {error, RemoveReason} ->
+            logger:warning("erlkoenig_ct_firewall: remove_container ~s batch "
+                           "failed: ~p (ETS entry retained so a retry can "
+                           "target the same chain)",
+                           [Chain, RemoveReason])
+    end,
+    Result.
 
 -doc "Rebuild forward jump + DNAT rules for one container.".
 -spec rebuild_shared_rules(tuple()) -> [fun()].
@@ -655,7 +691,7 @@ compile_rule({flow_offload, FlowtableName}) ->
 
 %% Catch-all
 compile_rule(Unknown) ->
-    logger:warning("erlkoenig_firewall_nft: unknown rule ~p, skipping", [Unknown]),
+    logger:warning("erlkoenig_ct_firewall: unknown rule ~p, skipping", [Unknown]),
     [].
 
 -doc "Create a set add message.".

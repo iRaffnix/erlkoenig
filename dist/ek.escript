@@ -53,6 +53,8 @@ main(Args) ->
     end.
 
 %% Commands that work without a running erlkoenig node.
+needs_distribution(["doctor" | _]) -> false;
+needs_distribution(["explain" | _]) -> false;
 needs_distribution(["dsl" | _]) -> false;
 needs_distribution(_)            -> true.
 
@@ -67,11 +69,20 @@ dispatch(["node", "version"], O) -> node_version(O);
 dispatch(["version"], O)         -> node_version(O);
 dispatch(["node", "health"], O)  -> node_health(O);
 
+%% --- Local diagnostics -------------------------------------------
+dispatch(["doctor"], O)          -> doctor(O);
+dispatch(["explain", "--list"], O) -> explain_list(O, all);
+dispatch(["explain", "--component", Component], O) ->
+    explain_list(O, {component, Component});
+dispatch(["explain", Code], O)   -> explain(O, Code);
+
 %% --- Containers ---------------------------------------------------
 dispatch(["ct", "list"], O)            -> ct_list(O);
 dispatch(["ps"], O)                    -> ct_list(O);  %% docker-familiar alias
 dispatch(["ct", "inspect", Name], O)   -> ct_inspect(O, list_to_binary(Name));
+dispatch(["inspect", Name], O)         -> ct_inspect(O, list_to_binary(Name));
 dispatch(["ct", "stop",   Name], O)    -> ct_stop(O, list_to_binary(Name));
+dispatch(["stop", Name], O)            -> ct_stop(O, list_to_binary(Name));
 
 %% --- Pods ---------------------------------------------------------
 dispatch(["pod", "list"], O) -> pod_list(O);
@@ -145,6 +156,240 @@ node_health(O) ->
     ]).
 
 %%====================================================================
+%% Local diagnostics
+%%====================================================================
+
+doctor(O) ->
+    Catalog = read_error_catalog(),
+    Checks = doctor_checks(Catalog),
+    case maps:get(format, O, table) of
+        json ->
+            emit_table(O, [check, status, code, detail, action, evidence],
+                       [[maps:get(check, C), maps:get(status, C),
+                         maps:get(code, C), maps:get(detail, C),
+                         maps:get(action, C), maps:get(evidence, C, #{})]
+                        || C <- Checks]);
+        _ ->
+            emit_table(O, [check, status, code, detail, action],
+                       [[maps:get(check, C), maps:get(status, C),
+                         maps:get(code, C), maps:get(detail, C),
+                         maps:get(action, C)] || C <- Checks]),
+            case [C || C <- Checks, maps:get(status, C) =:= fail] of
+                [] -> emit_plain("doctor: no blocking local issues found");
+                Fs -> {error, io_lib:format("doctor: ~p blocking issue(s)", [length(Fs)])}
+            end
+    end.
+
+doctor_checks(Catalog) ->
+    [
+        doctor_probe(runtime_binary, host, runtime_binary_missing,
+                     find_runtime_binary(), Catalog),
+        doctor_probe(cookie, host, cookie_missing,
+                     find_cookie_file(), Catalog),
+        doctor_probe(socket_dir, host, socket_dir_missing,
+                     find_socket_dir(), Catalog),
+        doctor_probe(cgroup_v2, host, cgroup_v2_missing,
+                     check_cgroup_v2(), Catalog),
+        doctor_probe(nft, host, nft_missing,
+                     check_nft(), Catalog),
+        doctor_probe(protocol_vectors, host, protocol_vectors_missing,
+                     check_protocol_vectors(), Catalog)
+    ].
+
+doctor_probe(Name, _Component, _Reason, {ok, Detail}, _Catalog) ->
+    #{check => Name, status => ok, code => "-",
+      detail => Detail, action => "-", evidence => #{}};
+doctor_probe(Name, Component, Reason, {Status, Evidence}, Catalog)
+  when Status =:= fail; Status =:= warn ->
+    Code = diagnostic_code(Component, Reason),
+    Info = catalog_info(Code, Catalog),
+    #{check => Name,
+      status => Status,
+      code => Code,
+      detail => maps:get(description, Info, "(uncataloged)"),
+      action => maps:get(operator_action, Info, "-"),
+      evidence => Evidence}.
+
+diagnostic_code(Component, Reason) ->
+    "EK_" ++ string:uppercase(atom_to_list(Component)) ++
+    "_" ++ string:uppercase(atom_to_list(Reason)).
+
+catalog_info(Code, {ok, Entries}) ->
+    case lists:filter(fun({EntryCode, _}) ->
+                              atom_to_list(EntryCode) =:= Code
+                      end, Entries) of
+        [{_, Info} | _] -> Info;
+        []              -> #{}
+    end;
+catalog_info(_Code, {error, _}) ->
+    #{}.
+
+find_runtime_binary() ->
+    Candidates = [
+        os:getenv("ERLKOENIG_RT"),
+        "/opt/erlkoenig/rt/erlkoenig_rt",
+        "/usr/lib/erlkoenig/erlkoenig_rt",
+        "../erlkoenig_rt/build/release/erlkoenig_rt"
+    ],
+    Paths = [P || P <- Candidates, P =/= false],
+    case first_regular(Paths) of
+        undefined -> {fail, #{paths_searched => Paths}};
+        Path      -> {ok, Path}
+    end.
+
+find_cookie_file() ->
+    Path = default_cookie_file(),
+    case filelib:is_regular(Path) of
+        true  -> {ok, Path};
+        false -> {fail, #{path => Path}}
+    end.
+
+find_socket_dir() ->
+    Candidates = ["/run/erlkoenig/containers", "/run/erlkoenig"],
+    case lists:filter(fun filelib:is_dir/1, Candidates) of
+        [Path | _] -> {ok, Path};
+        []         -> {fail, #{paths_searched => Candidates}}
+    end.
+
+check_cgroup_v2() ->
+    Path = "/sys/fs/cgroup/cgroup.controllers",
+    case filelib:is_regular(Path) of
+        true  -> {ok, Path};
+        false -> {fail, #{path => Path}}
+    end.
+
+check_nft() ->
+    case os:find_executable("nft") of
+        false -> {fail, #{executable => "nft"}};
+        Path  -> {ok, Path}
+    end.
+
+check_protocol_vectors() ->
+    case os:getenv("ERLKOENIG_PROTOCOL_VECTORS") of
+        false ->
+            {warn, #{env => "ERLKOENIG_PROTOCOL_VECTORS"}};
+        Path ->
+            case filelib:is_dir(Path) of
+                true  -> {ok, Path};
+                false -> {warn, #{env => "ERLKOENIG_PROTOCOL_VECTORS", path => Path}}
+            end
+    end.
+
+first_regular([]) -> undefined;
+first_regular([Path | Rest]) ->
+    case filelib:is_regular(Path) of
+        true  -> Path;
+        false -> first_regular(Rest)
+    end.
+
+explain(O, Code0) ->
+    Code = normalize_error_code(Code0),
+    case lookup_error_catalog(Code) of
+        {error, not_found} ->
+            {error, io_lib:format("unknown error code: ~s", [Code0])};
+        {error, {catalog_unavailable, Reason}} ->
+            {error, io_lib:format("error catalog unavailable: ~p", [Reason])};
+        {ok, Info} ->
+            emit_explain(O, Code, Info)
+    end.
+
+explain_list(O, Filter) ->
+    case read_error_catalog() of
+        {ok, Entries} ->
+            Rows = [explain_list_row(Code, Info)
+                    || {Code, Info} <- Entries,
+                       explain_entry_matches(Filter, Info)],
+            emit_table(O, [code, component, severity, description], Rows);
+        {error, Reason} ->
+            {error, io_lib:format("error catalog unavailable: ~p", [Reason])}
+    end.
+
+explain_entry_matches(all, _Info) ->
+    true;
+explain_entry_matches({component, Component0}, Info) ->
+    Component = string:lowercase(Component0),
+    to_value(maps:get(component, Info, unknown)) =:= Component.
+
+explain_list_row(Code, Info) ->
+    [
+        atom_to_list(Code),
+        maps:get(component, Info, unknown),
+        maps:get(severity, Info, error),
+        maps:get(description, Info, "")
+    ].
+
+normalize_error_code(Code) ->
+    Upper = string:uppercase(Code),
+    case string:prefix(Upper, "EK_") of
+        nomatch -> "EK_" ++ Upper;
+        _       -> Upper
+    end.
+
+lookup_error_catalog(Code) ->
+    case read_error_catalog() of
+        {ok, Entries} ->
+            case lists:filter(fun({EntryCode, _}) ->
+                                      atom_to_list(EntryCode) =:= Code
+                              end, Entries) of
+                [{_, Info} | _] -> {ok, Info};
+                []              -> {error, not_found}
+            end;
+        {error, Reason} ->
+            {error, {catalog_unavailable, Reason}}
+    end.
+
+read_error_catalog() ->
+    case first_regular(error_catalog_candidates()) of
+        undefined ->
+            {error, not_found};
+        Path ->
+            case file:consult(Path) of
+                {ok, [Entries]} when is_list(Entries) -> {ok, Entries};
+                {ok, Other}                           -> {error, {bad_catalog, Path, Other}};
+                {error, Reason}                       -> {error, {read_failed, Path, Reason}}
+            end
+    end.
+
+error_catalog_candidates() ->
+    ScriptDir = filename:dirname(filename:absname(escript:script_name())),
+    [
+        filename:join([ScriptDir, "error_catalog.term"]),
+        filename:join([ScriptDir, "..", "share", "error_catalog.term"]),
+        filename:join([ScriptDir, "..", "lib", "erlkoenig", "priv", "error_catalog.term"]),
+        filename:join(["apps", "erlkoenig", "priv", "error_catalog.term"]),
+        filename:join(["priv", "error_catalog.term"])
+    ].
+
+emit_explain(#{format := json} = O, Code, Info) ->
+    emit(O, maps:to_list(Info#{code => Code}));
+emit_explain(_, Code, Info) ->
+    io:format("~s  [since ~s]~n",
+              [Code, to_value(maps:get(since, Info, "unknown"))]),
+    io:format("component: ~s~n", [to_value(maps:get(component, Info, unknown))]),
+    io:format("severity:  ~s~n~n", [to_value(maps:get(severity, Info, error))]),
+    print_explain_block("description", maps:get(description, Info, "")),
+    print_explain_block("operator action", maps:get(operator_action, Info, "")),
+    print_explain_list("evidence fields you will see",
+                       maps:get(evidence_fields, Info, [])),
+    print_explain_list("related", maps:get(related_specs, Info, [])),
+    case maps:find(iron_rule, Info) of
+        {ok, IronRule} -> print_explain_block("iron rule", IronRule);
+        error          -> ok
+    end,
+    ok.
+
+print_explain_block(_Label, "") ->
+    ok;
+print_explain_block(Label, Text) ->
+    io:format("~s:~n  ~s~n~n", [Label, to_value(Text)]).
+
+print_explain_list(_Label, []) ->
+    ok;
+print_explain_list(Label, Values) ->
+    Joined = string:join([to_value(V) || V <- Values], ", "),
+    io:format("~s:~n  ~s~n~n", [Label, Joined]).
+
+%%====================================================================
 %% Containers
 %%====================================================================
 
@@ -159,10 +404,74 @@ ct_inspect(O, Name) ->
     case find_container(O, Name) of
         {ok, Pid} ->
             Info = call(O, erlkoenig, inspect, [Pid]),
-            emit(O, maps:to_list(Info));
+            Timeline = lifecycle_timeline(Info),
+            case maps:get(format, O, table) of
+                json ->
+                    emit(O, maps:to_list(Info#{timeline => Timeline}));
+                _ ->
+                    emit(O, maps:to_list(Info)),
+                    print_timeline(Timeline),
+                    ok
+            end;
         not_found ->
             {error, io_lib:format("container '~s' not found", [Name])}
     end.
+
+lifecycle_timeline(Info) ->
+    State = maps:get(state, Info, unknown),
+    Error = maps:get(error_reason, Info, undefined),
+    Exit = maps:get(exit_info, Info, undefined),
+    [
+        timeline_step(runtime_socket, socket_state(Info)),
+        timeline_step(handshake, handshake_state(Info)),
+        timeline_step(spawn, spawn_state(Info)),
+        timeline_step(network, network_state(Info)),
+        timeline_step(container, State),
+        timeline_step(exit, exit_state(Exit)),
+        timeline_step(error, error_state(Error))
+    ].
+
+timeline_step(Name, Status) ->
+    #{step => Name, status => Status}.
+
+socket_state(Info) ->
+    case maps:get(socket_path, Info, undefined) of
+        undefined -> unknown;
+        _         -> configured
+    end.
+
+handshake_state(Info) ->
+    case maps:get(handshake, Info, undefined) of
+        true      -> ok;
+        false     -> pending;
+        undefined -> unknown
+    end.
+
+spawn_state(Info) ->
+    case maps:get(os_pid, Info, undefined) of
+        Pid when is_integer(Pid), Pid > 0 -> spawned;
+        _ -> pending
+    end.
+
+network_state(Info) ->
+    case maps:get(net_info, Info, undefined) of
+        Net when is_map(Net), map_size(Net) > 0 -> configured;
+        _ -> pending
+    end.
+
+exit_state(undefined) -> none;
+exit_state(Exit) when is_map(Exit) -> exited;
+exit_state(_) -> unknown.
+
+error_state(undefined) -> none;
+error_state(_) -> present.
+
+print_timeline(Timeline) ->
+    io:format("~nTimeline~n"),
+    lists:foreach(
+        fun(#{step := Step, status := Status}) ->
+            io:format("  ~-16s ~s~n", [atom_to_list(Step), to_value(Status)])
+        end, Timeline).
 
 ct_stop(O, Name) ->
     case find_container(O, Name) of
@@ -832,6 +1141,11 @@ print_usage() ->
         "  node ping            Liveness check~n"
         "  node version         App version~n"
         "  node health          Uptime + supervisor child count~n"
+        "~n"
+        "  doctor               Local host and install diagnostics~n"
+        "  explain <code>       Explain a structured erlkoenig error code~n"
+        "  explain --list       List known structured error codes~n"
+        "  explain --component <name>  List known codes for one component~n"
         "~n"
         "  up <file>            Start a stack (accepts .exs or .term)~n"
         "  down <file>          Stop containers declared in <file>~n"

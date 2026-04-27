@@ -101,7 +101,7 @@ enforcement is below userspace.
 Operators interact through one binary: `ek`, an escript wrapper over
 the public Erlang APIs. `ek up <file>` compiles an `.exs` (via a
 bundled Elixir runtime, no separate install) and reconciles the node
-against the declared stack; `ek down` is the inverse. `ek ps`,
+against the declared stack; `ek down <file>` is the inverse. `ek ps`,
 `ek pod list`, `ek ct inspect` surface runtime state; `ek dsl compile`,
 `ek vol`, `ek quarantine`, `ek admission` round out the operational
 inventory. Everything the CLI does is also available programmatically

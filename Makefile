@@ -297,7 +297,7 @@ endif
 
 # ── Version Tag ─────────────────────────────────────────
 CURRENT_VERSION = $(shell grep -oP '(?<=\{release, \{erlkoenig, ")[^"]+' rebar.config)
-VERSION_FILES = rebar.config apps/erlkoenig/src/erlkoenig.app.src dsl/mix.exs install.sh
+VERSION_FILES = rebar.config apps/erlkoenig/src/erlkoenig.app.src dsl/mix.exs install.sh dist/ek.escript
 
 tag:
 ifndef VERSION
@@ -323,6 +323,7 @@ endif
 	sed -i 's/{vsn, "[^"]*"}/{vsn, "$(VERSION)"}/' apps/erlkoenig/src/erlkoenig.app.src
 	sed -i 's/version: "[^"]*"/version: "$(VERSION)"/' dsl/mix.exs
 	sed -i 's/--version v[0-9]*\.[0-9]*\.[0-9]*/--version v$(VERSION)/' install.sh
+	sed -i 's/-define(EK_VERSION, "[^"]*")/-define(EK_VERSION, "$(VERSION)")/' dist/ek.escript
 	git add $(VERSION_FILES)
 	git commit -m "chore: bump version to $(VERSION)"
 	git tag -a "v$(VERSION)" -m "$(if $(MSG),$(MSG),v$(VERSION))"

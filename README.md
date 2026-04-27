@@ -106,7 +106,7 @@ nftables. macOS and BSD are not supported runtime targets.
 
 ```bash
 # From GitHub release (production):
-sudo sh install.sh --version v0.8.0
+sudo sh install.sh --version v0.9.0
 
 # Oder von lokalem Build:
 sudo sh install.sh --local /path/to/artifacts
@@ -150,21 +150,52 @@ make verifier     # Go audit-verifier statisch bauen
 
 ## Operator CLI (`ek`)
 
-Shell-Wrapper plus escript. Wird mit dem Release ausgeliefert.
+Shell-Wrapper plus escript. Wird mit dem Release ausgeliefert und spricht per
+Erlang distribution mit dem lokalen `erlkoenig@<hostname>`-Node. Lokale
+Subcommands wie `doctor`, `explain` und `dsl compile` laufen ohne Verbindung
+zur Runtime.
 
 ```bash
-ek ps                          # list pods + containers
-ek inspect <name-or-id>        # per-container field dump
-ek logs <name> [--follow]      # tail journal for a container
-ek top                         # cgroup usage live view
+ek node ping                   # Runtime erreichbar?
+ek node version                # laufende App-Version
+ek --version                   # CLI-Version ohne Runtime-Verbindung
+ek node health                 # Uptime + Supervisor-Kinder
+ek doctor                      # Host-/Install-Diagnose mit EK_* Codes
 
-ek dsl compile <file.exs> -o <out.term>
-ek config load /opt/stack.term
+ek up stack.exs                # .exs kompilieren + Stack laden
+ek down stack.term             # deklarierte Container stoppen
+ek down --all                  # alle laufenden Container stoppen
 
-ek sign <binary> --cert <pem> --key <key>
-ek verify <binary>
-ek pki create-root-ca --cn <name> --out <cert> --key-out <key>
+ek ps                          # Alias fuer ct list
+ek ct inspect <name-or-id>     # voller Container-State + Timeline
+ek ct stop <name-or-id>        # einzelnen Container stoppen
+ek pod list                    # aktive Pod-Supervisoren
+ek pod list --all              # inkl. terminaler Pods
+
+ek dsl compile stack.exs -o stack.term
+ek config validate stack.term  # low-level Validate-Only
+ek config load stack.term      # low-level Load
+ek config reload stack.term    # Delta-Reload
+
+ek vol list [--container NAME]
+ek vol inspect <uuid|persist-name>
+ek vol set-quota <uuid> 1G
+ek vol orphans
+
+ek quarantine list
+ek quarantine add <sha256-hex> --reason operator_ban
+ek quarantine remove <sha256-hex>
+
+ek admission snapshot
+ek explain EK_RUNTIME_HANDSHAKE_FAILED
+ek explain --component audit
+ek --format json ct list
 ```
+
+Globale Optionen: `--node <name>`, `--cookie-file <path>`, `--format table|json|plain`.
+Vollstaendige Referenz: `docs/CLI.md`; Book-Kapitel: `doc/book/18-operator-cli.md`.
+Falls `/opt/erlkoenig/bin` nicht im Shell-`PATH` ist, nutze
+`/opt/erlkoenig/bin/ek`.
 
 ## Performance
 

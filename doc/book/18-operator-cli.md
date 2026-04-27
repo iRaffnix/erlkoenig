@@ -1,12 +1,19 @@
 # Chapter 18 — Operator CLI
 
-`ek` is a single command-line tool for everyday operator
-work against a running erlkoenig node. It connects over Erlang
-distribution to the local node, runs RPC calls against the public
-modules, and formats the result as a table, JSON, or plain text.
-Every operation that this chapter lists is also available
-programmatically via the same modules — the CLI is a convenience
-layer, not a separate API.
+`ek` is a single command-line tool for everyday operator work. Most
+commands connect over Erlang distribution to the local node, run RPC
+calls against public modules, and format the result as a table, JSON,
+or plain text. A small local tier (`doctor`, `explain`, `dsl compile`)
+does not need a running daemon, which makes it useful before first
+start and inside CI.
+
+The CLI is a convenience layer, not a separate API. Remote commands map
+to the same Erlang modules that the system uses internally; local
+commands read release artifacts such as the bundled Elixir tree and the
+structured error catalog.
+
+For a terse command reference intended for daily use, see
+`docs/CLI.md`. This chapter keeps the operator narrative and examples.
 
 ## Installation
 
@@ -17,9 +24,9 @@ are in place:
   finds the bundled `escript` and delegates to the script file.
 - `/opt/erlkoenig/share/ek.escript` — the script itself.
 
-The wrapper is on the default `$PATH` for the erlkoenig service
-account; for interactive use, add `/opt/erlkoenig/bin` to the
-operator's `$PATH` or invoke by absolute path.
+For interactive use, add `/opt/erlkoenig/bin` to the operator's
+`$PATH` or invoke the wrapper by absolute path:
+`/opt/erlkoenig/bin/ek`.
 
 ## Connecting
 
@@ -32,15 +39,21 @@ inputs control the connection:
 - **Target node** — defaults to `erlkoenig@<hostname>`. Override
   with `--node <name>` for cross-node operations later.
 
+`doctor`, `explain`, and `dsl compile` skip distribution setup. They
+can run on a build host or on a partially installed target even when
+`erlkoenig.service` is not reachable.
+
 ## Output formats
 
-Three formats are recognised through `--format`:
+Three formats are recognised through `--format` for commands that return
+structured rows or key/value data:
 
 - `table` (default) — human-readable columns
 - `json`            — machine-readable
 - `plain`           — tab-separated, suitable for shell pipelines
 
-The format flag is global: it works on every subcommand.
+Pure status commands such as `node ping`, `dsl compile`, and
+`admission snapshot` print plain status text.
 
 ## Subcommand catalogue
 
@@ -51,6 +64,48 @@ The format flag is global: it works on every subcommand.
 | `node ping`             | Liveness check, prints `pong` on success         |
 | `node version`          | App version of the running erlkoenig             |
 | `node health`           | Uptime in milliseconds + supervisor child count  |
+
+`ek ping` is a short alias for `ek node ping`. `ek --version`, `ek -V`, and
+`ek version` print the local CLI version without contacting the node.
+
+### Local Diagnostics
+
+| Command                        | Effect                                      |
+|--------------------------------|---------------------------------------------|
+| `doctor`                       | Host/install checks with catalog-backed codes |
+| `explain <code>`               | Full description, action, evidence fields   |
+| `explain --list`               | Short list of all known structured codes    |
+| `explain --component <name>`   | Filter codes by component                   |
+
+`doctor` checks the runtime binary, cookie file, socket directory,
+cgroup v2, `nft`, and protocol-vector path. Failing or warning checks
+emit an `EK_*` code that can be fed directly into `ek explain`.
+
+### Stack Lifecycle
+
+| Command        | Effect                                                |
+|----------------|-------------------------------------------------------|
+| `up <file>`    | Start a stack; accepts `.exs` or `.term`              |
+| `down <file>`  | Stop containers declared in the stack file            |
+| `down`         | Stop every running container on the target node       |
+
+`up` is the operator-facing path. For `.exs` input it compiles the DSL
+to a sibling `.term` using the bundled Elixir runtime, then loads the
+term file. `.term` input is passed through directly.
+
+### Config and DSL
+
+| Command                         | Effect                                   |
+|---------------------------------|------------------------------------------|
+| `dsl compile <file.exs>`        | Compile to `<file>.term` beside source   |
+| `dsl compile <file.exs> -o <out>` | Compile to an explicit term path       |
+| `config validate <file.term>`   | Parse and validate a term file           |
+| `config load <file.term>`       | Low-level load path                      |
+| `config reload <file.term>`     | Low-level delta reload                   |
+
+Use `config validate` for a validate-first deploy workflow. Use `up`
+for normal operator work because it handles both DSL source and term
+artifacts.
 
 ### Containers
 
@@ -63,11 +118,17 @@ The format flag is global: it works on every subcommand.
 The container name resolves against both the DSL `name:` field and
 the internal id; either works.
 
+`ek ps` is the Docker-familiar alias for `ek ct list`; `ek inspect
+<name>` and `ek stop <name>` are aliases for the corresponding `ct`
+commands. `ct inspect` appends a lifecycle timeline in table/plain
+output and includes that timeline as a field in JSON output.
+
 ### Pods
 
-| Command   | Effect                                                |
-|-----------|-------------------------------------------------------|
-| `pod list`| All pod supervisors and their pids                    |
+| Command          | Effect                                               |
+|------------------|------------------------------------------------------|
+| `pod list`       | Active pod supervisors and non-terminal child count  |
+| `pod list --all` | Include pods whose children are all stopped/failed   |
 
 ### Volumes
 
@@ -79,7 +140,7 @@ Volumes live in a UUID-keyed metadata store
 | `vol list`                               | Every registered volume               |
 | `vol list --container <name>`            | Filter to one container               |
 | `vol inspect <uuid|persist-name>`        | Full record (uuid, host_path, quota…) |
-| `vol destroy <uuid>`                     | Remove metadata + on-disk directory   |
+| `vol destroy <uuid> --yes`               | Remove metadata + on-disk directory   |
 | `vol orphans`                            | UUID dirs without a metadata record   |
 | `vol set-quota <uuid> <size>`            | Set or change XFS project quota       |
 
@@ -106,6 +167,41 @@ The hash is the SHA-256 hex string of the binary, as printed in the
 |------------------------|---------------------------------------------------|
 | `admission snapshot`   | In-flight, queued, and per-zone counts            |
 
+## Command Groups At A Glance
+
+```
+ek node ping
+ek node version
+ek node health
+
+ek doctor
+ek explain EK_RUNTIME_HANDSHAKE_FAILED
+ek explain --component audit
+
+ek dsl compile stack.exs -o stack.term
+ek config validate stack.term
+ek up stack.exs
+ek down stack.term
+
+ek ps
+ek ct inspect web-0-api
+ek ct stop web-0-api
+ek pod list
+ek pod list --all
+
+ek vol list
+ek vol list --container web-0-api
+ek vol inspect ek_vol_...
+ek vol set-quota ek_vol_... 1G
+ek vol orphans
+
+ek quarantine list
+ek quarantine add <sha256-hex> --reason operator_ban
+ek quarantine remove <sha256-hex>
+
+ek admission snapshot
+```
+
 ## Hands-on: a live operator session
 
 This transcript walks through what an operator typically runs during
@@ -119,7 +215,7 @@ $ ek node ping
 pong
 
 $ ek node version
-0.6.0
+0.9.0
 
 $ ek node health
 uptime_ms       7812403
@@ -207,7 +303,7 @@ $ ek vol orphans
 disk    ek_vol_abcdef...  /var/lib/erlkoenig/volumes/ek_vol_abcdef...
 ```
 
-`ek vol destroy <uuid>` removes both. If only the directory is
+`ek vol destroy <uuid> --yes` removes both. If only the directory is
 present (no metadata), a simple `rm -rf` on the host path is safe.
 
 **7. Deal with a quarantined binary.**
@@ -260,17 +356,22 @@ mesh but not the quarantine.
 ## Everyday one-liners
 
 ```
+# Local preflight without a running node
+ek --format json doctor | jq '.[] | select(.status != "ok")'
+
+# Explain every critical audit code
+ek --format json explain --component audit \
+  | jq '.[] | select(.severity == "critical")'
+
+# Compile and validate before touching running state
+ek dsl compile ~/my_stack.exs -o /tmp/my_stack.term
+ek config validate /tmp/my_stack.term
+
 # "How many containers are up" — for a monitoring script
 ek --format plain ct list | wc -l
 
-# Current memory pressure for all containers in JSON
-ek --format json ct list | jq '.[] | {name, memory: .stats.memory}'
-
 # Every container in a specific zone
 ek --format json ct list | jq '.[] | select(.zone == "db")'
-
-# Tail the event bus for lifecycle events
-tools/event_consumer.py amqp://... 'container.*.started'
 
 # Grep for a specific volume by persist name
 ek vol list | awk '/pg-data/ {print $1}'
@@ -293,8 +394,9 @@ that point the operator wants the detail.
 
 ## Where this chapter doesn't go
 
-The CLI is intentionally narrow today. The following operator tasks
-are deliberately out of MVP scope:
+The command-line escript is intentionally narrower than the interactive
+Erlang shell helper module `ek`. The following operator tasks are not
+part of the shipped one-shot CLI yet:
 
 - **`fw` (firewall)** — needs a serialiser that renders the live
   nft state to text or JSON. The Erlang surface is there
@@ -304,11 +406,13 @@ are deliberately out of MVP scope:
   state isn't designed for external read.
 - **`events tail`** — long-running subscribe; needs a different
   signal-handling story than the one-shot RPC pattern.
-- **`logs`** — stream consumer; same.
+- **`logs` / `top`** — interactive streaming views exist naturally in
+  an attached Erlang shell, but the packaged `ek` escript currently
+  keeps to one-shot commands.
 - **`elf analyze`** — calling `erlkoenig_elf:parse/1` on an
   arbitrary file is straightforward, but the printable rendering
   needs design work.
-- **`sig sign`** — Build-pipeline integration usually wants
+- **`sig sign` / `pki`** — Build-pipeline integration usually wants
   something more scriptable than an interactive CLI.
 
 Each of these is a small extension of the same dispatch table once

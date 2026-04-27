@@ -142,6 +142,43 @@ When the boundary is unclear, treat it as public. It is cheaper to add
 structured emit first and change the API later than to break external
 scripts or OTP applications by accident.
 
+## Operator Contract Stability
+
+Operator-facing contracts are treated as public API. Changes must be
+additive unless a major version explicitly breaks compatibility.
+
+For the `ek` CLI, the following are stable:
+
+- Subcommand names and flag names. Do not rename or remove them without
+  keeping an alias until a major release.
+- JSON field names and field types. Add fields freely; do not remove or
+  rename existing fields in a minor release.
+- Exit codes:
+  - `0` — success
+  - `1` — runtime, remote, validation, or guarded destructive-operation error
+  - `2` — usage error or invalid arguments
+  - `3` — requested resource not found
+- Error output starts with `error:` for expected operator errors.
+
+Deprecations must warn for at least two minor releases before removal.
+The preferred pattern is additive replacement first, warning alias
+second, removal only at the next major version.
+
+CLI commands must call through stable operator-facing APIs. If a command
+needs state owned by an internal OTP module, expose it through
+`erlkoenig_operator_api` instead of coupling the escript to the internal
+module directly. This keeps internal supervision and storage modules free
+to refactor without breaking operator scripts.
+
+### Sibling Contracts
+
+The same stability rules apply to adjacent operator contracts:
+
+- AMQP event payload field names and types documented in
+  `docs/AMQP_EVENTS.md`, especially structured `code` fields.
+- Wire protocol v1, tracked by `SPEC-PROTO-001` and ADR-0021.
+- Structured error code identifiers documented in `docs/ERROR_CODES.md`.
+
 ## Setting up `gh` CLI
 
 The `gh` CLI is needed for downloading CI artifacts and creating PRs.

@@ -250,6 +250,7 @@ ek ct stop hello-0-web
 ## Wo es nach diesem Quickstart weitergeht
 
 - **Deeper architecture**: [README](../README.md) → Architektur-Sektion
+- **CLI reference**: [CLI.md](CLI.md)
 - **Error codes komplett**: [ERROR_CODES.md](ERROR_CODES.md)
 - **Hardening**: `docs/HARDENING_TEST_PLAN.md` (separates Workflow für sanitizer + fault + fuzz)
 - **Threat model**: `docs/THREAT_MODEL_CONTAINER_BOUNDARY.md`

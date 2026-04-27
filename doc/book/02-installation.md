@@ -32,7 +32,7 @@ Download, review, run:
 curl -fsSL -o install.sh \
     https://github.com/iRaffnix/erlkoenig/releases/latest/download/install.sh
 less install.sh                    # review first — never pipe curl into sh
-sudo sh install.sh --version v0.6.0
+sudo sh install.sh --version v0.9.0
 ```
 
 The installer:
@@ -106,7 +106,7 @@ ek node ping
 
 # 2. App is at the expected version
 ek node version
-# → 0.6.0
+# → 0.9.0
 
 # 3. No containers yet
 ek ps
@@ -214,14 +214,14 @@ From a fresh Debian Trixie box:
 curl -fsSL -o install.sh \
     https://github.com/iRaffnix/erlkoenig/releases/latest/download/install.sh
 less install.sh
-sudo sh install.sh --version v0.6.0
+sudo sh install.sh --version v0.9.0
 
 # 2. Start the daemon
 sudo systemctl enable --now erlkoenig
 
 # 3. Verify
 ek node ping                           # → pong
-ek node version                        # → 0.6.0
+ek node version                        # → 0.9.0
 
 # 4. Set up the volume backing (if you want persistent volumes)
 sudo truncate -s 10G /var/lib/erlkoenig-volumes.img

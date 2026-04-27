@@ -18,7 +18,7 @@ ek node ping
 # → pong
 
 ek node version
-# → 0.6.0
+# → 0.9.0
 ```
 
 If you get `can't reach erlkoenig at ...`, the service is not running
@@ -419,7 +419,7 @@ down: stopped 3/3 container(s)
 ```
 
 ```bash
-ek down
+ek down --all
 ```
 
 ```
@@ -427,8 +427,8 @@ down: nothing running
 ```
 
 `down <file>` reads the declared names out of the term and stops each
-by name. `down` alone takes the live process-group list and stops all
-of it — useful as an emergency brake.
+by name. `down --all` takes the live process-group list and stops all
+of it; the explicit flag is the emergency-brake confirmation.
 
 ## Cleanup
 
@@ -438,7 +438,7 @@ starts from a known state, and verify the node is quiet:
 ```bash
 sed -i 's/"8888"/"8080"/'              ~/tutorial.exs
 sed -i 's/tcp_dport: 8888/tcp_dport: 8080/' ~/tutorial.exs
-ek down
+ek down --all
 ek ps
 ek pod list
 ```

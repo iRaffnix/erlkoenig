@@ -228,11 +228,318 @@ escript_explain_unknown_code_fails_test() ->
     ?assertNotEqual(0, Status),
     ?assert(string:find(Output, "unknown error code") =/= nomatch).
 
-escript_doctor_json_uses_catalog_codes_test() ->
+escript_unknown_command_is_usage_error_test() ->
+    {Status, Output} = run_ek_escript(["does-not-exist"]),
+    ?assertEqual(2, Status),
+    ?assert(string:find(Output, "unknown command") =/= nomatch).
+
+escript_bad_quarantine_hash_is_usage_error_test() ->
+    {Status, Output} = run_ek_escript(["quarantine", "add", "nothex"]),
+    ?assertEqual(2, Status),
+    ?assert(string:find(Output, "quarantine hash must be hex-encoded") =/= nomatch).
+
+escript_down_without_args_is_usage_error_test() ->
+    {Status, Output} = run_ek_escript(["down"]),
+    ?assertEqual(2, Status),
+    ?assert(string:find(Output, "down requires") =/= nomatch),
+    ?assert(string:find(Output, "--all") =/= nomatch).
+
+escript_down_all_uses_operator_api_test() ->
+    Path = write_operator_api_mock(#{
+        container_list => {ok, [#{name => <<"alpha">>},
+                                #{name => <<"beta">>}]},
+        container_stop => ok
+    }),
+    {Status, Output} = run_ek_escript(
+        ["down", "--all"],
+        [{"ERLKOENIG_EK_MOCK_OPERATOR_API", Path}]),
+    ?assertEqual(0, Status),
+    ?assert(string:find(Output, "stopped 2/2") =/= nomatch),
+    ?assertEqual([{container_list, []},
+                  {container_stop, [<<"alpha">>]},
+                  {container_stop, [<<"beta">>]}],
+                 read_operator_api_mock_calls(Path)).
+
+escript_vol_destroy_without_yes_is_usage_error_test() ->
+    {Status, Output} = run_ek_escript(["vol", "destroy", "ek_vol_test"]),
+    ?assertEqual(2, Status),
+    ?assert(string:find(Output, "--yes") =/= nomatch).
+
+escript_vol_destroy_yes_uses_operator_api_test() ->
+    Path = write_operator_api_mock(#{volume_destroy => ok}),
+    {Status, Output} = run_ek_escript(
+        ["vol", "destroy", "ek_vol_test", "--yes"],
+        [{"ERLKOENIG_EK_MOCK_OPERATOR_API", Path}]),
+    ?assertEqual(0, Status),
+    ?assert(string:find(Output, "destroyed ek_vol_test") =/= nomatch),
+    ?assertEqual([{volume_destroy, [<<"ek_vol_test">>]}],
+                 read_operator_api_mock_calls(Path)).
+
+escript_version_option_test() ->
+    assert_cli_version(["--version"]).
+
+escript_short_version_option_test() ->
+    assert_cli_version(["-V"]).
+
+escript_version_verb_test() ->
+    assert_cli_version(["version"]).
+
+escript_version_json_format_test() ->
+    {Status, Output} = run_ek_escript(["--format", "json", "--version"]),
+    ?assertEqual(0, Status),
+    Decoded = json:decode(list_to_binary(Output)),
+    ?assertMatch(#{<<"version">> := <<_/binary>>}, Decoded),
+    ?assertMatch({match, _},
+                 re:run(maps:get(<<"version">>, Decoded),
+                        "^[0-9]+\\.[0-9]+\\.[0-9]+$")).
+
+escript_down_all_partial_failure_single_message_test() ->
+    Path = write_operator_api_mock(#{
+        container_list => {ok, [#{name => <<"alpha">>},
+                                #{name => <<"beta">>},
+                                #{name => <<"gamma">>}]},
+        container_stop => {error, #{code => 'EK_OPERATOR_INTERNAL',
+                                    data => #{op => container_stop,
+                                              raw => boom}}}
+    }),
+    {Status, Output} = run_ek_escript(
+        ["down", "--all"],
+        [{"ERLKOENIG_EK_MOCK_OPERATOR_API", Path}]),
+    ?assertEqual(1, Status),
+    %% Old behavior printed both "stopped 0/3" AND "failed for 3/3";
+    %% the consolidated message must NOT contain "down: stopped".
+    ?assertEqual(nomatch, string:find(Output, "down: stopped")),
+    ?assert(string:find(Output, "stopped 0/3") =/= nomatch),
+    ?assert(string:find(Output, "3 failed") =/= nomatch).
+
+%% =================================================================
+%% JSON Output Contract — see dist/ek.escript JSON Output Contract
+%% block and docs/CLI.md "JSON Output Contract".
+%% =================================================================
+
+json_ct_list_normalizes_ip_tuple_and_state_test() ->
+    Path = write_operator_api_mock(#{
+        container_list => {ok, [
+            #{name => <<"web">>, id => <<"id-1">>,
+              state => running, restart_count => 2,
+              zone => <<"dmz">>,
+              net_info => #{ip => {10,10,0,2}, netmask => 24,
+                            zone => <<"dmz">>}}
+        ]}}),
     {0, Output} = run_ek_escript(
+        ["--format", "json", "ct", "list"],
+        [{"ERLKOENIG_EK_MOCK_OPERATOR_API", Path}]),
+    [Row] = json:decode(list_to_binary(Output)),
+    ?assertEqual(<<"web">>,    maps:get(<<"name">>, Row)),
+    ?assertEqual(<<"running">>, maps:get(<<"state">>, Row)),
+    ?assertEqual(<<"10.10.0.2">>, maps:get(<<"ip">>, Row)),
+    ?assertEqual(<<"dmz">>, maps:get(<<"zone">>, Row)),
+    ?assertEqual(2, maps:get(<<"restart_count">>, Row)).
+
+json_ct_list_emits_null_for_missing_ip_test() ->
+    Path = write_operator_api_mock(#{
+        container_list => {ok, [
+            #{name => <<"orphan">>, state => failed,
+              restart_count => 0, zone => <<"dmz">>}
+        ]}}),
+    {0, Output} = run_ek_escript(
+        ["--format", "json", "ct", "list"],
+        [{"ERLKOENIG_EK_MOCK_OPERATOR_API", Path}]),
+    [Row] = json:decode(list_to_binary(Output)),
+    ?assertEqual(null, maps:get(<<"ip">>, Row)),
+    ?assertEqual(<<"failed">>, maps:get(<<"state">>, Row)).
+
+json_ct_inspect_full_shape_test() ->
+    Info = #{
+        id            => <<"id-42">>,
+        name          => <<"web-0-nginx">>,
+        binary        => <<"/opt/erlkoenig/rt/nginx">>,
+        zone          => <<"dmz">>,
+        state         => running,
+        seccomp       => default,
+        restart       => always,
+        os_pid        => 12345,
+        restart_count => 0,
+        netns_path    => <<"/proc/12345/ns/net">>,
+        socket_path   => <<"/run/erlkoenig/containers/id-42.sock">>,
+        handshake     => true,
+        args          => [<<"-p">>, <<"7777">>],
+        ports         => [],
+        caps          => [],
+        volumes       => [],
+        net_info      => #{ip => {10,10,0,2}, netmask => 24,
+                           zone => <<"dmz">>, ifname => <<"vm0">>},
+        stats         => #{memory_bytes => 921600, cpu_usec => 2839,
+                           pids_current => 3, memory_peak => 1404928},
+        limits        => #{memory => 128000000, pids => 64},
+        exit_info     => undefined,
+        error         => undefined
+    },
+    Path = write_operator_api_mock(#{container_inspect => {ok, Info}}),
+    {0, Output} = run_ek_escript(
+        ["--format", "json", "ct", "inspect", "web-0-nginx"],
+        [{"ERLKOENIG_EK_MOCK_OPERATOR_API", Path}]),
+    Json = json:decode(list_to_binary(Output)),
+    ?assertEqual(<<"running">>, maps:get(<<"state">>, Json)),
+    ?assertEqual(<<"default">>, maps:get(<<"seccomp">>, Json)),
+    ?assertEqual(<<"always">>,  maps:get(<<"restart">>, Json)),
+    ?assertEqual(12345, maps:get(<<"os_pid">>, Json)),
+    Net = maps:get(<<"net_info">>, Json),
+    ?assertEqual(<<"10.10.0.2">>, maps:get(<<"ip">>, Net)),
+    ?assertEqual(24,              maps:get(<<"netmask">>, Net)),
+    ?assertEqual(<<"vm0">>,       maps:get(<<"ifname">>, Net)),
+    Stats = maps:get(<<"stats">>, Json),
+    ?assertEqual(921600, maps:get(<<"memory_bytes">>, Stats)),
+    Args = maps:get(<<"args">>, Json),
+    ?assertEqual([<<"-p">>, <<"7777">>], Args),
+    %% undefined → null
+    ?assertEqual(null, maps:get(<<"exit_info">>, Json)),
+    ?assertEqual(null, maps:get(<<"error">>, Json)),
+    %% timeline is array of {step, status} objects (synthesized)
+    Timeline = maps:get(<<"timeline">>, Json),
+    ?assert(is_list(Timeline)),
+    [?assert(maps:is_key(<<"step">>, Step) andalso
+             maps:is_key(<<"status">>, Step)) || Step <- Timeline].
+
+json_pod_list_pid_as_string_test() ->
+    Path = write_operator_api_mock(#{
+        pod_list => {ok, [#{name => <<"web">>,
+                            pid => <<"<0.99.0>">>,
+                            children => 3}]}}),
+    {0, Output} = run_ek_escript(
+        ["--format", "json", "pod", "list"],
+        [{"ERLKOENIG_EK_MOCK_OPERATOR_API", Path}]),
+    [Row] = json:decode(list_to_binary(Output)),
+    ?assertEqual(<<"web">>,       maps:get(<<"name">>, Row)),
+    ?assertEqual(<<"<0.99.0>">>,  maps:get(<<"pid">>, Row)),
+    ?assertEqual(3,               maps:get(<<"children">>, Row)).
+
+pod_list_all_uses_all_operator_api_test() ->
+    Path = write_operator_api_mock(#{
+        pod_list_all => {ok, [#{name => <<"done">>,
+                                pid => <<"<0.100.0>">>,
+                                children => 0}]}}),
+    {0, Output} = run_ek_escript(
+        ["--format", "json", "pod", "list", "--all"],
+        [{"ERLKOENIG_EK_MOCK_OPERATOR_API", Path}]),
+    [Row] = json:decode(list_to_binary(Output)),
+    ?assertEqual(<<"done">>, maps:get(<<"name">>, Row)),
+    ?assertEqual(0, maps:get(<<"children">>, Row)),
+    ?assertEqual([{pod_list_all, []}], read_operator_api_mock_calls(Path)).
+
+json_vol_list_atom_lifecycle_to_string_test() ->
+    Path = write_operator_api_mock(#{
+        volume_list => {ok, [
+            #{uuid => <<"u1">>, container => <<"pg">>,
+              persist => <<"data">>, host_path => <<"/v/u1">>,
+              lifecycle => persistent}
+        ]}}),
+    {0, Output} = run_ek_escript(
+        ["--format", "json", "vol", "list"],
+        [{"ERLKOENIG_EK_MOCK_OPERATOR_API", Path}]),
+    [Row] = json:decode(list_to_binary(Output)),
+    ?assertEqual(<<"persistent">>, maps:get(<<"lifecycle">>, Row)),
+    %% quota_bytes always present (may be null)
+    ?assertEqual(null, maps:get(<<"quota_bytes">>, Row)).
+
+json_vol_inspect_quota_present_test() ->
+    Path = write_operator_api_mock(#{
+        volume_inspect => {ok,
+            #{uuid => <<"u1">>, container => <<"pg">>,
+              persist => <<"data">>, host_path => <<"/v/u1">>,
+              lifecycle => persistent, quota_bytes => 1073741824}}}),
+    {0, Output} = run_ek_escript(
+        ["--format", "json", "vol", "inspect", "u1"],
+        [{"ERLKOENIG_EK_MOCK_OPERATOR_API", Path}]),
+    Json = json:decode(list_to_binary(Output)),
+    ?assertEqual(1073741824, maps:get(<<"quota_bytes">>, Json)).
+
+json_vol_orphans_array_shape_test() ->
+    Path = write_operator_api_mock(#{
+        volume_orphans => {ok, [<<"u1">>, <<"u2">>]}}),
+    {0, Output} = run_ek_escript(
+        ["--format", "json", "vol", "orphans"],
+        [{"ERLKOENIG_EK_MOCK_OPERATOR_API", Path}]),
+    Decoded = json:decode(list_to_binary(Output)),
+    ?assertEqual([#{<<"uuid">> => <<"u1">>},
+                  #{<<"uuid">> => <<"u2">>}], Decoded).
+
+json_quarantine_list_crashloop_tuple_to_object_test() ->
+    Path = write_operator_api_mock(#{
+        quarantine_list => {ok, [
+            #{hash => <<"deadbeef">>,
+              reason => {crashloop, 5, 60000},
+              since => 1777293296789},
+            #{hash => <<"cafebabe">>,
+              reason => manual,
+              since => 1777293300000}
+        ]}}),
+    {0, Output} = run_ek_escript(
+        ["--format", "json", "quarantine", "list"],
+        [{"ERLKOENIG_EK_MOCK_OPERATOR_API", Path}]),
+    [E1, E2] = json:decode(list_to_binary(Output)),
+    ?assertEqual(<<"deadbeef">>, maps:get(<<"hash">>, E1)),
+    R1 = maps:get(<<"reason">>, E1),
+    ?assertEqual(<<"crashloop">>, maps:get(<<"kind">>, R1)),
+    ?assertEqual(5, maps:get(<<"count">>, R1)),
+    ?assertEqual(60000, maps:get(<<"window_ms">>, R1)),
+    %% since: ISO + ms
+    Iso = maps:get(<<"since">>, E1),
+    ?assertMatch({match, _},
+                 re:run(Iso, "^[0-9]{4}-[0-9]{2}-[0-9]{2}T")),
+    ?assertEqual(1777293296789, maps:get(<<"since_ms">>, E1)),
+    %% atom reason
+    ?assertEqual(<<"manual">>, maps:get(<<"reason">>, E2)).
+
+json_admission_snapshot_zone_map_test() ->
+    Path = write_operator_api_mock(#{
+        admission_snapshot => {ok,
+            #{host_in_flight => 2, queued => 1,
+              zone_in_flight => #{<<"dmz">> => 2}}}}),
+    {0, Output} = run_ek_escript(
+        ["--format", "json", "admission", "snapshot"],
+        [{"ERLKOENIG_EK_MOCK_OPERATOR_API", Path}]),
+    Json = json:decode(list_to_binary(Output)),
+    ?assertEqual(2, maps:get(<<"host_in_flight">>, Json)),
+    ?assertEqual(1, maps:get(<<"queued">>, Json)),
+    Zones = maps:get(<<"zone_in_flight">>, Json),
+    ?assertEqual(2, maps:get(<<"dmz">>, Zones)).
+
+json_node_version_test() ->
+    Path = write_rpc_mock(#{
+        {application, get_key} => {ok, "9.9.9"}
+    }),
+    {0, Output} = run_ek_escript(
+        ["--format", "json", "node", "version"],
+        [{"ERLKOENIG_EK_MOCK_RPC", Path}]),
+    Decoded = json:decode(list_to_binary(Output)),
+    ?assertEqual(<<"9.9.9">>, maps:get(<<"version">>, Decoded)).
+
+plain_node_version_test() ->
+    Path = write_rpc_mock(#{
+        {application, get_key} => {ok, "9.9.9"}
+    }),
+    {0, Output} = run_ek_escript(
+        ["node", "version"],
+        [{"ERLKOENIG_EK_MOCK_RPC", Path}]),
+    ?assertMatch({match, _}, re:run(Output, "^9\\.9\\.9\n$")).
+
+json_node_health_test() ->
+    Path = write_operator_api_mock(#{
+        node_health => {ok, #{uptime_ms => 123456, sup_children => 8}}}),
+    {0, Output} = run_ek_escript(
+        ["--format", "json", "node", "health"],
+        [{"ERLKOENIG_EK_MOCK_OPERATOR_API", Path}]),
+    Json = json:decode(list_to_binary(Output)),
+    ?assertEqual(123456, maps:get(<<"uptime_ms">>, Json)),
+    ?assertEqual(8, maps:get(<<"sup_children">>, Json)).
+
+escript_doctor_json_uses_catalog_codes_test() ->
+    {1, Output} = run_ek_escript(
         ["--format", "json", "doctor"],
         [{"ERLKOENIG_PROTOCOL_VECTORS", "/tmp/erlkoenig_missing_vectors"}]),
-    Rows = json:decode(list_to_binary(Output)),
+    ?assert(string:find(Output, "doctor: 1 blocking issue") =/= nomatch),
+    Rows = json:decode(unicode:characters_to_binary(first_line(Output))),
     ?assert(is_list(Rows)),
     Protocol = lists:filter(
         fun(#{<<"check">> := <<"protocol_vectors">>}) -> true;
@@ -261,6 +568,35 @@ run_ek_escript(Args, Env) ->
                       {env, Env},
                       {args, [Script | Args]}]),
     collect_port(Port, []).
+
+write_operator_api_mock(Responses) ->
+    Path = filename:join(
+        ["/tmp", "ek_operator_api_mock_"
+                 ++ integer_to_list(erlang:unique_integer([positive]))
+                 ++ ".term"]),
+    State = #{responses => Responses, calls => []},
+    ok = file:write_file(Path, io_lib:format("~p.~n", [State])),
+    Path.
+
+write_rpc_mock(Responses) ->
+    Path = filename:join(
+        ["/tmp", "ek_rpc_mock_"
+                 ++ integer_to_list(erlang:unique_integer([positive]))
+                 ++ ".term"]),
+    State = #{responses => Responses, calls => []},
+    ok = file:write_file(Path, io_lib:format("~p.~n", [State])),
+    Path.
+
+read_operator_api_mock_calls(Path) ->
+    {ok, [State]} = file:consult(Path),
+    maps:get(calls, State).
+
+assert_cli_version(Args) ->
+    {0, Output} = run_ek_escript(Args),
+    ?assertMatch({match, _}, re:run(Output, "^ek [0-9]+\\.[0-9]+\\.[0-9]+\\n$")).
+
+first_line(Output) ->
+    hd(string:split(Output, "\n")).
 
 collect_port(Port, Acc) ->
     receive

@@ -988,5 +988,32 @@
      description => "capability drop failed",
      operator_action => "do not start the workload until the kernel capability setup path succeeds",
      evidence_fields => [capability, reason],
-     iron_rule => "declared security boundaries are hard fail-closed requirements"}}
+     iron_rule => "declared security boundaries are hard fail-closed requirements"}},
+
+ { 'EK_OPERATOR_NOT_FOUND',
+   #{component => operator,
+     reason => not_found,
+     since => "0.9.0",
+     severity => warn,
+     description => "operator-API lookup found no matching resource",
+     operator_action => "verify the supplied identifier (hash, uuid, container id) and recheck via the corresponding list verb",
+     evidence_fields => [resource, key]}},
+
+ { 'EK_OPERATOR_BAD_ARGUMENT',
+   #{component => operator,
+     reason => bad_argument,
+     since => "0.9.0",
+     severity => warn,
+     description => "operator-API call rejected on argument validation",
+     operator_action => "fix the caller — argument shape or format does not match the contract",
+     evidence_fields => [argument, value, expected]}},
+
+ { 'EK_OPERATOR_INTERNAL',
+   #{component => operator,
+     reason => internal,
+     since => "0.9.0",
+     severity => error,
+     description => "operator-API wrapper received an unexpected return from an internal module",
+     operator_action => "inspect runtime logs for the underlying gen_server or event; this indicates contract drift between operator_api and an internal module",
+     evidence_fields => [op, raw]}}
 ].

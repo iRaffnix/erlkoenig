@@ -120,11 +120,11 @@ Two shipped tools read the bus:
   stats per second, colours errors, groups routing keys. Designed to
   run in a persistent terminal alongside operations work.
 
-Both rely on the same envelope format: every AMQP message carries
-headers for node identity and an event version, plus the JSON
-payload produced by the codec. Consumers that want to build their
-own decoders should read `erlkoenig_amqp_codec.erl` — it's the
-schema.
+Both rely on the same envelope format: every AMQP message body carries
+JSON fields for node identity, event version, routing key, timestamp, and
+the payload produced by the codec. Consumers that want to build their own
+decoders should read `docs/AMQP_EVENTS.md`; the implementation source of
+truth is `erlkoenig_amqp_codec.erl`.
 
 ## Hands-on: subscribe, trigger, observe
 

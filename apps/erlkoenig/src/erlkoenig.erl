@@ -124,9 +124,11 @@ Usage from the Erlang shell:
                             args := [binary()],
                             ports := [{inet:port_number(), inet:port_number()}],
                             volumes := [map()],
+                            handshake := boolean(),
                             net_info => net_info(),
                             exit_info => exit_info(),
                             error => term(),
+                            socket_path => binary(),
                             stats => map()}.
 
 %%% ====================================================================
@@ -153,10 +155,15 @@ stop(Pid) ->
 kill(Pid, Signal) ->
     erlkoenig_ct:kill(Pid, Signal).
 
--doc "List all running containers.".
+-doc """
+List all containers known to the node, including ones in the terminal
+`stopped' / `failed' states (kept alive for post-mortem inspection).
+For the narrower "currently running" view, see
+`erlkoenig_config_drift:running_container_names/0'.
+""".
 -spec list() -> [container_info()].
 list() ->
-    Pids = try pg:get_members(erlkoenig_pg, erlkoenig_cts)
+    Pids = try pg:get_members(erlkoenig_pg, erlkoenig_cts_all)
            catch error:_ -> []
            end,
     %% A container that died between pg:get_members and get_info
@@ -181,7 +188,7 @@ inspect(Pid) ->
 -doc "Find a container PID by its ID (binary string).".
 -spec find_by_id(binary()) -> {ok, pid()} | {error, not_found}.
 find_by_id(Id) ->
-    Pids = try pg:get_members(erlkoenig_pg, erlkoenig_cts)
+    Pids = try pg:get_members(erlkoenig_pg, erlkoenig_cts_all)
            catch error:_ -> []
            end,
     find_pid_by_id(Pids, Id).

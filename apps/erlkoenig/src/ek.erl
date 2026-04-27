@@ -763,7 +763,7 @@ find_container(Name) ->
 -spec find_pid(atom() | binary() | string()) -> {ok, pid()} | not_found.
 find_pid(Name) ->
     Bin = to_bin(Name),
-    Pids = try pg:get_members(erlkoenig_pg, erlkoenig_cts)
+    Pids = try pg:get_members(erlkoenig_pg, erlkoenig_cts_all)
            catch error:_ -> []
            end,
     find_pid_loop(Bin, Pids).

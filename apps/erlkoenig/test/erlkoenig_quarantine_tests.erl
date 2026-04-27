@@ -74,7 +74,8 @@ t_crash_over_threshold_quarantines(#{bin := Bin}) ->
             fun(_) -> erlkoenig_quarantine:record_crash(Bin) end,
             lists:seq(1, 3)),
         sync(),
-        {ok, Hash} = erlkoenig_sig:hash_file(Bin),
+        {ok, RawHash} = erlkoenig_sig:hash_file(Bin),
+        Hash = binary:encode_hex(RawHash, lowercase),
         ?assertMatch({true, _Since},
                      erlkoenig_quarantine:is_quarantined(Hash))
     end).
@@ -95,14 +96,16 @@ t_window_expires_old_crashes(#{bin := Bin}) ->
 
 t_manual_quarantine(#{bin := Bin}) ->
     ?_test(begin
-        {ok, Hash} = erlkoenig_sig:hash_file(Bin),
+        {ok, RawHash} = erlkoenig_sig:hash_file(Bin),
+        Hash = binary:encode_hex(RawHash, lowercase),
         ok = erlkoenig_quarantine:quarantine(Hash, operator_ban),
         ?assertMatch({true, _}, erlkoenig_quarantine:is_quarantined(Hash))
     end).
 
 t_unquarantine(#{bin := Bin}) ->
     ?_test(begin
-        {ok, Hash} = erlkoenig_sig:hash_file(Bin),
+        {ok, RawHash} = erlkoenig_sig:hash_file(Bin),
+        Hash = binary:encode_hex(RawHash, lowercase),
         ok = erlkoenig_quarantine:quarantine(Hash, test),
         ok = erlkoenig_quarantine:unquarantine(Hash),
         ?assertEqual(false, erlkoenig_quarantine:is_quarantined(Hash))
@@ -110,7 +113,8 @@ t_unquarantine(#{bin := Bin}) ->
 
 t_check_gate_on_quarantined(#{bin := Bin}) ->
     ?_test(begin
-        {ok, Hash} = erlkoenig_sig:hash_file(Bin),
+        {ok, RawHash} = erlkoenig_sig:hash_file(Bin),
+        Hash = binary:encode_hex(RawHash, lowercase),
         ok = erlkoenig_quarantine:quarantine(Hash, test),
         ?assertMatch({error, {quarantined, Hash, _Since}},
                      erlkoenig_quarantine:check(Bin))
@@ -121,7 +125,8 @@ t_check_gate_passes_when_clean(#{bin := Bin}) ->
 
 t_list_snapshot(#{bin := Bin}) ->
     ?_test(begin
-        {ok, Hash} = erlkoenig_sig:hash_file(Bin),
+        {ok, RawHash} = erlkoenig_sig:hash_file(Bin),
+        Hash = binary:encode_hex(RawHash, lowercase),
         ok = erlkoenig_quarantine:quarantine(Hash, operator_ban),
         [{Hash, Meta}] = erlkoenig_quarantine:list(),
         ?assertEqual(operator_ban, maps:get(reason, Meta)),

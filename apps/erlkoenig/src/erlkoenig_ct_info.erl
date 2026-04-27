@@ -37,7 +37,7 @@ changes don't touch the lifecycle file.
 build_info(State, Data) ->
     Info = #{
         id            => Data#ct_data.id,
-        state         => State,
+        state         => operator_state(State, Data),
         binary        => Data#ct_data.binary_path,
         os_pid        => Data#ct_data.os_pid,
         netns_path    => Data#ct_data.netns_path,
@@ -50,17 +50,30 @@ build_info(State, Data) ->
         zone          => Data#ct_data.zone,
         args          => Data#ct_data.args,
         ports         => maps:get(ports, Data#ct_data.extra_opts, []),
-        volumes       => Data#ct_data.volumes
+        volumes       => Data#ct_data.volumes,
+        handshake     => Data#ct_data.handshake
     },
     maybe_add_optional_fields(State, Data, Info).
+
+-spec operator_state(atom(), #ct_data{}) -> atom().
+operator_state(stopped, #ct_data{user_stopped = false,
+                                 exit_info = #{exit_code := 0,
+                                               term_signal := 0}}) ->
+    stopped;
+operator_state(stopped, #ct_data{user_stopped = false,
+                                 exit_info = #{}}) ->
+    failed;
+operator_state(State, _Data) ->
+    State.
 
 -spec maybe_add_optional_fields(atom(), #ct_data{}, map()) ->
     erlkoenig:container_info().
 maybe_add_optional_fields(State, Data, Info0) ->
-    Info1 = maybe_put(net_info, Data#ct_data.net_info, Info0),
-    Info2 = maybe_put(exit_info, Data#ct_data.exit_info, Info1),
-    Info3 = maybe_put(error, Data#ct_data.error_reason, Info2),
-    erlkoenig_ct_observe:maybe_add_stats(State, Data#ct_data.id, Info3).
+    Info1 = maybe_put(net_info,    Data#ct_data.net_info,     Info0),
+    Info2 = maybe_put(exit_info,   Data#ct_data.exit_info,    Info1),
+    Info3 = maybe_put(error,       Data#ct_data.error_reason, Info2),
+    Info4 = maybe_put(socket_path, Data#ct_data.socket_path,  Info3),
+    erlkoenig_ct_observe:maybe_add_stats(State, Data#ct_data.id, Info4).
 
 -spec maybe_put(atom(), term(), map()) -> map().
 maybe_put(_Key, undefined, Map) -> Map;

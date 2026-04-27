@@ -139,12 +139,13 @@ dns_filter_state(Pid) ->
         _:_ -> undefined
     end.
 
-%% Return info maps for every container currently in the erlkoenig_cts
-%% process group. Mirrors erlkoenig:list/0 but is exported directly so
-%% operator tooling doesn't have to know about the pg layer.
+%% Return info maps for every container known to the node (including
+%% terminal stopped/failed ones, kept alive for post-mortem). Mirrors
+%% `erlkoenig:list/0` but is exported directly so operator tooling
+%% doesn't have to know about the pg layer.
 -spec list() -> [map()].
 list() ->
-    Pids = try pg:get_members(erlkoenig_pg, erlkoenig_cts)
+    Pids = try pg:get_members(erlkoenig_pg, erlkoenig_cts_all)
            catch _:_ -> []
            end,
     lists:filtermap(fun(Pid) ->
@@ -207,6 +208,14 @@ callback_mode() -> [state_functions, state_enter].
 init({normal, BinaryPath, Opts}) ->
     Id = make_id(),
     proc_lib:set_label({erlkoenig_ct, Id}),
+    %% `erlkoenig_cts_all` tracks every live ct gen_statem regardless of
+    %% lifecycle state, so operator-facing lookups (`ek ct list/inspect`)
+    %% can still find a container after it transitioned to stopped or
+    %% failed. The narrower `erlkoenig_cts` group is joined later in
+    %% running(enter, _) and explicitly left on stopped/failed entry —
+    %% it is the "currently running" set used by DNS filter, drift
+    %% reconciler, force-stop, and zone-occupancy checks.
+    pg:join(erlkoenig_pg, erlkoenig_cts_all, self()),
     Restart = erlkoenig_ct_opts:validate_restart(maps:get(restart, Opts, no_restart)),
     Name = maps:get(name, Opts, undefined),
     %% Restart counter survives gen_statem reincarnations (pod-supervisor
@@ -279,6 +288,8 @@ init({normal, BinaryPath, Opts}) ->
 
 init({recover, ContainerId, #{socket_path := SocketPath, os_pid := OsPid} = Info}) ->
     proc_lib:set_label({erlkoenig_ct, ContainerId}),
+    %% See `init({normal, _, _})' for the rationale on `erlkoenig_cts_all'.
+    pg:join(erlkoenig_pg, erlkoenig_cts_all, self()),
     process_flag(trap_exit, true),
     Config = maps:get(config, Info, #{}),
     Data = #ct_data{
@@ -871,6 +882,21 @@ stopped(enter, _OldState, Data) ->
             _ = erlkoenig_ct_net:teardown_veth(Data2),
             _ = erlkoenig_ct_cgroup:destroy_cgroup(Data2),
             Data3 = erlkoenig_ct_resources:release_ip(Data2#ct_data{net_info = undefined}),
+            %% Pod-supervised cycle never enters `restarting` (the
+            %% gen_statem stops here and the OTP supervisor respawns
+            %% it from scratch), so the quarantine circuit breaker
+            %% would never see a crashloop without this hook. Record
+            %% the crash now, but only for actual failure exits and
+            %% only when the cause is NOT quarantine itself.
+            case erlkoenig_ct_opts:is_failure_exit(Data3) of
+                true ->
+                    case error_code(Data3#ct_data.error_reason) of
+                        'EK_RUNTIME_BINARY_QUARANTINED' -> ok;
+                        _ -> _ = erlkoenig_ct_security:safe_record_crash(
+                                  Data3#ct_data.binary_path)
+                    end;
+                false -> ok
+            end,
             ExitReason = erlkoenig_ct_opts:pod_exit_reason(Data3),
             {stop, ExitReason, Data3};
         false ->
@@ -919,6 +945,15 @@ stopped({call, From}, _, _Data) ->
 
 restarting(enter, _OldState, Data) ->
     Backoff = erlkoenig_ct_opts:backoff_ms(Data#ct_data.restart_count),
+    %% A non-user restart means the previous incarnation exited
+    %% unexpectedly. Feed the binary's hash to the quarantine circuit
+    %% breaker so a tight crashloop trips the threshold even when the
+    %% gen_statem path is stopped → restarting (no `failed` state
+    %% entered). Quarantine-triggered failures don't count themselves.
+    case error_code(Data#ct_data.error_reason) of
+        'EK_RUNTIME_BINARY_QUARANTINED' -> ok;
+        _ -> _ = erlkoenig_ct_security:safe_record_crash(Data#ct_data.binary_path)
+    end,
     erlkoenig_events:notify({container_restarting, Data#ct_data.id,
                              Data#ct_data.name,
                              Data#ct_data.restart_count}),

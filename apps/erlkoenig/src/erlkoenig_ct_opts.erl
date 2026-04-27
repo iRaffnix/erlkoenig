@@ -84,6 +84,8 @@ normalize_restart(_)               -> {no_restart, 0}.
 
 -spec should_restart(#ct_data{}) -> boolean().
 should_restart(#ct_data{user_stopped = true}) -> false;
+should_restart(#ct_data{error_reason = #{code := 'EK_RUNTIME_BINARY_QUARANTINED'}}) ->
+    false;
 should_restart(#ct_data{restart = no_restart}) -> false;
 should_restart(Data) ->
     {Strategy, Max} = normalize_restart(Data#ct_data.restart),
@@ -107,6 +109,8 @@ is_failure_exit(_) ->
 %% Anything else → supervisor restarts the group.
 -spec pod_exit_reason(#ct_data{}) -> term().
 pod_exit_reason(#ct_data{user_stopped = true}) ->
+    shutdown;
+pod_exit_reason(#ct_data{error_reason = #{code := 'EK_RUNTIME_BINARY_QUARANTINED'}}) ->
     shutdown;
 pod_exit_reason(Data) ->
     case is_failure_exit(Data) of

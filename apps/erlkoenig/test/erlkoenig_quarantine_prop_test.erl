@@ -179,7 +179,8 @@ setup_fixture() ->
             ok = file:write_file(binary_to_list(Path),
                                  crypto:strong_rand_bytes(128)),
             put({path, Name}, Path),
-            {ok, Hash} = erlkoenig_sig:hash_file(Path),
+            {ok, RawHash} = erlkoenig_sig:hash_file(Path),
+            Hash = binary:encode_hex(RawHash, lowercase),
             put({hash, Name}, Hash)
         end,
         [?BIN_A, ?BIN_B, ?BIN_C]).

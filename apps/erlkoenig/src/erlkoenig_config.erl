@@ -489,7 +489,10 @@ run_action(Unknown, WatchName, _Counter, _Metric, _Value, _Threshold) ->
 
 -spec stop_by_name(binary()) -> ok.
 stop_by_name(Name) ->
-    Pids = try pg:get_members(erlkoenig_pg, erlkoenig_cts)
+    %% Use the wider `_all` set: a container that already terminated
+    %% (e.g. transient + clean-exit) still has a live gen_statem we
+    %% want to address by name during config reconciliation.
+    Pids = try pg:get_members(erlkoenig_pg, erlkoenig_cts_all)
            catch error:_ -> []
            end,
     case find_pid_by_name(Name, Pids) of

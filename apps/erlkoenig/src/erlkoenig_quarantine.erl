@@ -209,7 +209,16 @@ code_change(_Old, State, _Extra) -> {ok, State}.
 -spec hash_path(binary() | string()) -> {ok, hash()} | {error, term()}.
 hash_path(Path) ->
     case erlkoenig_sig:hash_file(Path) of
-        {ok, HashBin} when is_binary(HashBin) -> {ok, HashBin};
+        {ok, HashBin} when is_binary(HashBin), byte_size(HashBin) =:= 32 ->
+            %% erlkoenig_sig:hash_file/1 returns raw 32-byte SHA-256.
+            %% The public hash() type and the manual quarantine path
+            %% (operator_api:quarantine_add/2) use 64-char lowercase
+            %% hex. Normalize here so auto-quarantined and manually
+            %% quarantined hashes share one canonical representation —
+            %% otherwise unquarantine and JSON output diverge.
+            {ok, binary:encode_hex(HashBin, lowercase)};
+        {ok, Other} ->
+            {error, {bad_hash_shape, byte_size(Other)}};
         Other -> Other
     end.
 

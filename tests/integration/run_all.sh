@@ -50,6 +50,10 @@ TESTS=(
     "49_tutorial_04_threat_detection.escript Tutorial 04: guard block + honeypot ban simulation"
     "50_tutorial_05_storage_and_pki.escript  Tutorial 05: persistent/ro/opts/ephemeral volumes"
     "51_tutorial_06_multi_tier.escript       Tutorial 06: 3 pods, 13 containers, replica_ips resolve"
+    "53_cli_operator_contract.escript CLI operator JSON contract scenarios"
+    "54_cli_volume_contract.escript   CLI vol JSON + ephemeral/persistent contract"
+    "55_cli_lifecycle_contract.escript CLI lifecycle / restart-policy contract"
+    "58_replica_ips_contract.escript   replica_ips host-firewall expansion contract"
 )
 
 echo ""

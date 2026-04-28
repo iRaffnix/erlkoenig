@@ -31,9 +31,9 @@
 #   make clean        — Alles aufraeumen
 
 .PHONY: all check erl test dialyzer integration release \
-        dsl dsl-escript test-dsl docs docs-erlang docs-error-codes go-demos \
+        dsl dsl-bundle dsl-escript test-dsl docs docs-erlang docs-error-codes go-demos \
         fmt fmt-check xref lint error-catalog-check \
-        install uninstall fetch-artifacts \
+        install uninstall fetch-artifacts install-smoke \
         tag clean clean-erl clean-dsl
 
 PREFIX          ?= /opt/erlkoenig
@@ -108,6 +108,11 @@ integration: erl
 dsl:
 	cd dsl && mix deps.get && mix compile
 
+dsl-bundle:
+	cd dsl && MIX_ENV=prod mix deps.get --only prod && MIX_ENV=prod mix compile
+	mkdir -p dist/elixir/lib/erlkoenig_dsl/ebin
+	cp dsl/_build/prod/lib/erlkoenig_dsl/ebin/* dist/elixir/lib/erlkoenig_dsl/ebin/
+
 dsl-escript: dsl
 	cd dsl && mix escript.build
 
@@ -141,7 +146,7 @@ test-dsl:
 # C-Runtime ist NICHT enthalten — wird separat via install.sh installiert.
 # Discovery: {rt_path, auto} findet /opt/erlkoenig/rt/erlkoenig_rt
 
-release: erl
+release: erl dsl-bundle
 	rebar3 release
 	rebar3 tar
 	@mkdir -p dist
@@ -294,6 +299,32 @@ else
 endif
 	@echo "Artifacts in /tmp/erlkoenig-artifacts/"
 	@echo "Install with: sudo sh install.sh --local /tmp/erlkoenig-artifacts"
+
+# ── Install smoke gate ───────────────────────────────────
+#
+# Builds the release tarball, deploys it to HOST via install.sh, and
+# probes the minimum operator surface that must work before further
+# integration tests are meaningful. Designed to catch the regressions
+# we have hit in this area: stale per-version wrappers, vm.args path
+# drift, daemon failing to come back online after upgrade.
+#
+# Usage:  make install-smoke HOST=erlkoenig-2__root
+# Optional: PREFIX=, RT_BIN=, ARTIFACT=, KEEP=1 (see tools/install-smoke.sh)
+install-smoke:
+ifndef HOST
+	@echo "Usage: make install-smoke HOST=user@host"
+	@exit 2
+endif
+	@# Only forward RT_BIN if the caller set it explicitly on the
+	@# command line — otherwise tools/install-smoke.sh picks its own
+	@# remote-side default (/opt/erlkoenig/rt/erlkoenig_rt). The
+	@# top-level RT_BIN ?= is a *local* path used by `make install`
+	@# and would not exist on the target host.
+	bash tools/install-smoke.sh HOST=$(HOST) \
+	  $(if $(filter command,$(origin PREFIX)),PREFIX=$(PREFIX)) \
+	  $(if $(filter command,$(origin RT_BIN)),RT_BIN=$(RT_BIN)) \
+	  $(if $(filter command,$(origin ARTIFACT)),ARTIFACT=$(ARTIFACT)) \
+	  $(if $(filter command,$(origin KEEP)),KEEP=$(KEEP))
 
 # ── Version Tag ─────────────────────────────────────────
 CURRENT_VERSION = $(shell grep -oP '(?<=\{release, \{erlkoenig, ")[^"]+' rebar.config)

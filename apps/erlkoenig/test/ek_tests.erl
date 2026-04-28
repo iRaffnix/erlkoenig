@@ -538,7 +538,8 @@ escript_doctor_json_uses_catalog_codes_test() ->
     {1, Output} = run_ek_escript(
         ["--format", "json", "doctor"],
         [{"ERLKOENIG_PROTOCOL_VECTORS", "/tmp/erlkoenig_missing_vectors"}]),
-    ?assert(string:find(Output, "doctor: 1 blocking issue") =/= nomatch),
+    ?assert(string:find(Output, "doctor: ") =/= nomatch),
+    ?assert(string:find(Output, "blocking issue") =/= nomatch),
     Rows = json:decode(unicode:characters_to_binary(first_line(Output))),
     ?assert(is_list(Rows)),
     Protocol = lists:filter(
@@ -551,6 +552,22 @@ escript_doctor_json_uses_catalog_codes_test() ->
     ?assertEqual(<<"EK_HOST_PROTOCOL_VECTORS_MISSING">>, maps:get(<<"code">>, Row)),
     ?assert(maps:is_key(<<"action">>, Row)),
     ?assert(maps:is_key(<<"evidence">>, Row)).
+
+escript_doctor_flags_weak_cookie_permissions_test() ->
+    Cookie = filename:join(
+        ["/tmp", "ek_doctor_cookie_"
+                 ++ integer_to_list(erlang:unique_integer([positive]))]),
+    ok = file:write_file(Cookie, <<"ERLKOENIG_TEST_COOKIE\n">>),
+    ok = file:change_mode(Cookie, 8#0644),
+    {1, Output} = run_ek_escript(
+        ["--cookie-file", Cookie, "--format", "json", "doctor"], []),
+    Rows = json:decode(unicode:characters_to_binary(first_line(Output))),
+    Row = doctor_row(<<"cookie_permissions">>, Rows),
+    ?assertEqual(<<"fail">>, maps:get(<<"status">>, Row)),
+    ?assertEqual(<<"EK_HOST_COOKIE_PERMISSIONS_WEAK">>, maps:get(<<"code">>, Row)),
+    Evidence = maps:get(<<"evidence">>, Row),
+    ?assertEqual(<<"0644">>, maps:get(<<"mode">>, Evidence)),
+    ?assertEqual(true, maps:get(<<"world_readable">>, Evidence)).
 
 %% =================================================================
 %% IO capture helpers
@@ -586,6 +603,13 @@ write_rpc_mock(Responses) ->
     State = #{responses => Responses, calls => []},
     ok = file:write_file(Path, io_lib:format("~p.~n", [State])),
     Path.
+
+doctor_row(Check, Rows) ->
+    Matches = [Row || #{<<"check">> := Found} = Row <- Rows,
+                      Found =:= Check],
+    ?assertMatch([_], Matches),
+    [Row] = Matches,
+    Row.
 
 read_operator_api_mock_calls(Path) ->
     {ok, [State]} = file:consult(Path),

@@ -102,6 +102,7 @@ dispatch(["vol", "list", "--container", Name], O)     -> vol_list(O, {ct, list_t
 dispatch(["vol", "inspect", IdOrName], O)             -> vol_inspect(O, IdOrName);
 dispatch(["vol", "destroy", Uuid], O)                 -> vol_destroy(O, list_to_binary(Uuid));
 dispatch(["vol", "orphans"], O)                       -> vol_orphans(O);
+dispatch(["vol", "gc-orphans"], O)                    -> vol_gc_orphans(O);
 dispatch(["vol", "set-quota", Uuid, Size], O)         -> vol_set_quota(O, list_to_binary(Uuid),
                                                                        list_to_binary(Size));
 
@@ -194,6 +195,16 @@ doctor_checks(O, Catalog) ->
                      find_runtime_binary(), Catalog),
         doctor_probe(cookie, host, cookie_missing,
                      find_cookie_file(O), Catalog),
+        doctor_probe(cookie_permissions, host, cookie_permissions_weak,
+                     check_cookie_permissions(O), Catalog),
+        doctor_probe(cookie_symlink, host, cookie_symlink_invalid,
+                     check_cookie_symlink(O), Catalog),
+        doctor_probe(systemd_unit, host, systemd_unit_missing,
+                     check_systemd_unit(), Catalog),
+        doctor_probe(epmd_local_bind, host, epmd_local_bind_missing,
+                     check_epmd_local_bind(), Catalog),
+        doctor_probe(node_ping, host, node_ping_failed,
+                     check_node_ping(O), Catalog),
         doctor_probe(socket_dir, host, socket_dir_missing,
                      find_socket_dir(), Catalog),
         doctor_probe(cgroup_v2, host, cgroup_v2_missing,
@@ -256,6 +267,161 @@ find_cookie_file(O) ->
         false -> {fail, #{path => Path}}
     end.
 
+check_cookie_permissions(O) ->
+    Path = maps:get(cookie_file, O, default_cookie_file()),
+    case file:read_file_info(Path) of
+        {ok, FileInfo} when element(3, FileInfo) =:= regular ->
+            Size = element(2, FileInfo),
+            Mode0 = element(8, FileInfo),
+            Mode = Mode0 band 8#777,
+            Weak = cookie_mode_weak(Mode),
+            case {Size > 0, Weak} of
+                {true, false} ->
+                    {ok, Path ++ " mode " ++ mode_octal(Mode)};
+                _ ->
+                    {fail, #{path => Path,
+                             mode => mode_octal(Mode),
+                             size => Size,
+                             world_readable => (Mode band 8#004) =/= 0,
+                             group_writable => (Mode band 8#020) =/= 0,
+                             world_writable => (Mode band 8#002) =/= 0}}
+            end;
+        {ok, FileInfo} ->
+            Type = element(3, FileInfo),
+            {fail, #{path => Path, type => Type}};
+        {error, Reason} ->
+            {fail, #{path => Path, reason => Reason}}
+    end.
+
+cookie_mode_weak(Mode) ->
+    %% Erlang distribution rejects cookies that are accessible by
+    %% other users. We also reject group/world write because it makes
+    %% the node identity mutable by more than the service owner.
+    (Mode band 8#007) =/= 0 orelse (Mode band 8#020) =/= 0.
+
+check_cookie_symlink(O) ->
+    CookiePath = maps:get(cookie_file, O, default_cookie_file()),
+    Canonical = "/etc/erlkoenig/cookie",
+    Legacy = "/opt/erlkoenig/cookie",
+    case CookiePath of
+        Canonical ->
+            check_cookie_symlink(Canonical, Legacy);
+        _ ->
+            {ok, "custom cookie file " ++ CookiePath ++
+                 " (legacy symlink check skipped)"}
+    end.
+
+check_cookie_symlink(Canonical, Legacy) ->
+    case file:read_link(Legacy) of
+        {ok, Canonical} ->
+            case {file:read_file(Canonical), file:read_file(Legacy)} of
+                {{ok, Cookie}, {ok, Cookie}} ->
+                    {ok, Legacy ++ " -> " ++ Canonical};
+                {{ok, _}, {ok, _}} ->
+                    {fail, #{legacy => Legacy,
+                             canonical => Canonical,
+                             reason => content_mismatch}};
+                {{error, Reason}, _} ->
+                    {fail, #{legacy => Legacy,
+                             canonical => Canonical,
+                             reason => Reason}};
+                {_, {error, Reason}} ->
+                    {fail, #{legacy => Legacy,
+                             canonical => Canonical,
+                             reason => Reason}}
+            end;
+        {ok, Other} ->
+            {fail, #{legacy => Legacy,
+                     canonical => Canonical,
+                     target => Other}};
+        {error, einval} ->
+            {fail, #{legacy => Legacy,
+                     canonical => Canonical,
+                     reason => not_a_symlink}};
+        {error, Reason} ->
+            {fail, #{legacy => Legacy,
+                     canonical => Canonical,
+                     reason => Reason}}
+    end.
+
+check_systemd_unit() ->
+    Path = "/etc/systemd/system/erlkoenig.service",
+    case file:read_file_info(Path) of
+        {ok, FileInfo} ->
+            case element(3, FileInfo) of
+                regular -> {ok, Path};
+                symlink -> {ok, Path};
+                Type    -> {fail, #{path => Path, type => Type}}
+            end;
+        {error, Reason} ->
+            {fail, #{path => Path, reason => Reason}}
+    end.
+
+check_epmd_local_bind() ->
+    Path = "/etc/systemd/system/erlkoenig.service",
+    case file:read_file(Path) of
+        {ok, Bin} ->
+            case binary:match(Bin, <<"ERL_EPMD_ADDRESS=127.0.0.1">>) of
+                nomatch -> {fail, #{path => Path, expected => "ERL_EPMD_ADDRESS=127.0.0.1"}};
+                _       -> {ok, "ERL_EPMD_ADDRESS=127.0.0.1"}
+            end;
+        {error, Reason} ->
+            {fail, #{path => Path, reason => Reason}}
+    end.
+
+check_node_ping(#{cookie_file := CookiePath, node := TargetNode}) ->
+    case start_distribution_probe(CookiePath, TargetNode) of
+        ok ->
+            case net_adm:ping(TargetNode) of
+                pong -> {ok, atom_to_list(TargetNode)};
+                pang -> {fail, #{node => TargetNode, reason => pang}}
+            end;
+        {error, Evidence} ->
+            {fail, Evidence}
+    end.
+
+start_distribution_probe(CookiePath, TargetNode) ->
+    case file:read_file(CookiePath) of
+        {ok, CookieBin} ->
+            case string:trim(binary_to_list(CookieBin)) of
+                "" ->
+                    {error, #{cookie_file => CookiePath, reason => empty_cookie}};
+                CookieStr ->
+                    maybe_start_distribution_probe(CookiePath, TargetNode, CookieStr)
+            end;
+        {error, Reason} ->
+            {error, #{cookie_file => CookiePath, reason => Reason}}
+    end.
+
+maybe_start_distribution_probe(CookiePath, TargetNode, CookieStr) ->
+    try
+        Cookie = list_to_atom(CookieStr),
+        case node() of
+            nonode@nohost ->
+                CtlNodeName = list_to_atom(
+                    "ek_doctor_" ++ os:getpid() ++ "@" ++ short_host()),
+                case net_kernel:start([CtlNodeName, shortnames]) of
+                    {ok, _} -> ok;
+                    {error, {already_started, _}} -> ok;
+                    {error, Reason} ->
+                        throw({probe_error, #{cookie_file => CookiePath,
+                                              node => TargetNode,
+                                              reason => Reason}})
+                end;
+            _ ->
+                ok
+        end,
+        true = erlang:set_cookie(node(), Cookie),
+        ok
+    catch
+        throw:{probe_error, Evidence} ->
+            {error, Evidence};
+        Class:ProbeReason ->
+            {error, #{cookie_file => CookiePath,
+                      node => TargetNode,
+                      reason => io_lib:format("~p:~p", [Class, ProbeReason])}}
+    end.
+
 find_socket_dir() ->
     Candidates = ["/run/erlkoenig/containers", "/run/erlkoenig"],
     case lists:filter(fun filelib:is_dir/1, Candidates) of
@@ -286,6 +452,9 @@ check_protocol_vectors() ->
                 false -> {warn, #{env => "ERLKOENIG_PROTOCOL_VECTORS", path => Path}}
             end
     end.
+
+mode_octal(Mode) ->
+    "0" ++ integer_to_list(Mode, 8).
 
 first_regular([]) -> undefined;
 first_regular([Path | Rest]) ->
@@ -597,13 +766,16 @@ stack_up(O, Path) ->
                     %% on actual state instead of trusting the load
                     %% return shape.
                     timer:sleep(500),
-                    Statuses = [{N, container_state_or_gone(O, N)} || N <- Names],
+                    Statuses = [{N, container_post_up_info(O, N)} || N <- Names],
                     Policies = read_declared_policies(TermPath),
-                    Classified = [{N, S, classify_post_up(N, S, Policies)}
-                                  || {N, S} <- Statuses],
-                    Running   = [N || {N, _, running} <- Classified],
-                    Completed = [{N, S} || {N, S, completed} <- Classified],
-                    Failed    = [{N, S} || {N, S, failed} <- Classified],
+                    Classified = [{N, maps:get(state, Info),
+                                   classify_post_up(N, maps:get(state, Info),
+                                                    Policies),
+                                   Info}
+                                  || {N, Info} <- Statuses],
+                    Running   = [N || {N, _, running, _} <- Classified],
+                    Completed = [{N, S} || {N, S, completed, _} <- Classified],
+                    Failed    = [{N, S, Info} || {N, S, failed, Info} <- Classified],
                     Total     = length(Names),
                     case Failed of
                         [] ->
@@ -621,8 +793,8 @@ stack_up(O, Path) ->
                                  end]));
                         _ ->
                             FailedSummary = string:join(
-                                [io_lib:format("~s (~s)", [N, atom_to_list(S)])
-                                 || {N, S} <- Failed], ", "),
+                                [format_post_up_failure(N, S, Info)
+                                 || {N, S, Info} <- Failed], ", "),
                             die(error, io_lib:format(
                                 "up: ~p/~p container(s) running; failed: ~s",
                                 [length(Running), Total, FailedSummary]))
@@ -642,18 +814,50 @@ classify_post_up(_Name, State, _Policies) when State =:= running;
     running;
 classify_post_up(Name, State, Policies) ->
     Policy = maps:get(Name, Policies, undefined),
-    AllowsTerminal = case Policy of
-        permanent      -> false;
-        always         -> false;
-        {always, _}    -> false;
-        undefined      -> false;
-        _              -> true   %% transient / temporary / on_failure / no_restart
-    end,
-    case {AllowsTerminal, State} of
-        {true, gone}    -> completed;
-        {true, stopped} -> completed;
-        _               -> failed
+    case State of
+        gone ->
+            case policy_tolerates_clean_terminal(Policy) of
+                true  -> completed;
+                false -> failed
+            end;
+        stopped ->
+            case policy_tolerates_clean_terminal(Policy) of
+                true  -> completed;
+                false -> failed
+            end;
+        failed ->
+            %% A `failed' state at settle time is only a legitimate
+            %% completion for explicit one-shot policies (temporary /
+            %% no_restart). For `transient' (on_failure), it indicates
+            %% an abnormal terminal failure — quarantine, repeated
+            %% setup error, or hit restart-attempt limit — that the
+            %% operator should see in the up summary.
+            case policy_tolerates_failed_terminal(Policy) of
+                true  -> completed;
+                false -> failed
+            end;
+        _ ->
+            failed
     end.
+
+%% Policies under which `stopped' or `gone' at settle time is a
+%% legitimate completion (clean exit, or auto_shutdown removing a
+%% pod whose only child terminated cleanly). `permanent'/`always'
+%% deliberately do NOT qualify — any non-running state for them is
+%% a failure.
+policy_tolerates_clean_terminal(undefined)        -> false;
+policy_tolerates_clean_terminal(permanent)        -> false;
+policy_tolerates_clean_terminal(always)           -> false;
+policy_tolerates_clean_terminal({always, _})      -> false;
+policy_tolerates_clean_terminal(_)                -> true.
+
+%% Policies under which a terminal `failed' state is a legitimate
+%% completion (explicit one-shot workloads). `transient' is
+%% intentionally excluded so genuine terminal failures (quarantine,
+%% setup errors, restart-limit hits) still surface in `ek up' output.
+policy_tolerates_failed_terminal(temporary)       -> true;
+policy_tolerates_failed_terminal(no_restart)      -> true;
+policy_tolerates_failed_terminal(_)               -> false.
 
 %% Parse the .term config to build a `#{ResolvedName => RestartPolicy}'
 %% lookup. Mirrors the resolution rule in erlkoenig_config_flatten:
@@ -697,12 +901,25 @@ name_to_str(N) when is_binary(N) -> binary_to_list(N);
 name_to_str(N) when is_list(N)   -> N;
 name_to_str(N) when is_atom(N)   -> atom_to_list(N).
 
-container_state_or_gone(O, Name) ->
+container_post_up_info(O, Name) ->
     NameBin = list_to_binary(Name),
     case op_call(O, container_inspect, [NameBin]) of
-        {ok, #{state := S}} -> S;
-        {error, #{code := 'EK_OPERATOR_NOT_FOUND'}} -> gone;
-        {error, _}          -> unknown
+        {ok, #{state := S} = Info} ->
+            #{state => S, error => maps:get(error, Info, undefined)};
+        {error, #{code := 'EK_OPERATOR_NOT_FOUND'}} ->
+            #{state => gone, error => undefined};
+        {error, Err} ->
+            #{state => unknown, error => Err}
+    end.
+
+format_post_up_failure(Name, State, Info) ->
+    Base = lists:flatten(io_lib:format("~s (~s)",
+                                       [Name, atom_to_list(State)])),
+    case maps:get(error, Info, undefined) of
+        undefined ->
+            Base;
+        Error ->
+            Base ++ ": " ++ lists:flatten(io_lib:format("~p", [Error]))
     end.
 
 stack_down(O, Path) ->
@@ -1023,6 +1240,72 @@ vol_orphans(O) ->
             die_operator(Err)
     end.
 
+%% `ek vol gc-orphans' — physically remove disk-orphan volume
+%% directories (i.e. dirs under the volumes root with no DETS
+%% record). Mirrors the `vol orphans' read-only discovery
+%% counterpart but is destructive, so requires either
+%% `--dry-run' (preview only) or `--yes' (commit).
+vol_gc_orphans(O) ->
+    DryRun = maps:get(dry_run, O, false),
+    Yes    = maps:get(yes, O, false),
+    case {DryRun, Yes} of
+        {true, _} -> do_vol_gc_orphans(O, dry_run);
+        {_, true} -> do_vol_gc_orphans(O, confirm);
+        _ ->
+            die(usage,
+                "vol gc-orphans requires --dry-run (preview) or --yes (commit)")
+    end.
+
+do_vol_gc_orphans(O, Mode) ->
+    case op_call(O, volume_gc_orphans, [Mode]) of
+        {ok, Results} ->
+            emit_gc_orphans_output(O, Results),
+            %% Non-zero exit if any orphan failed during a confirm
+            %% run. dry_run never fails — it's pure observation.
+            case any_failed(Results) of
+                false -> ok;
+                true  -> die(error, "vol gc-orphans: one or more deletions failed")
+            end;
+        {error, Err} ->
+            die_operator(Err)
+    end.
+
+emit_gc_orphans_output(O, Results) ->
+    case maps:get(format, O, table) of
+        json ->
+            emit_json([gc_result_to_json(R) || R <- Results]);
+        _ ->
+            emit_table(O,
+                       [uuid, mode, status, reason],
+                       [[get_or(uuid, R, <<>>),
+                         get_or(mode, R, <<>>),
+                         get_or(status, R, <<>>),
+                         null_to_dash(get_or(reason, R, null))]
+                        || R <- Results])
+    end.
+
+gc_result_to_json(R) when is_map(R) ->
+    #{<<"uuid">>   => to_str_or_null(maps:get(uuid, R, undefined)),
+      <<"path">>   => to_str_or_null(maps:get(path, R, undefined)),
+      <<"mode">>   => to_str_or_null(maps:get(mode, R, undefined)),
+      <<"status">> => to_str_or_null(maps:get(status, R, undefined)),
+      <<"reason">> => to_str_or_null(maps:get(reason, R, undefined))}.
+
+any_failed(Results) ->
+    lists:any(fun(R) -> maps:get(status, R, undefined) =:= <<"failed">> end,
+              Results).
+
+get_or(Key, Map, Default) ->
+    case maps:find(Key, Map) of
+        {ok, V} -> V;
+        error   -> Default
+    end.
+
+null_to_dash(null)         -> <<"-">>;
+null_to_dash(undefined)    -> <<"-">>;
+null_to_dash(<<>>)         -> <<"-">>;
+null_to_dash(Other)        -> Other.
+
 vol_set_quota(O, Uuid, Size) ->
     case op_call(O, volume_set_quota, [Uuid, Size]) of
         {ok, _Updated} ->
@@ -1127,11 +1410,9 @@ call(O, Module, Function, Args) ->
 call_rpc(#{node := Target} = O, Module, Function, Args) ->
     ensure_distribution(O),
     case rpc:call(Target, Module, Function, Args, 30_000) of
-        {badrpc, {'EXIT', {undef, _}}} ->
-            die(error, io_lib:format(
-                "remote call ~p:~p/~p is undef on ~p — release may be older "
-                "than this CLI, or the module isn't loaded",
-                [Module, Function, length(Args), Target]));
+        {badrpc, {'EXIT', {undef, Stack}}} ->
+            die(error, format_undef_diagnosis(Module, Function, Args,
+                                              Target, Stack));
         {badrpc, nodedown} ->
             die(error, io_lib:format("node ~p is down", [Target]));
         {badrpc, {'EXIT', {timeout, _}}} ->
@@ -1165,11 +1446,10 @@ op_call(O, Function, Args) ->
 op_call_rpc(#{node := Target} = O, Function, Args) ->
     ensure_distribution(O),
     case rpc:call(Target, erlkoenig_operator_api, Function, Args, 30_000) of
-        {badrpc, {'EXIT', {undef, _}}} ->
-            die(error, io_lib:format(
-                "remote call erlkoenig_operator_api:~p/~p is undef on ~p — "
-                "release may be older than this CLI",
-                [Function, length(Args), Target]));
+        {badrpc, {'EXIT', {undef, Stack}}} ->
+            die(error, format_undef_diagnosis(erlkoenig_operator_api,
+                                              Function, Args, Target,
+                                              Stack));
         {badrpc, nodedown} ->
             die(error, io_lib:format("node ~p is down", [Target]));
         {badrpc, {'EXIT', {timeout, _}}} ->
@@ -1180,6 +1460,48 @@ op_call_rpc(#{node := Target} = O, Function, Args) ->
                                      [Function, Reason]));
         Result ->
             Result
+    end.
+
+%% Distinguish "the wrapper itself is missing on the remote" from "an
+%% inner call inside the wrapper is missing". The previous code matched
+%% any `{undef, _}' in the badrpc and always blamed the outer wrapper —
+%% which silently mis-attributed runtime-dep undef errors (e.g. an
+%% OTP function not present on the remote) to a stale CLI. The first
+%% frame of the undef stack is the actual undefined call.
+format_undef_diagnosis(Module, Function, OuterArgs, Target, Stack) ->
+    OuterArity = length(OuterArgs),
+    case Stack of
+        [{Module, Function, InnerArgs, _Loc} | _]
+          when length(InnerArgs) =:= OuterArity ->
+            io_lib:format(
+              "remote call ~p:~p/~p is undef on ~p — "
+              "release may be older than this CLI",
+              [Module, Function, OuterArity, Target]);
+        [{Module, Function, InnerArity, _Loc} | _]
+          when InnerArity =:= OuterArity ->
+            io_lib:format(
+              "remote call ~p:~p/~p is undef on ~p — "
+              "release may be older than this CLI",
+              [Module, Function, OuterArity, Target]);
+        [{InnerMod, InnerFun, InnerArgs, _Loc} | _] when is_list(InnerArgs) ->
+            io_lib:format(
+              "remote call ~p:~p/~p crashed on ~p: "
+              "internal call ~p:~p/~p is undef "
+              "(likely OTP version skew or missing runtime dependency)",
+              [Module, Function, OuterArity, Target,
+               InnerMod, InnerFun, length(InnerArgs)]);
+        [{InnerMod, InnerFun, InnerArity, _Loc} | _] when is_integer(InnerArity) ->
+            io_lib:format(
+              "remote call ~p:~p/~p crashed on ~p: "
+              "internal call ~p:~p/~p is undef "
+              "(likely OTP version skew or missing runtime dependency)",
+              [Module, Function, OuterArity, Target,
+               InnerMod, InnerFun, InnerArity]);
+        _ ->
+            io_lib:format(
+              "remote call ~p:~p/~p is undef on ~p — "
+              "release may be older than this CLI (no detail in stack)",
+              [Module, Function, OuterArity, Target])
     end.
 
 op_call_mock(Path, Function, Args) ->
@@ -1261,6 +1583,8 @@ parse_global_opts(["--all" | Rest], Acc) ->
     parse_global_opts(Rest, Acc#{all => true});
 parse_global_opts(["--yes" | Rest], Acc) ->
     parse_global_opts(Rest, Acc#{yes => true});
+parse_global_opts(["--dry-run" | Rest], Acc) ->
+    parse_global_opts(Rest, Acc#{dry_run => true});
 parse_global_opts([Arg | Rest], Acc) when is_list(Arg) ->
     %% Also accept --key=value form for shell-friendly invocations.
     case string:split(Arg, "=") of
@@ -1269,6 +1593,7 @@ parse_global_opts([Arg | Rest], Acc) when is_list(Arg) ->
         ["--format", V]      -> parse_global_opts(Rest, Acc#{format => list_to_atom(V)});
         ["--all"]            -> parse_global_opts(Rest, Acc#{all => true});
         ["--yes"]            -> parse_global_opts(Rest, Acc#{yes => true});
+        ["--dry-run"]        -> parse_global_opts(Rest, Acc#{dry_run => true});
         _                    ->
             {NextAcc, NextRest} = parse_global_opts(Rest, Acc),
             {NextAcc, [Arg | NextRest]}
@@ -1645,6 +1970,7 @@ normalize_node_health(H) ->
 
 %% Small leaf converters — keep them honest about absence vs zero.
 to_str_or_null(undefined) -> null;
+to_str_or_null(null)      -> null;
 to_str_or_null(B) when is_binary(B) -> binary_to_string_or_hex(B);
 to_str_or_null(A) when is_atom(A)   -> atom_to_binary(A, utf8);
 to_str_or_null(L) when is_list(L)   ->
@@ -1656,6 +1982,7 @@ to_str_or_null(I) when is_integer(I) -> integer_to_binary(I);
 to_str_or_null(Other) -> tuple_to_string(Other).
 
 atom_to_str_or_null(undefined) -> null;
+atom_to_str_or_null(null)      -> null;
 atom_to_str_or_null(A) when is_atom(A) -> atom_to_binary(A, utf8);
 atom_to_str_or_null(B) when is_binary(B) -> B;
 atom_to_str_or_null(Other) -> tuple_to_string(Other).

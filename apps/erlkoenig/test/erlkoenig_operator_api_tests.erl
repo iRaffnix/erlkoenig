@@ -29,6 +29,7 @@ exports_arity_test() ->
         {volume_destroy, 1},
         {volume_set_quota, 2},
         {volume_orphans, 0},
+        {volume_gc_orphans, 1},
         {node_health, 0},
         {container_list, 0},
         {container_inspect, 1},
@@ -76,6 +77,19 @@ volume_destroy_rejects_non_binary_test() ->
 volume_set_quota_rejects_non_binary_uuid_test() ->
     R = erlkoenig_operator_api:volume_set_quota(123, 0),
     assert_error_code('EK_OPERATOR_BAD_ARGUMENT', R).
+
+volume_gc_orphans_rejects_invalid_mode_test() ->
+    %% Only the argument-validation gate is unit-testable here —
+    %% valid modes (dry_run / confirm) reach erlkoenig_volume_store
+    %% which is a live gen_server, not available in plain eunit.
+    %% The dry_run / confirm branches are exercised by the
+    %% integration suite.
+    R1 = erlkoenig_operator_api:volume_gc_orphans(go_for_it),
+    assert_error_code('EK_OPERATOR_BAD_ARGUMENT', R1),
+    R2 = erlkoenig_operator_api:volume_gc_orphans("dry_run"),
+    assert_error_code('EK_OPERATOR_BAD_ARGUMENT', R2),
+    R3 = erlkoenig_operator_api:volume_gc_orphans(undefined),
+    assert_error_code('EK_OPERATOR_BAD_ARGUMENT', R3).
 
 volume_list_by_container_rejects_non_binary_test() ->
     R = erlkoenig_operator_api:volume_list_by_container("name"),

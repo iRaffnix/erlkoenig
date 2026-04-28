@@ -58,6 +58,7 @@ they do NOT pattern-match on raw tuples from internal modules.
     volume_destroy/1,
     volume_set_quota/2,
     volume_orphans/0,
+    volume_gc_orphans/1,
 
     %% Node
     node_health/0,
@@ -243,6 +244,93 @@ volume_orphans() ->
         {error, Reason} ->
             {error, internal_err(volume_orphans, Reason)}
     end.
+
+-doc """
+Garbage-collect disk-orphan volume directories.
+
+In `dry_run' mode, lists what would be deleted without touching the
+filesystem. In `confirm' mode, deletes each orphan directory after
+re-checking that the UUID is still not registered in the store
+(race-safety against a volume getting created between the orphan
+listing and the deletion).
+
+Returns one map per orphan with stable string fields:
+
+  - `uuid'   :: binary()  — the orphan UUID
+  - `path'   :: binary()  — absolute filesystem path
+  - `mode'   :: binary()  — `<<"dry_run">>' | `<<"confirm">>'
+  - `status' :: binary()  — `<<"pending">>' | `<<"deleted">>' |
+                            `<<"already_gone">>' | `<<"skipped">>' |
+                            `<<"failed">>'
+  - `reason' :: binary() | null — human-readable reason when
+                                  `status' is `skipped' or `failed';
+                                  `null' otherwise.
+
+`vol orphans' remains a read-only discovery operation — store
+metadata is never touched by gc-orphans.
+""".
+-spec volume_gc_orphans(dry_run | confirm) ->
+    result([#{uuid   := binary(),
+              path   := binary(),
+              mode   := binary(),
+              status := binary(),
+              reason := binary() | null}]).
+volume_gc_orphans(Mode) when Mode =:= dry_run; Mode =:= confirm ->
+    Root = erlkoenig_volume_store:volumes_root(),
+    case volume_orphans() of
+        {ok, Uuids} ->
+            Results = [gc_one_orphan(Root, U, Mode) || U <- Uuids],
+            {ok, Results};
+        {error, _} = Err ->
+            Err
+    end;
+volume_gc_orphans(Other) ->
+    {error, bad_arg_err(mode, Other, <<"dry_run | confirm">>)}.
+
+gc_one_orphan(Root, Uuid, dry_run) ->
+    Path = orphan_path(Root, Uuid),
+    #{uuid => Uuid, path => Path,
+      mode => <<"dry_run">>, status => <<"pending">>,
+      reason => null};
+gc_one_orphan(Root, Uuid, confirm) ->
+    Path = orphan_path(Root, Uuid),
+    %% Re-check that the UUID is still NOT registered in the store.
+    %% Without this, an unfortunately timed `volume_create' between the
+    %% orphan listing and the deletion could let us delete a freshly
+    %% registered volume. Cost is one DETS scan per orphan, which is
+    %% acceptable for an operator-driven gc run.
+    Known = sets:from_list([maps:get(uuid, V)
+                            || V <- erlkoenig_volume_store:list()],
+                           [{version, 2}]),
+    case sets:is_element(Uuid, Known) of
+        true ->
+            #{uuid => Uuid, path => Path,
+              mode => <<"confirm">>, status => <<"skipped">>,
+              reason => <<"became known after orphan snapshot">>};
+        false ->
+            case file:del_dir_r(binary_to_list(Path)) of
+                ok ->
+                    #{uuid => Uuid, path => Path,
+                      mode => <<"confirm">>, status => <<"deleted">>,
+                      reason => null};
+                {error, enoent} ->
+                    #{uuid => Uuid, path => Path,
+                      mode => <<"confirm">>, status => <<"already_gone">>,
+                      reason => null};
+                {error, Reason} ->
+                    #{uuid => Uuid, path => Path,
+                      mode => <<"confirm">>, status => <<"failed">>,
+                      reason => format_gc_reason(Reason)}
+            end
+    end.
+
+orphan_path(Root, Uuid) ->
+    iolist_to_binary([Root, "/", Uuid]).
+
+format_gc_reason(R) when is_atom(R) ->
+    atom_to_binary(R, utf8);
+format_gc_reason(R) ->
+    iolist_to_binary(io_lib:format("~p", [R])).
 
 %%====================================================================
 %% Node

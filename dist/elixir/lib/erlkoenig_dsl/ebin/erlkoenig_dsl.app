@@ -1,5 +1,6 @@
 {application,erlkoenig_dsl,
-             [{modules,['Elixir.Erlkoenig.Container',
+             [{modules,['Elixir.Erlkoenig.Capabilities',
+                        'Elixir.Erlkoenig.Container',
                         'Elixir.Erlkoenig.Container.Builder',
                         'Elixir.Erlkoenig.DSL',
                         'Elixir.Erlkoenig.Host.Builder',
@@ -27,4 +28,4 @@
               {applications,[kernel,stdlib,elixir,logger,crypto,public_key]},
               {description,"erlkoenig_dsl"},
               {registered,[]},
-              {vsn,"0.6.0"}]}.
+              {vsn,"0.9.0"}]}.

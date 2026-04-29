@@ -54,6 +54,10 @@ defmodule Tutorial.MultiTier do
     * Container-nft    → Port-Whitelist + conn_limit + ICMP
     * Host forward     → wer-darf-zu-wem (IP-level)
     * Host input/output → externer Traffic (CDN / egress)
+
+  This tutorial includes production-style signature-required deploys.
+  Without installed trust roots and signed demo binaries, those
+  containers fail closed until an operator completes PKI setup.
   """
   use Erlkoenig.Stack
 
@@ -300,7 +304,9 @@ defmodule Tutorial.MultiTier do
       args: ["5432"],
       zone: "internal",
       replicas: 1,                # DB einzeln (kein cluster hier)
-      restart: :permanent,
+      # Missing PKI setup is an operator-action failure, not a runtime
+      # crash. Avoid restart loops that mask the root cause.
+      restart: :temporary,
       limits: %{memory: 2_000_000_000, pids: 512, disk: 10_000_000_000},
       signature: :required do    # Prod-DB-Binary immer signiert
 

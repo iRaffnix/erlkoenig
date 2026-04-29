@@ -32,6 +32,10 @@ defmodule Tutorial.StorageAndPki do
   Kombiniert mit `files:` (injected file contents) und
   `rootfs:` (composefs manifest) gibt's attestable container
   provenance — lohnt für regulated workloads.
+
+  This tutorial uses production-style `signature: :required`
+  declarations. Without installed trust roots and signed demo binaries,
+  those containers fail closed and require operator action.
   """
   use Erlkoenig.Stack
 
@@ -62,7 +66,9 @@ defmodule Tutorial.StorageAndPki do
       args: ["5432"],
       zone: "data",
       replicas: 1,
-      restart: :permanent,
+      # Missing PKI setup is an operator-action failure, not a runtime
+      # crash. Avoid restart loops that mask the root cause.
+      restart: :temporary,
       limits: %{memory: 512_000_000, pids: 256},
       # ── Signed Binary ──
       # `:required`  → Binary muss eine gültige Signature gegen
@@ -141,7 +147,8 @@ defmodule Tutorial.StorageAndPki do
       args: ["8080"],
       zone: "data",
       replicas: 2,                           # zwei Instanzen
-      restart: :permanent,
+      # Signature verification failures need PKI setup, not a retry loop.
+      restart: :temporary,
       limits: %{
         memory: 256_000_000,                 # 256 MB hard cap
         pids:   128,

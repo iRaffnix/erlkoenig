@@ -106,6 +106,16 @@
      operator_action => "install the runtime binary, verify the release layout, or set ERLKOENIG_RT to the runtime path",
      evidence_fields => [paths_searched]}},
 
+ { 'EK_CONFIG_HOST_FW_LOCKOUT_RISK',
+   #{component => config,
+     reason => host_fw_lockout_risk,
+     since => "0.9.0",
+     severity => error,
+     description => "host firewall stack would lock out the operator's SSH reconnect path",
+     operator_action => "either declare the live SSH port in the host input chain accept-list, or pass --allow-lockout if you have out-of-band recovery (serial console, KVM, hypervisor recovery mode) ready",
+     evidence_fields => [path, findings, override],
+     related_specs => ["docs/ARCHITECTURE_BACKLOG.md#host-firewall-lockout-preflight"]}},
+
  { 'EK_HOST_COOKIE_MISSING',
    #{component => host,
      reason => cookie_missing,

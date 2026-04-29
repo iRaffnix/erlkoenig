@@ -128,6 +128,24 @@ EXPECTED_VERSION="$(echo "$ARTIFACT_BASE" \
                       | sed -E 's/^erlkoenig-(.+)\.tar\.gz$/\1/')"
 info "artifact: $ARTIFACT_BASE  (expected version: $EXPECTED_VERSION)"
 
+# Pre-flight the tarball manifest. `make release` already runs this
+# gate, but install-smoke also accepts an externally-supplied
+# ARTIFACT= — for those, this is the only place that catches a
+# build-side defect before the host install starts.
+#
+# Also passes --expected-version: install-smoke derives EXPECTED_VERSION
+# from the filename, the audit derives its version from start_erl.data
+# inside the tarball. Without this cross-check, a misnamed or repackaged
+# tarball could pass both the smoke-side filename probe and the audit's
+# own internal-consistency probe, then explode at `ek --version` post-install.
+info "audit tarball manifest"
+if ! "$REPO_ROOT/tools/release-tarball-audit.sh" --quiet \
+        --expected-version "$EXPECTED_VERSION" "$ARTIFACT"; then
+    fail "tarball manifest audit failed for $ARTIFACT — re-run audit without --quiet for detail"
+    exit 1
+fi
+ok "tarball manifest clean"
+
 # --- 2. Stage artifacts on the target ---------------------------------
 
 REMOTE_TMP="/tmp/install-smoke-$$"
@@ -163,6 +181,14 @@ if ! ssh "$HOST" "
     exit 1
 fi
 ok "install.sh completed"
+
+info "ensure erlkoenig service is running"
+if ! ssh "$HOST" "systemctl start erlkoenig" >/dev/null 2>&1; then
+    fail "systemctl start erlkoenig failed on $HOST"
+    ssh "$HOST" "systemctl status erlkoenig --no-pager -l || true" >&2
+    exit 1
+fi
+ok "erlkoenig service started"
 
 # --- 4. Probes ---------------------------------------------------------
 
@@ -225,12 +251,32 @@ check_doctor_no_block() {
 check_json_list() {
     local cmd="$1"
     local out
-    out="$(ssh "$HOST" "PATH=$PREFIX/bin:\$PATH ek --format json $cmd 2>/dev/null" || true)"
-    case "$out" in
-        \[*\]) return 0 ;;
-        *) fail "ek --format json $cmd did not return a JSON array: '$out'"
-           return 1 ;;
-    esac
+    if ! out="$(ssh "$HOST" "PATH=$PREFIX/bin:\$PATH ek --format json $cmd 2>/dev/null")"; then
+        fail "ek --format json $cmd failed"
+        return 1
+    fi
+
+    if printf '%s' "$out" | python3 -c '
+import json
+import sys
+
+try:
+    value = json.load(sys.stdin)
+except Exception as exc:
+    print(f"invalid JSON: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+if not isinstance(value, list):
+    print(f"expected JSON array, got {type(value).__name__}", file=sys.stderr)
+    sys.exit(1)
+' >/tmp/install-smoke-json-$$.log 2>&1; then
+        return 0
+    fi
+
+    fail "ek --format json $cmd did not return a valid JSON array"
+    cat /tmp/install-smoke-json-$$.log >&2
+    printf 'output: %s\n' "$out" >&2
+    return 1
 }
 
 check_tutorial_06_compile() {
@@ -249,6 +295,24 @@ run_step "ek dsl compile tutorial 06"            check_tutorial_06_compile
 run_step "ek --format json ct list is valid"     check_json_list "ct list"
 run_step "ek --format json pod list is valid"    check_json_list "pod list"
 run_step "ek --format json vol list is valid"    check_json_list "vol list"
+
+# Layout audit — assert installed file tree matches docs/INSTALL_LAYOUT.md.
+# Skipped when LAYOUT_AUDIT=0 is set (e.g. on hosts with known long-lived
+# drift that has not been cleaned up yet, where install-smoke is being
+# used purely for the daemon-level probes).
+check_layout_audit() {
+    HOST="$HOST" PREFIX="$PREFIX" "$REPO_ROOT/tools/install-layout-audit.sh" \
+        --quiet >/tmp/install-smoke-layout-$$.log 2>&1
+}
+if [ "${LAYOUT_AUDIT:-1}" = "1" ]; then
+    if run_step "install layout audit (no drift under $PREFIX)" \
+            check_layout_audit; then
+        :
+    else
+        info "layout drift details:"
+        cat /tmp/install-smoke-layout-$$.log >&2 || true
+    fi
+fi
 
 # --- 6. Summary -------------------------------------------------------
 

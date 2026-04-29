@@ -719,7 +719,7 @@ bin_or_str(O)                   -> io_lib:format("~p", [O]).
 
 config_load(O, Path) ->
     PathBin = list_to_binary(Path),
-    case call(O, erlkoenig_config, load, [PathBin]) of
+    case call(O, erlkoenig_config, load, load_args(PathBin, O)) of
         {ok, Results} ->
             Names = [binary_to_list(N) || {N, _P} <- Results],
             emit_plain(io_lib:format("loaded ~p container(s)~n  ~s",
@@ -751,12 +751,22 @@ config_reload(O, Path) ->
 %% directly. A mis-typed extension is rejected before touching the node.
 %%====================================================================
 
+%% Build the RPC arg-list for erlkoenig_config:load — `load/1' default,
+%% `load/2' only when --allow-lockout is set. Keeps backward
+%% compatibility: an old daemon without `load/2' still answers `load/1'
+%% calls when the operator did not pass --allow-lockout.
+load_args(PathBin, O) ->
+    case maps:get(allow_lockout, O, false) of
+        true  -> [PathBin, #{allow_lockout => true}];
+        false -> [PathBin]
+    end.
+
 stack_up(O, Path) ->
     case ensure_term(Path) of
         {error, _} = E -> E;
         {ok, TermPath} ->
             PathBin = list_to_binary(TermPath),
-            case call(O, erlkoenig_config, load, [PathBin]) of
+            case call(O, erlkoenig_config, load, load_args(PathBin, O)) of
                 {ok, Results} ->
                     Names = [binary_to_list(N) || {N, _P} <- Results],
                     %% load/1 returns containers it tried to spawn —
@@ -1585,6 +1595,8 @@ parse_global_opts(["--yes" | Rest], Acc) ->
     parse_global_opts(Rest, Acc#{yes => true});
 parse_global_opts(["--dry-run" | Rest], Acc) ->
     parse_global_opts(Rest, Acc#{dry_run => true});
+parse_global_opts(["--allow-lockout" | Rest], Acc) ->
+    parse_global_opts(Rest, Acc#{allow_lockout => true});
 parse_global_opts([Arg | Rest], Acc) when is_list(Arg) ->
     %% Also accept --key=value form for shell-friendly invocations.
     case string:split(Arg, "=") of
@@ -1594,6 +1606,7 @@ parse_global_opts([Arg | Rest], Acc) when is_list(Arg) ->
         ["--all"]            -> parse_global_opts(Rest, Acc#{all => true});
         ["--yes"]            -> parse_global_opts(Rest, Acc#{yes => true});
         ["--dry-run"]        -> parse_global_opts(Rest, Acc#{dry_run => true});
+        ["--allow-lockout"]  -> parse_global_opts(Rest, Acc#{allow_lockout => true});
         _                    ->
             {NextAcc, NextRest} = parse_global_opts(Rest, Acc),
             {NextAcc, [Arg | NextRest]}
@@ -2041,6 +2054,7 @@ print_usage() ->
         "  --node <name>        Target node (default: erlkoenig@$hostname)~n"
         "  --cookie-file <path> Cookie file (default: ERLKOENIG_COOKIE_FILE, /etc/erlkoenig/cookie, ~~/.config/erlkoenig/cookie)~n"
         "  --format <fmt>       Output format: table | json | plain (default: table)~n"
+        "  --allow-lockout      Bypass host-firewall preflight on `up' / `config load' (you must have out-of-band recovery available)~n"
         "  --version, -V        Print CLI version and exit~n"
         "~n"
         "Areas and commands:~n"

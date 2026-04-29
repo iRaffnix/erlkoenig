@@ -3,6 +3,14 @@ defmodule SignedDeployment do
 
   # ── Signed Binary Deployment ─────────────────────────────
   #
+  # PREREQUISITE: this example requires an operator-supplied
+  # signed binary at /opt/api/server (+ /opt/api/server.sig).
+  # Running `ek up examples/signed_deployment.exs` without
+  # completing steps 1-2 below will fail the container with
+  # `EK_RUNTIME_BINARY_MISSING` or `signature_rejected` — the
+  # example documents the *workflow*, not a self-contained
+  # demo stack.
+  #
   # Zeigt den vollständigen PKI-Flow:
   #
   #   1. Binaries signieren (Build-Pipeline):

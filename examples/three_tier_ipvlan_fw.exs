@@ -28,6 +28,14 @@ defmodule ThreeTierIpvlanFw do
       ip saddr <web-ips> ip daddr <app-ip> tcp dport 4000 accept
       ip saddr <app-ip>  ip daddr <data-ip> tcp dport 5432 accept
     Default: drop + counter.
+
+  WARNING: this example takes over the host firewall.
+  The host input chain has default policy :drop and allows SSH only on
+  tcp/22222, not tcp/22. Existing SSH sessions usually survive via
+  ct_state established/related, but reconnects on port 22 are dropped
+  and port 22 is listed as a honeypot in the guard block. Run this only
+  on a host where sshd listens on 22222 or where serial/KVM/cloud
+  console recovery is available.
   """
 
   use Erlkoenig.Stack

@@ -110,6 +110,16 @@ dsl:
 
 dsl-bundle:
 	cd dsl && MIX_ENV=prod mix deps.get --only prod && MIX_ENV=prod mix compile
+	@ELIXIR_BIN=$$(readlink -f "$$(command -v elixir)"); \
+	ELIXIR_HOME=$$(cd "$$(dirname "$$ELIXIR_BIN")/.." && pwd); \
+	rm -rf dist/elixir; \
+	mkdir -p dist/elixir/bin dist/elixir/lib; \
+	cp "$$ELIXIR_HOME/bin/elixir" dist/elixir/bin/elixir; \
+	for app in elixir eex logger; do \
+		test -d "$$ELIXIR_HOME/lib/$$app/ebin" || { echo "missing Elixir app ebin: $$app" >&2; exit 1; }; \
+		mkdir -p "dist/elixir/lib/$$app"; \
+		cp -R "$$ELIXIR_HOME/lib/$$app/ebin" "dist/elixir/lib/$$app/ebin"; \
+	done
 	mkdir -p dist/elixir/lib/erlkoenig_dsl/ebin
 	cp dsl/_build/prod/lib/erlkoenig_dsl/ebin/* dist/elixir/lib/erlkoenig_dsl/ebin/
 
@@ -148,9 +158,33 @@ test-dsl:
 
 release: erl dsl-bundle
 	rebar3 release
+	@# rebar3 version-filters lib/ and releases/ when packaging the
+	@# tar (only the active version is shipped), but NOT bin/. Older
+	@# per-version wrappers (bin/erlkoenig-X.Y.Z) accumulate in the
+	@# release tree across builds and get packaged into every
+	@# subsequent tarball. Once installed, the systemd entrypoint
+	@# bin/erlkoenig globs `erlkoenig-*` and picks the FIRST match
+	@# alphabetically — which can be older than the active release.
+	@# Strip stale wrappers before tar so we ship exactly one.
+	@find _build/default/rel/erlkoenig/bin -maxdepth 1 -name 'erlkoenig-*' \
+		-not -name 'erlkoenig-$(CURRENT_VERSION)' -delete
 	rebar3 tar
+	@# Manifest-only audit gates the artefact before it leaves the
+	@# build directory. Catches the build-side bug classes documented
+	@# in docs/INSTALL_LAYOUT.md (stale per-version wrapper, empty
+	@# elixir/{elixir,eex,logger}/ebin, leaked examples/*.term, missing
+	@# required files, OTP-dep gap). The audit runs against the source
+	@# tarball in _build/, *before* the cp into dist/ — a failure here
+	@# blocks the `make release` target without ever publishing the
+	@# broken artefact under dist/.
+	@tools/release-tarball-audit.sh \
+		_build/default/rel/erlkoenig/erlkoenig-$(CURRENT_VERSION).tar.gz
 	@mkdir -p dist
-	cp _build/default/rel/erlkoenig/erlkoenig-*.tar.gz dist/
+	@# Copy ONLY the audited tarball, not a glob over `_build/`. Older
+	@# version tarballs accumulate in `_build/default/rel/erlkoenig/`
+	@# across builds; a glob would publish them too, bypassing the
+	@# audit gate which only inspects $(CURRENT_VERSION).
+	cp _build/default/rel/erlkoenig/erlkoenig-$(CURRENT_VERSION).tar.gz dist/
 	@echo ""
 	@echo "==> dist/$$(cd dist && ls erlkoenig-*.tar.gz)"
 

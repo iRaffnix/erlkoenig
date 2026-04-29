@@ -1,0 +1,188 @@
+============================================================
+erlkoenig install-audit — host: erlkoenig-2
+captured: 2026-04-29T06:14:30Z
+============================================================
+
+## Host facts
+
+uname: Linux erlkoenig-2 6.12.74+deb13+1-cloud-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.12.74-2 (2026-03-08) x86_64 GNU/Linux
+os:    Debian GNU/Linux 13 (trixie)
+
+## Daemon
+
+active: active
+MainPID: 477385
+argv:
+/opt/erlkoenig/bin/erlkoenig-0.9.0 -Bd -sbwt very_short -- -root /opt/erlkoenig -bindir /opt/erlkoenig/erts-16.3/bin -progname opt/erlkoenig/bin/erlkoenig-0.9.0 -- -home /root -- -noshell -noinput -boot /opt/erlkoenig/releases/0.9.0/start -mode embedded -boot_var SYSTEM_LIB_DIR /opt/erlkoenig/lib -config /opt/erlkoenig/releases/0.9.0/sys.config -sname erlkoenig -setcookie AX9PYXdCIlJm9OS6EAK6MOxgUPbMTIwB -- -- foreground -- 
+
+## systemd topology
+
+lrwxrwxrwx 1 root root 37 Apr 28 19:49 /etc/systemd/system/erlkoenig.service -> /opt/erlkoenig/dist/erlkoenig.service
+/opt/erlkoenig/dist/erlkoenig.service
+
+## /opt/erlkoenig top-level layout (depth 1)
+
+total 60
+drwxr-x--- 14 root erlkoenig 4096 Apr 28 19:49 .
+drwxr-xr-x  4 root root      4096 Apr 14 06:18 ..
+drwxr-xr-x  2 root erlkoenig 4096 Apr 28 19:49 bin
+lrwxrwxrwx  1 root erlkoenig   21 Apr 26 19:22 cookie -> /etc/erlkoenig/cookie
+-r--r-----  1 root erlkoenig   32 Apr 17 12:48 cookie.bak
+drwxr-xr-x  2 root erlkoenig 4096 Apr 28 19:49 dist
+drwxr-xr-x  2 root erlkoenig 4096 Apr 28 19:49 doc
+drwxr-xr-x  4 root erlkoenig 4096 Apr 20 10:20 elixir
+drwxr-xr-x  3 root erlkoenig 4096 Apr 28 19:49 erts-16.3
+drwxr-xr-x  3 root erlkoenig 4096 Apr 28 19:49 examples
+drwxr-xr-x 22 root erlkoenig 4096 Apr 28 19:49 lib
+drwxr-xr-x 13 root erlkoenig 4096 Apr 17 13:22 release
+drwxr-xr-x  3 root erlkoenig 4096 Apr 28 19:49 releases
+drwxr-xr-x  3 root root      4096 Apr 28 19:49 rt
+drwxr-xr-x  2 root erlkoenig 4096 Apr 28 19:49 share
+drwxr-xr-x  2 root erlkoenig 4096 Apr 28 19:49 tools
+
+## /opt/erlkoenig sizes (du -sh sorted)
+
+0	/opt/erlkoenig/cookie
+4.0K	/opt/erlkoenig/cookie.bak
+8.0K	/opt/erlkoenig/dist
+24K	/opt/erlkoenig/tools
+28K	/opt/erlkoenig/doc
+104K	/opt/erlkoenig/releases
+108K	/opt/erlkoenig/bin
+132K	/opt/erlkoenig/share
+176K	/opt/erlkoenig/examples
+7.3M	/opt/erlkoenig/elixir
+17M	/opt/erlkoenig/rt
+28M	/opt/erlkoenig/lib
+54M	/opt/erlkoenig/erts-16.3
+92M	/opt/erlkoenig/release
+
+TOTAL: 198M	/opt/erlkoenig
+
+## Symlinks under /opt/erlkoenig
+
+/opt/erlkoenig/cookie -> /etc/erlkoenig/cookie
+
+## Capabilities under /opt/erlkoenig
+
+/opt/erlkoenig/rt/erlkoenig_rt cap_dac_override,cap_setgid,cap_setuid,cap_setpcap,cap_net_admin,cap_sys_chroot,cap_sys_ptrace,cap_sys_admin,cap_sys_resource,cap_bpf=ep
+
+## File ownership distribution
+
+   2811 root:erlkoenig
+     20 root:root
+
+## Files owned by root:root (suspicious — expected: root:erlkoenig)
+
+/opt/erlkoenig/examples/tutorial/06_multi_tier.term
+/opt/erlkoenig/rt/demo/test-erlkoenig-mem_eater
+/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server
+/opt/erlkoenig/rt/demo/test-erlkoenig-syscall_mount
+/opt/erlkoenig/rt/demo/test-erlkoenig-disk_writer
+/opt/erlkoenig/rt/demo/test-erlkoenig-crasher
+/opt/erlkoenig/rt/demo/test-erlkoenig-stdout_flood
+/opt/erlkoenig/rt/demo/test-erlkoenig-landlock_check
+/opt/erlkoenig/rt/demo/test-erlkoenig-stdin_echo
+/opt/erlkoenig/rt/demo/test-erlkoenig-sleeper
+/opt/erlkoenig/rt/demo/test-erlkoenig-cpu_burner
+/opt/erlkoenig/rt/demo/case_mgmt
+/opt/erlkoenig/rt/demo/test-erlkoenig-syscall_fork
+/opt/erlkoenig/rt/demo/test-erlkoenig-hello_output
+/opt/erlkoenig/rt/demo/deadline_worker
+/opt/erlkoenig/rt/demo/test-erlkoenig-proc_check
+/opt/erlkoenig/rt/demo/test-erlkoenig-syscall_write_rootfs
+/opt/erlkoenig/rt/erlkoenig_rt
+
+## Per-version erlkoenig binaries in bin/
+
+-rwxr-xr-x 1 root erlkoenig 36169 Apr 28 19:48 /opt/erlkoenig/bin/erlkoenig-0.9.0
+
+## Per-version erlkoenig dirs under lib/
+
+drwxr-xr-x 4 root erlkoenig 4096 Apr 28 19:49 /opt/erlkoenig/lib/erlkoenig-0.9.0
+
+## Per-version erlkoenig dirs under release/lib/ (PHANTOM)
+
+drwxr-xr-x 3 root erlkoenig 4096 Apr 17 13:22 /opt/erlkoenig/release/lib/erlkoenig-0.6.0
+drwxr-xr-x 4 root erlkoenig 4096 Apr 27 19:27 /opt/erlkoenig/release/lib/erlkoenig-0.9.0
+
+## release/ phantom: is anyone open on it?
+
+
+## release/ vs lib/ md5 drift (erlkoenig-0.9.0)
+
+Files /opt/erlkoenig/lib/erlkoenig-0.9.0/ebin/erlkoenig_config_validate.beam and /opt/erlkoenig/release/lib/erlkoenig-0.9.0/ebin/erlkoenig_config_validate.beam differ
+Files /opt/erlkoenig/lib/erlkoenig-0.9.0/ebin/erlkoenig_ct.beam and /opt/erlkoenig/release/lib/erlkoenig-0.9.0/ebin/erlkoenig_ct.beam differ
+Files /opt/erlkoenig/lib/erlkoenig-0.9.0/ebin/erlkoenig_ct_info.beam and /opt/erlkoenig/release/lib/erlkoenig-0.9.0/ebin/erlkoenig_ct_info.beam differ
+Files /opt/erlkoenig/lib/erlkoenig-0.9.0/ebin/erlkoenig_ct_opts.beam and /opt/erlkoenig/release/lib/erlkoenig-0.9.0/ebin/erlkoenig_ct_opts.beam differ
+Files /opt/erlkoenig/lib/erlkoenig-0.9.0/ebin/erlkoenig_operator_api.beam and /opt/erlkoenig/release/lib/erlkoenig-0.9.0/ebin/erlkoenig_operator_api.beam differ
+Files /opt/erlkoenig/lib/erlkoenig-0.9.0/priv/error_catalog.term and /opt/erlkoenig/release/lib/erlkoenig-0.9.0/priv/error_catalog.term differ
+
+## examples/ provenance
+
+2026-04-21 root:erlkoenig 10804 /opt/erlkoenig/examples/tutorial/03_firewall.exs
+2026-04-21 root:erlkoenig 11672 /opt/erlkoenig/examples/simple_echo.exs
+2026-04-21 root:erlkoenig 14286 /opt/erlkoenig/examples/tutorial/06_multi_tier.exs
+2026-04-21 root:erlkoenig 2521 /opt/erlkoenig/examples/dsl_e2e_edge.exs
+2026-04-21 root:erlkoenig 2544 /opt/erlkoenig/examples/tutorial/README.md
+2026-04-21 root:erlkoenig 2912 /opt/erlkoenig/examples/pod_strategies.exs
+2026-04-21 root:erlkoenig 4328 /opt/erlkoenig/examples/logged_echo.exs
+2026-04-21 root:erlkoenig 4952 /opt/erlkoenig/examples/signed_deployment.exs
+2026-04-21 root:erlkoenig 5146 /opt/erlkoenig/examples/tutorial/01_overview.exs
+2026-04-21 root:erlkoenig 5786 /opt/erlkoenig/examples/tutorial.exs
+2026-04-21 root:erlkoenig 6211 /opt/erlkoenig/examples/pod_supervision.exs
+2026-04-21 root:erlkoenig 6296 /opt/erlkoenig/examples/case_mgmt_stack.exs
+2026-04-21 root:erlkoenig 7425 /opt/erlkoenig/examples/three_tier_ipvlan.exs
+2026-04-21 root:erlkoenig 7579 /opt/erlkoenig/examples/tutorial/05_storage_and_pki.exs
+2026-04-21 root:erlkoenig 8144 /opt/erlkoenig/examples/tutorial/04_threat_detection.exs
+2026-04-21 root:erlkoenig 8751 /opt/erlkoenig/examples/tutorial/02_capabilities.exs
+2026-04-21 root:erlkoenig 8826 /opt/erlkoenig/examples/three_tier_ipvlan_fw.exs
+2026-04-26 root:erlkoenig 1505 /opt/erlkoenig/examples/tutorial/01_overview.term
+2026-04-28 root:root 12356 /opt/erlkoenig/examples/tutorial/06_multi_tier.term
+
+## rt/demo/ contents (showcase or core?)
+
+total 16792
+drwxr-xr-x 2 root root     4096 Apr 23 21:09 .
+drwxr-xr-x 3 root root     4096 Apr 28 19:49 ..
+-rwx------ 1 root root 10461346 Apr 20 09:39 case_mgmt
+-rwx------ 1 root root  6172834 Apr 20 09:39 deadline_worker
+-rwx------ 1 root root    38024 Apr 28 06:42 test-erlkoenig-cpu_burner
+-rwx------ 1 root root    33440 Apr 28 06:42 test-erlkoenig-crasher
+-rwx------ 1 root root    47864 Apr 28 06:42 test-erlkoenig-disk_writer
+-rwx------ 1 root root    38552 Apr 28 06:42 test-erlkoenig-echo_server
+-rwx------ 1 root root    25104 Apr 28 06:42 test-erlkoenig-hello_output
+-rwx------ 1 root root    38528 Apr 28 06:42 test-erlkoenig-landlock_check
+-rwx------ 1 root root    38096 Apr 28 06:42 test-erlkoenig-mem_eater
+-rwx------ 1 root root    48376 Apr 28 06:42 test-erlkoenig-proc_check
+-rwx------ 1 root root    19184 Apr 28 06:42 test-erlkoenig-sleeper
+-rwx------ 1 root root    38352 Apr 28 06:42 test-erlkoenig-stdin_echo
+-rwx------ 1 root root    33352 Apr 28 06:42 test-erlkoenig-stdout_flood
+-rwx------ 1 root root    40000 Apr 28 06:42 test-erlkoenig-syscall_fork
+-rwx------ 1 root root    33504 Apr 28 06:42 test-erlkoenig-syscall_mount
+-rwx------ 1 root root    37688 Apr 28 06:42 test-erlkoenig-syscall_write_rootfs
+
+## releases/ (boot artifacts)
+
+total 24
+drwxr-xr-x  3 root erlkoenig 4096 Apr 28 19:49 .
+drwxr-x--- 14 root erlkoenig 4096 Apr 28 19:49 ..
+drwxr-xr-x  2 root erlkoenig 4096 Apr 28 19:49 0.9.0
+-rw-rw-r--  1 root erlkoenig  657 Apr 28 19:48 erlkoenig.rel
+-rw-rw-r--  1 root erlkoenig 1194 Apr 28 19:48 RELEASES
+-rw-rw-r--  1 root erlkoenig   10 Apr 28 19:48 start_erl.data
+total 92
+drwxr-xr-x 2 root erlkoenig  4096 Apr 28 19:49 .
+drwxr-xr-x 3 root erlkoenig  4096 Apr 28 19:49 ..
+-rw-rw-r-- 1 root erlkoenig   657 Apr 28 19:48 erlkoenig.rel
+-rw-rw-r-- 1 root erlkoenig  7008 Apr 28 19:48 no_dot_erlang.boot
+-rw-rw-r-- 1 root erlkoenig 37486 Apr 28 19:48 start.boot
+-rw-rw-r-- 1 root erlkoenig 19227 Apr 28 19:48 start_clean.boot
+-rw-rw-r-- 1 root erlkoenig  4070 Apr 15 08:17 sys.config
+-rw-r--r-- 1 root erlkoenig   218 Apr 28 19:51 vm.args
+-rw-rw-r-- 1 root erlkoenig   206 Apr  5 12:58 vm.args.src
+
+## Stale logs?
+
+2026-04-20 97655 /opt/erlkoenig/release/log/erlang.log.1
+2026-04-17 306 /opt/erlkoenig/release/log/run_erl.log

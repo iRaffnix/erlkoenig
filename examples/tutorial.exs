@@ -20,6 +20,13 @@ defmodule Tutorial do
   #     api → web              (reverse: nie erlaubt)
   #     web → web              (Peer-Tier-Sprung: nie erlaubt)
   #
+  # WARNUNG: Dieses Beispiel übernimmt die Host-Firewall.
+  # Die Host-input-chain hat policy :drop und erlaubt SSH nur auf
+  # tcp/22222. Port 22 ist zusätzlich als Honeypot konfiguriert:
+  # ein Reconnect auf tcp/22 kann die Operator-IP für 1h bannen.
+  # Nur ausführen, wenn sshd auf 22222 erreichbar ist oder ein
+  # Out-of-Band-Recovery-Pfad existiert (Serial/KVM/Cloud-Console).
+  #
   # Starten:
   #   ek up examples/tutorial.exs
   # Inspizieren:

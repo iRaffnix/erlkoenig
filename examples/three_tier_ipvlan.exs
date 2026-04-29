@@ -27,6 +27,14 @@ defmodule ThreeTierIpvlan do
     ip link add ek_ct0 type dummy
     ip addr add 10.50.100.1/24 dev ek_ct0
     ip link set ek_ct0 up
+
+  WARNING: this example takes over the host firewall.
+  The host input chain has default policy :drop and allows SSH only on
+  tcp/22222, not tcp/22. Existing SSH sessions usually survive via
+  ct_state established/related, but reconnects on port 22 are dropped
+  and port 22 is listed as a honeypot in the guard block. Run this only
+  on a host where sshd listens on 22222 or where serial/KVM/cloud
+  console recovery is available.
   """
 
   use Erlkoenig.Stack

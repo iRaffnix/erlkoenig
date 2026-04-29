@@ -27,7 +27,7 @@ Usage:
   {ok, Pids} = erlkoenig_config:reload("/etc/erlkoenig/cluster.term").
 """.
 
--export([load/1, validate/1, reload/1, parse/1, flatten_containers/1,
+-export([load/1, load/2, validate/1, reload/1, parse/1, flatten_containers/1,
          declared_names/1]).
 
 -include("erlkoenig_error.hrl").
@@ -85,9 +85,23 @@ Can be called multiple times with the same or different files.
 """.
 -spec load(file:filename()) -> {ok, [{binary(), pid()}]} | {error, term()}.
 load(TermFile) ->
+    load(TermFile, #{}).
+
+-doc """
+Load with explicit options. Currently supported:
+
+  `allow_lockout => boolean()` — if `true`, the host-firewall preflight
+  warning is logged but does not abort the load. Default `false`. The
+  operator must pass this explicitly via `ek up --allow-lockout` or
+  `ek config load --allow-lockout` after reading the warning.
+""".
+-spec load(file:filename(), map()) ->
+    {ok, [{binary(), pid()}]} | {error, term()}.
+load(TermFile, Opts) when is_map(Opts) ->
     maybe
         {ok, Config} ?= parse(TermFile),
         ok ?= erlkoenig_config_validate:validate_config(Config),
+        ok ?= host_fw_preflight(TermFile, Config, Opts),
         OldConfig = get_stored_config(TermFile),
         Result = apply_config_with_reconciliation(OldConfig, Config),
         store_config(TermFile, Config),
@@ -102,6 +116,32 @@ load(TermFile) ->
                         #{path => unicode:characters_to_binary(TermFile),
                           reason => Reason})),
             Err
+    end.
+
+%% Host-firewall lockout preflight. Runs after validate_config and
+%% before apply. Emits a structured EK_HOST_FW_LOCKOUT_RISK error and
+%% aborts the load when the stack would block the operator's SSH
+%% reconnect path; honored only if the caller did not pass
+%% `allow_lockout => true'.
+host_fw_preflight(TermFile, Config, Opts) ->
+    case erlkoenig_host_fw_preflight:analyze(Config) of
+        {ok, no_concern} ->
+            ok;
+        {abort, Findings} ->
+            case maps:get(allow_lockout, Opts, false) of
+                true ->
+                    erlkoenig_events:notify(
+                      {host_fw_preflight_overridden, TermFile, Findings}),
+                    ok;
+                _ ->
+                    erlkoenig_error:emit(
+                      ?EK_ERROR(config, host_fw_lockout_risk,
+                                "host firewall stack would lock out the operator",
+                                #{path     => unicode:characters_to_binary(TermFile),
+                                  findings => Findings,
+                                  override => "ek up --allow-lockout"})),
+                    {error, {host_fw_lockout_risk, Findings}}
+            end
     end.
 
 -doc "Reload a config file. Alias for load/1 (both are idempotent).".

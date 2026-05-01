@@ -51,7 +51,9 @@ calling this module directly.
     list_counters/0,
     add_element/2,
     del_element/2,
-    diff_live/0
+    diff_live/0,
+    validate_ct_state_audit/1,
+    log_audit_issues/1
 ]).
 
 -export([
@@ -61,6 +63,13 @@ calling this module directly.
     handle_info/2,
     terminate/2
 ]).
+
+-ifdef(TEST).
+-export([configured_ban_set/2, dev_default_enabled/0,
+         host_table/0, normalize_config/1]).
+-endif.
+
+-include("nft_tables.hrl").
 
 %% --- Constants ---
 
@@ -79,7 +88,7 @@ calling this module directly.
 
 %% --- Public API ---
 
--doc "Start the firewall with config from etc/firewall.term, or a default empty table.".
+-doc "Start the firewall with config from etc/firewall.term.".
 -spec start_link() -> {ok, pid()} | {error, term()}.
 start_link() ->
     case config_path() of
@@ -95,8 +104,22 @@ start_link() ->
                     {error, {bad_config, {Reason, Path}}}
             end;
         {error, not_found} ->
-            logger:notice("[erlkoenig_nft] No config found, starting with empty table"),
-            start_link(default_config())
+            case dev_default_enabled() of
+                true ->
+                    logger:warning(
+                        "[erlkoenig_nft] No firewall.term found; "
+                        "ERLKOENIG_NFT_DEV_DEFAULT is set, starting with "
+                        "dev_default_config. Host firewall is not protected."
+                    ),
+                    start_link(dev_default_config());
+                false ->
+                    logger:error(
+                        "[erlkoenig_nft] No firewall.term found; refusing to "
+                        "start without explicit firewall config. Set "
+                        "ERLKOENIG_NFT_DEV_DEFAULT=1 only for local development."
+                    ),
+                    {error, no_config}
+            end
     end.
 
 -doc "Start the firewall with an explicit config map.".
@@ -179,9 +202,13 @@ diff_live() ->
 %% --- gen_server callbacks ---
 
 -spec init(map()) -> {ok, state()}.
-init(Config) ->
+init(Config0) ->
     proc_lib:set_label(erlkoenig_nft_firewall),
+    %% Pin the host-owner table before anything else reads it. State
+    %% and all runtime call sites then see the same `table` field.
+    Config = normalize_config(Config0),
     Table = maps:get(table, Config),
+    warn_missing_ban_set(Config),
     case apply_config(Config) of
         ok ->
             start_counters(Config),
@@ -216,7 +243,7 @@ handle_call({ban, IPBin}, _From, #{config := Config} = State) ->
     Result = apply_set_op(
         Config,
         IPBin,
-        fun blocklist_name/2,
+        fun configured_ban_set/2,
         fun(T, S) -> nft_rules:ban_ip(T, S, IPBin, TimeoutMs) end,
         "Banned ~s (~ps)",
         [erlkoenig_nft_ip:format(IPBin), BanDurationSec]
@@ -228,7 +255,7 @@ handle_call({unban, IPBin}, _From, #{config := Config} = State) ->
     Result = apply_set_op(
         Config,
         IPBin,
-        fun blocklist_name/2,
+        fun configured_ban_set/2,
         fun(T, S) -> nft_rules:unban_ip(T, S, IPBin) end,
         "Unbanned ~s",
         [erlkoenig_nft_ip:format(IPBin)]
@@ -259,12 +286,16 @@ handle_call(reload, _From, #{table := OldTable} = State) ->
     Result =
         maybe
             {ok, Path} ?= config_path(),
-            {ok, [NewConfig]} ?=
+            {ok, [NewConfig0]} ?=
                 case file:consult(Path) of
                     {ok, [_] = OK} -> {ok, OK};
                     {ok, _} -> {error, {bad_config, {expected_single_term, Path}}};
                     {error, Reason} -> {error, {bad_config, Reason}}
                 end,
+            %% Pin the host table on the freshly-loaded config the
+            %% same way init/1 does, so subsequent state and
+            %% runtime reads agree on the effective table name.
+            NewConfig = normalize_config(NewConfig0),
             erlkoenig_nft_watch_sup:stop_counters(),
             ok ?= apply_config(NewConfig),
             NewTable = maps:get(table, NewConfig),
@@ -429,7 +460,10 @@ handle_info(_Info, State) ->
 -spec terminate(term(), state()) -> ok.
 terminate(_Reason, #{table := Table}) ->
     logger:notice("[erlkoenig_nft] Tearing down firewall: table=~s", [Table]),
-    erlkoenig_nft_watch_sup:stop_counters(),
+    case whereis(erlkoenig_nft_watch_sup) of
+        undefined -> ok;
+        _ -> erlkoenig_nft_watch_sup:stop_counters()
+    end,
     _ = nfnl_server:apply_msgs(erlkoenig_nft_srv, [
         fun(S) -> nft_delete:table(?INET, Table, S) end
     ]),
@@ -498,7 +532,16 @@ apply_config(Config) ->
     end.
 
 apply_config_unsafe(Config) ->
+    %% Phase 6d invariant: callers (init/1, reload, ban/unban
+    %% retries) must have run `normalize_config/1' first. The
+    %% `table` field is therefore always populated and equal to
+    %% `host_table()`. Reading it directly is now safe.
     Table = maps:get(table, Config),
+    %% §6.2 audit: warn if operator's chains violate the
+    %% ct_state contract from SPEC-NFT-OWNERSHIP-SPLIT §6.2.
+    %% Soft warning — operators with policy=accept don't need the
+    %% audit; only chains with policy=drop must follow it.
+    log_audit_issues(validate_ct_state_audit(Config)),
     Sets = maps:get(sets, Config, []),
     Vmaps = maps:get(vmaps, Config, []),
     Counters = maps:get(counters, Config, []),
@@ -1231,26 +1274,72 @@ get_ban_duration(Config) ->
     CtGuard = maps:get(ct_guard, Config, #{}),
     maps:get(ban_duration, CtGuard, 3600).
 
--spec blocklist_name(map(), binary()) -> {ok, binary()} | {error, no_matching_set}.
-blocklist_name(Config, IPBin) ->
-    Sets = maps:get(sets, Config, []),
+-spec configured_ban_set(map(), binary()) ->
+    {ok, binary()} |
+    {error, no_ban_set_configured | {no_ban_set_for_family, atom()} |
+            {ban_set_not_found, binary()} | {ban_set_type_mismatch, binary(), atom(), atom()}}.
+configured_ban_set(Config, IPBin) ->
     TargetType =
         case erlkoenig_nft_ip:version(IPBin) of
             v4 -> ipv4_addr;
             v6 -> ipv6_addr
         end,
-    case
-        [
-            Name
-         || S <- Sets,
-            set_name(S) =/= undefined,
-            set_type(S) =:= TargetType,
-            Name <- [set_name(S)],
-            not is_allowlist(Name)
-        ]
-    of
-        [First | _] -> {ok, First};
-        [] -> {error, no_matching_set}
+    case ban_set_name(maps:get(ban_set, Config, undefined), TargetType) of
+        {ok, SetName} ->
+            validate_ban_set(Config, SetName, TargetType);
+        {error, _} = Err ->
+            Err
+    end.
+
+-spec ban_set_name(undefined | binary() | map(), ipv4_addr | ipv6_addr) ->
+    {ok, binary()} | {error, no_ban_set_configured | {no_ban_set_for_family, atom()}}.
+ban_set_name(undefined, _TargetType) ->
+    {error, no_ban_set_configured};
+ban_set_name(Name, ipv4_addr) when is_binary(Name) ->
+    {ok, Name};
+ban_set_name(Name, ipv6_addr) when is_binary(Name) ->
+    {error, {no_ban_set_for_family, ipv6_addr}};
+ban_set_name(BanSet, TargetType) when is_map(BanSet) ->
+    Keys =
+        case TargetType of
+            ipv4_addr -> [ipv4, ipv4_addr, v4];
+            ipv6_addr -> [ipv6, ipv6_addr, v6]
+        end,
+    case first_map_value(Keys, BanSet) of
+        {ok, Name} when is_binary(Name) -> {ok, Name};
+        {ok, Name} when is_list(Name) -> {ok, list_to_binary(Name)};
+        error -> {error, {no_ban_set_for_family, TargetType}}
+    end.
+
+-spec first_map_value([atom()], map()) -> {ok, term()} | error.
+first_map_value([], _Map) ->
+    error;
+first_map_value([Key | Rest], Map) ->
+    case maps:find(Key, Map) of
+        {ok, Value} -> {ok, Value};
+        error -> first_map_value(Rest, Map)
+    end.
+
+-spec validate_ban_set(map(), binary(), ipv4_addr | ipv6_addr) ->
+    {ok, binary()} | {error, {ban_set_not_found, binary()} |
+                             {ban_set_type_mismatch, binary(), atom(), atom()}}.
+validate_ban_set(Config, SetName, TargetType) ->
+    case find_set_type(Config, SetName) of
+        {ok, TargetType} ->
+            {ok, SetName};
+        {ok, ActualType} ->
+            {error, {ban_set_type_mismatch, SetName, TargetType, ActualType}};
+        error ->
+            {error, {ban_set_not_found, SetName}}
+    end.
+
+-spec find_set_type(map(), binary()) -> {ok, atom()} | error.
+find_set_type(Config, SetName) ->
+    Sets = maps:get(sets, Config, []),
+    case lists:keyfind(SetName, 1, Sets) of
+        {_, Type} -> {ok, Type};
+        {_, Type, _} -> {ok, Type};
+        false -> error
     end.
 
 -spec set_type_from_config(map(), binary()) -> ipv4_addr | ipv6_addr.
@@ -1272,22 +1361,6 @@ set_name(_) -> undefined.
 set_type({_Name, Type}) -> Type;
 set_type({_Name, Type, _Opts}) -> Type;
 set_type(_) -> undefined.
-
--spec is_allowlist(binary()) -> boolean().
-is_allowlist(Name) ->
-    %% Prefix-match, not substring: a substring match would also flag
-    %% `disallow_outbound' as an allowlist and then exclude it from the
-    %% blocklist search in `blocklist_name/2' — ban operations would
-    %% silently return {error, no_matching_set} for operators whose
-    %% DSL names happened to contain "allow" anywhere in the set name.
-    %% Prefix-match preserves the convention (allowlist, allow_inbound,
-    %% allow_v4 all still match) while rejecting the substring trap.
-    case Name of
-        <<"allow">> -> true;
-        <<"allow_", _/binary>> -> true;
-        <<"allowlist", _/binary>> -> true;
-        _ -> false
-    end.
 
 %% --- Internal: Build initial set elements ---
 %%
@@ -1437,8 +1510,213 @@ set_opts(Table, {SetName, SetType, Extra}, Idx) ->
 config_path() ->
     erlkoenig_nft_config:config_path().
 
--spec default_config() ->
+-spec warn_missing_ban_set(map()) -> ok.
+warn_missing_ban_set(Config) ->
+    case {maps:is_key(ban_set, Config), maps:get(sets, Config, [])} of
+        {false, Sets} when Sets =/= [] ->
+            logger:warning(
+                "[erlkoenig_nft] firewall config declares sets but no "
+                "ban_set; runtime ban/unban operations will fail until "
+                "ban_set is configured."
+            );
+        _ ->
+            ok
+    end.
+
+-spec dev_default_enabled() -> boolean().
+dev_default_enabled() ->
+    case os:getenv("ERLKOENIG_NFT_DEV_DEFAULT") of
+        "1" -> true;
+        _ -> false
+    end.
+
+%% Host-owner table.
+-spec host_table() -> binary().
+host_table() ->
+    ?EK_NFT_TABLE_HOST.
+
+%% Pin the host owner's table on the config map. State and every
+%% runtime call site read `table` from the same place.
+-spec normalize_config(map()) -> map().
+normalize_config(Config) ->
+    HostTable = host_table(),
+    case maps:get(table, Config, undefined) of
+        undefined  -> ok;
+        HostTable  -> ok;
+        Other ->
+            error({unknown_nft_table, Other,
+                   #{allowed => [HostTable],
+                     hint => <<"legacy/raw host firewall table names are refused after phase 6i; rewrite firewall.term to erlkoenig_host/nft_host">>}})
+    end,
+    Config#{table => HostTable}.
+
+%% §6.2 ct_state audit. Returns a list of structured issues so
+%% the caller can surface them however it prefers; the soft
+%% wrapper `log_audit_issues/1' emits notice-level warnings.
+%%
+%% The contract from SPEC-NFT-OWNERSHIP-SPLIT §6.2:
+%%
+%%   - The prerouting/raw ban chain MUST NOT carry a
+%%     `ct state established,related accept` rule. Otherwise a
+%%     ban does not cut already-tracked sessions and the contract
+%%     is defeated.
+%%   - An input/forward chain with `policy => drop` MUST carry the
+%%     fast-path: `ct state established,related accept` *before*
+%%     any terminal drop/reject, plus `ct state invalid drop`.
+%%     "Both states" is required — `established` only or
+%%     `related` only is not enough, because both must take the
+%%     fast-path.
+%%
+%% Issue shapes:
+%%   {established_in_ban_chain, ChainName}
+%%   {input_drop_missing, ChainName, [Missing]}
+%%       where Missing :: established_related_accept |
+%%                        established_related_accept_must_be_early
+%%
+%% Operators on `policy => accept` (e.g. `dev_default_config`)
+%% are not audited.
+%%
+%% The §6.2 contract also requires `ct state invalid drop` early
+%% in the input chain. The current DSL has no operator-writable
+%% form that compiles into that rule, so the validator does not
+%% report it as missing — that would always fire. Open item in
+%% spec §6.2; re-add when the DSL gains support.
+-type audit_issue() ::
+    {established_in_ban_chain, binary()} |
+    {input_drop_missing, binary(), [
+        established_related_accept |
+        established_related_accept_must_be_early
+    ]}.
+
+-spec validate_ct_state_audit(map()) -> [audit_issue()].
+validate_ct_state_audit(Config) ->
+    Chains = maps:get(chains, Config, []),
+    lists:flatmap(fun audit_chain/1, Chains).
+
+audit_chain(#{name := Name, hook := prerouting, priority := Prio,
+              rules := Rules}) when Prio =:= raw; Prio =:= -300 ->
+    case has_established_related_accept(Rules) of
+        true  -> [{established_in_ban_chain, Name}];
+        false -> []
+    end;
+audit_chain(#{name := Name, hook := Hook, policy := drop,
+              rules := Rules}) when Hook =:= input; Hook =:= forward ->
+    %% The §6.2 contract has two halves: established/related
+    %% fast-path AND ct_state invalid drop. Only the first half
+    %% has a production DSL form today; the invalid-drop half is
+    %% tracked as an open item in the spec and not enforced
+    %% here. Re-add the check when the DSL gains an invalid-drop
+    %% form.
+    HasEst     = has_established_related_accept(Rules),
+    EstIsEarly = established_related_accept_is_early(Rules),
+    Missing = lists:flatten([
+        case HasEst of
+            true  -> [];
+            false -> [established_related_accept]
+        end,
+        case {HasEst, EstIsEarly} of
+            {true, false} -> [established_related_accept_must_be_early];
+            _             -> []
+        end
+    ]),
+    case Missing of
+        [] -> [];
+        _  -> [{input_drop_missing, Name, Missing}]
+    end;
+audit_chain(_Chain) ->
+    [].
+
+%% Recognised fast-path forms — exactly the two shapes the
+%% production builder actually compiles into a working
+%% established+related fast-path:
+%%
+%%   1. `ct_established_accept` atom shorthand. `build_rule/4`
+%%      maps it to `nft_rules:ct_established_accept/0` which
+%%      emits `ct state established,related accept`.
+%%   2. `{rule, accept, #{ct := established}}` — generic DSL
+%%      form. `erlkoenig_ct_firewall:compile_generic_rule/2`
+%%      expands `ct => established` to the same
+%%      `nft_rules:ct_established_accept/0` output.
+%%
+%% Other syntactic shapes (`{ct_state, States, accept}` 3-tuple,
+%% `{rule, accept, #{ct_state := ...}}`) are deliberately NOT
+%% recognised: the production builder does not compile them into
+%% a ct-state match. Accepting them in the audit would let the
+%% validator say "clean" while the runtime installs an
+%% unmatched accept. If the DSL grows real `ct_state` support,
+%% extend `ct_opts_match_fast_path/1` then.
+has_established_related_accept(Rules) ->
+    lists:any(fun is_established_related_accept_rule/1, Rules).
+
+is_established_related_accept_rule(ct_established_accept) -> true;
+is_established_related_accept_rule({rule, accept, Opts}) when is_map(Opts) ->
+    ct_opts_match_fast_path(Opts);
+is_established_related_accept_rule(_) -> false.
+
+ct_opts_match_fast_path(#{ct := established}) ->
+    true;
+ct_opts_match_fast_path(_) ->
+    false.
+
+%% "Early" means: before any terminal verdict (drop/reject) and
+%% before any user-defined accept that consumes traffic the
+%% fast-path was supposed to short-circuit. Approximation here:
+%% the established/related accept rule must come before any
+%% terminal-verdict rule that is not itself part of the audit
+%% contract (so `ct_state invalid drop` does not block it).
+established_related_accept_is_early([]) ->
+    false;
+established_related_accept_is_early([Rule | Rest]) ->
+    case is_established_related_accept_rule(Rule) of
+        true  -> true;
+        false ->
+            case is_terminal_non_audit(Rule) of
+                true  -> false;
+                false -> established_related_accept_is_early(Rest)
+            end
+    end.
+
+is_terminal_non_audit(Rule) ->
+    case Rule of
+        _ when is_atom(Rule) ->
+            Rule =:= drop orelse Rule =:= reject;
+        {drop, _}    -> true;
+        {reject, _}  -> true;
+        %% Generic DSL `{rule, Verdict, Opts}` form. drop/reject
+        %% are terminal regardless of Opts; accept is not
+        %% terminal in the audit sense (matches different
+        %% traffic, doesn't block the fast-path placed later).
+        {rule, drop, _}     -> true;
+        {rule, reject, _}   -> true;
+        {rule, _, _}        -> false;
+        _ -> false
+    end.
+
+-spec log_audit_issues([audit_issue()]) -> ok.
+log_audit_issues([]) ->
+    ok;
+log_audit_issues(Issues) ->
+    lists:foreach(fun log_one_audit_issue/1, Issues).
+
+log_one_audit_issue({established_in_ban_chain, Name}) ->
+    logger:warning(
+        "[erlkoenig_nft] §6.2 audit: chain ~s (prerouting/raw) "
+        "carries ct_state established,related accept; banned IPs "
+        "whose session is already tracked will slip through. "
+        "Remove the rule from the ban chain.",
+        [Name]);
+log_one_audit_issue({input_drop_missing, Name, Missing}) ->
+    logger:warning(
+        "[erlkoenig_nft] §6.2 audit: chain ~s (input-or-forward/drop) is "
+        "missing required pieces: ~p. The contract requires "
+        "ct state established,related accept before any terminal "
+        "drop. The invalid-drop half of §6.2 is currently "
+        "unenforced — see SPEC-NFT-OWNERSHIP-SPLIT §6.2.",
+        [Name, Missing]).
+
+-spec dev_default_config() ->
     #{
+        ban_set := #{ipv4 := <<_:72>>, ipv6 := <<_:80>>},
         chains := [
             #{
                 hook := forward | input | output | prerouting,
@@ -1454,9 +1732,10 @@ config_path() ->
         sets := [{<<_:64, _:_*8>>, ipv4_addr | ipv6_addr, map()}, ...],
         table := <<_:72>>
     }.
-default_config() ->
+dev_default_config() ->
     #{
-        table => <<"erlkoenig">>,
+        table => host_table(),
+        ban_set => #{ipv4 => <<"blocklist">>, ipv6 => <<"blocklist6">>},
         sets => [
             {<<"blocklist">>, ipv4_addr, #{flags => [timeout]}},
             {<<"blocklist6">>, ipv6_addr, #{flags => [timeout]}}

@@ -1,6 +1,7 @@
 -module(nfnl_server_tests).
 -include_lib("eunit/include/eunit.hrl").
 -include("erlkoenig_error_test.hrl").
+-include("nft_constants.hrl").
 
 %% --- next_seq ---
 
@@ -11,6 +12,13 @@ next_seq_basic_test() ->
 next_seq_wraparound_test() ->
     ?assertEqual(0, nfnl_server:next_seq(16#FFFFFFFF)),
     ?assertEqual(16#FFFFFFFF, nfnl_server:next_seq(16#FFFFFFFE)).
+
+advance_seq_basic_test() ->
+    ?assertEqual(105, nfnl_server:advance_seq(100, 5)),
+    ?assertEqual(100, nfnl_server:advance_seq(100, 0)).
+
+advance_seq_wraparound_test() ->
+    ?assertEqual(1, nfnl_server:advance_seq(16#FFFFFFFE, 3)).
 
 %% --- process_acks ---
 
@@ -65,6 +73,49 @@ process_acks_preserves_existing_error_test() ->
         [{1, ok}], Expected, {error, previous}),
     ?assertEqual(#{}, Remaining),
     ?assertEqual({error, previous}, Result).
+
+%% --- gen_server socket behavior ---
+
+apply_msgs_drains_late_ack_before_next_send_test() ->
+    {ok, Mock} = nfnl_mock_socket:start_link([no_ack, auto_ack]),
+    {ok, Server} = nfnl_server:start_link([{socket, Mock}, {socket_mod, nfnl_mock_socket}]),
+    MsgFun = fun test_msg/1,
+
+    Result1 = nfnl_server:apply_msgs(Server, [MsgFun]),
+    ?assertErrorCode('EK_NFT_TIMEOUT', Result1),
+
+    ok = nfnl_mock_socket:release_late(Mock),
+    ?assertEqual(ok, nfnl_server:apply_msgs(Server, [MsgFun])),
+    ?assertEqual(1, nfnl_mock_socket:drain_count(Mock)),
+    ok = nfnl_server:stop(Server).
+
+apply_msgs_send_error_leaves_sequence_gap_test() ->
+    TestPid = self(),
+    {ok, Mock} = nfnl_mock_socket:start_link([{error, eagain}, auto_ack]),
+    {ok, Server} = nfnl_server:start_link([{socket, Mock}, {socket_mod, nfnl_mock_socket}]),
+    MsgFun =
+        fun(Seq) ->
+            TestPid ! {seq, Seq},
+            test_msg(Seq)
+        end,
+
+    Result1 = nfnl_server:apply_msgs(Server, [MsgFun]),
+    ?assertErrorCode('EK_NFT_NETLINK_SEND_FAILED', Result1),
+    ?assertEqual(ok, nfnl_server:apply_msgs(Server, [MsgFun])),
+    Seq1 = receive {seq, S1} -> S1 end,
+    Seq2 = receive {seq, S2} -> S2 end,
+    ?assertEqual(nfnl_server:advance_seq(Seq1, 3), Seq2),
+    ok = nfnl_server:stop(Server).
+
+apply_msgs_malformed_recv_is_wrapped_test() ->
+    {ok, Mock} = nfnl_mock_socket:start_link([{raw_recv, <<1, 2, 3>>}]),
+    {ok, Server} = nfnl_server:start_link([{socket, Mock}, {socket_mod, nfnl_mock_socket}]),
+
+    Result = nfnl_server:apply_msgs(Server, [fun test_msg/1]),
+    ?assertErrorCode('EK_NFT_NETLINK_RECV_FAILED', Result),
+    {error, #{data := Data}} = Result,
+    ?assertMatch(#{reason := malformed_netlink_response}, Data),
+    ok = nfnl_server:stop(Server).
 
 %% --- query wrappers ---
 
@@ -128,3 +179,12 @@ unified_seq_nft_query_exports_test() ->
     ?assert(erlang:function_exported(nft_query, list_tables, 2)),
     ?assert(erlang:function_exported(nft_query, list_chains, 3)),
     ?assert(erlang:function_exported(nft_query, list_set_elems, 4)).
+
+test_msg(Seq) ->
+    nfnl_msg:build_hdr(
+        ?NFT_MSG_NEWTABLE,
+        ?NFPROTO_INET,
+        ?NLM_F_REQUEST bor ?NLM_F_ACK,
+        Seq,
+        <<>>
+    ).

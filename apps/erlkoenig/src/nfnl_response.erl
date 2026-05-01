@@ -47,13 +47,13 @@ Common error codes:
 -type result() :: ok | {error, {integer(), atom()}}.
 %% Single message result: ok for ACK, {error, {Code, Name}} for failure.
 
--type response() :: [result()].
+-type response() :: {ok, [result()]} | {error, malformed_netlink_response}.
 %% List of results, one per message in the batch.
 
 -type seq_result() :: {non_neg_integer(), result()}.
 %% Result tagged with the sequence number from the ACK header.
 
--type seq_response() :: [seq_result()].
+-type seq_response() :: {ok, [seq_result()]} | {error, malformed_netlink_response}.
 %% List of seq-tagged results.
 
 %% --- Constants ---
@@ -66,8 +66,10 @@ Common error codes:
 -doc """
 Parse a binary containing one or more netlink response messages.
 
-Returns a list of results in sequence order. Batch begin/end ACKs
-are included. NLMSG_DONE messages are silently skipped.
+Returns `{ok, Results}` in sequence order, or `{error,
+malformed_netlink_response}` if the buffer contains a truncated or
+otherwise unparseable tail. Batch begin/end ACKs are included.
+NLMSG_DONE messages are skipped.
 """.
 -spec parse(binary()) -> response().
 parse(Bin) when is_binary(Bin) ->
@@ -76,9 +78,9 @@ parse(Bin) when is_binary(Bin) ->
 -doc """
 Parse responses with sequence numbers preserved.
 
-Returns `[{Seq, ok | {error, Reason}}, ...]`. Used by `nfnl_server`
-for seq-based ACK correlation. NLMSG_DONE messages are not included
-in the result list.
+Returns `{ok, [{Seq, ok | {error, Reason}}, ...]}`. Used by
+`nfnl_server` for seq-based ACK correlation. NLMSG_DONE messages are
+not included in the result list.
 """.
 -spec parse_with_seq(binary()) -> seq_response().
 parse_with_seq(Bin) when is_binary(Bin) ->
@@ -86,9 +88,9 @@ parse_with_seq(Bin) when is_binary(Bin) ->
 
 %% --- Internal ---
 
--spec parse_messages(binary(), response()) -> response().
+-spec parse_messages(binary(), [result()]) -> response().
 parse_messages(<<>>, Acc) ->
-    lists:reverse(Acc);
+    {ok, lists:reverse(Acc)};
 %% IMPORTANT: every `Len >= X` guard MUST be paired with
 %% `Len =< byte_size(Bin)`.  Without the upper bound a lying Len
 %% field (Len > actual bytes) drops through the match and then
@@ -117,12 +119,14 @@ parse_messages(<<Len:32/little, _Type:16/little, _/binary>> = Bin, Acc) when
 ->
     <<_:Len/binary, Tail/binary>> = Bin,
     parse_messages(Tail, Acc);
-parse_messages(_Other, Acc) ->
-    lists:reverse(Acc).
+parse_messages(Other, _Acc) ->
+    logger:warning("nfnl_response: malformed netlink response tail (~B bytes)",
+                   [byte_size(Other)]),
+    {error, malformed_netlink_response}.
 
--spec parse_messages_seq(binary(), seq_response()) -> seq_response().
+-spec parse_messages_seq(binary(), [seq_result()]) -> seq_response().
 parse_messages_seq(<<>>, Acc) ->
-    lists:reverse(Acc);
+    {ok, lists:reverse(Acc)};
 %% See parse_messages/2 header comment — same Len-field DoS.
 parse_messages_seq(
     <<Len:32/little, ?NLMSG_ERROR:16/little, _Flags:16/little, Seq:32/little, _Pid:32/little,
@@ -146,8 +150,10 @@ parse_messages_seq(<<Len:32/little, _Type:16/little, _/binary>> = Bin, Acc) when
 ->
     <<_:Len/binary, Tail/binary>> = Bin,
     parse_messages_seq(Tail, Acc);
-parse_messages_seq(_Other, Acc) ->
-    lists:reverse(Acc).
+parse_messages_seq(Other, _Acc) ->
+    logger:warning("nfnl_response: malformed netlink response tail (~B bytes)",
+                   [byte_size(Other)]),
+    {error, malformed_netlink_response}.
 
 -spec errno_name(integer()) ->
     eacces | eexist | einval | enoent | enomem | enospc | eopnotsupp | eperm | unknown.

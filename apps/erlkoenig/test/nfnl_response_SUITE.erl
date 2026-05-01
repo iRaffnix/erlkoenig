@@ -12,35 +12,47 @@ all() ->
         parse_mixed,
         parse_empty,
         parse_einval,
-        parse_eperm
+        parse_eperm,
+        parse_truncated_tail_fails_loud,
+        parse_with_seq_truncated_tail_fails_loud
     ].
 
 parse_single_ack(_) ->
     Msg = nlmsg_error(0, 42),
-    ?assertEqual([ok], nfnl_response:parse(Msg)).
+    ?assertEqual({ok, [ok]}, nfnl_response:parse(Msg)).
 
 parse_single_error(_) ->
     Msg = nlmsg_error(-17, 42),
-    ?assertEqual([{error, {-17, eexist}}], nfnl_response:parse(Msg)).
+    ?assertEqual({ok, [{error, {-17, eexist}}]}, nfnl_response:parse(Msg)).
 
 parse_multiple_acks(_) ->
     Bin = iolist_to_binary([nlmsg_error(0, 1), nlmsg_error(0, 2), nlmsg_error(0, 3)]),
-    ?assertEqual([ok, ok, ok], nfnl_response:parse(Bin)).
+    ?assertEqual({ok, [ok, ok, ok]}, nfnl_response:parse(Bin)).
 
 parse_mixed(_) ->
     Bin = iolist_to_binary([nlmsg_error(0, 1), nlmsg_error(-22, 2), nlmsg_error(0, 3)]),
-    ?assertEqual([ok, {error, {-22, einval}}, ok], nfnl_response:parse(Bin)).
+    ?assertEqual({ok, [ok, {error, {-22, einval}}, ok]}, nfnl_response:parse(Bin)).
 
 parse_empty(_) ->
-    ?assertEqual([], nfnl_response:parse(<<>>)).
+    ?assertEqual({ok, []}, nfnl_response:parse(<<>>)).
 
 parse_einval(_) ->
     Msg = nlmsg_error(-22, 99),
-    ?assertEqual([{error, {-22, einval}}], nfnl_response:parse(Msg)).
+    ?assertEqual({ok, [{error, {-22, einval}}]}, nfnl_response:parse(Msg)).
 
 parse_eperm(_) ->
     Msg = nlmsg_error(-1, 99),
-    ?assertEqual([{error, {-1, eperm}}], nfnl_response:parse(Msg)).
+    ?assertEqual({ok, [{error, {-1, eperm}}]}, nfnl_response:parse(Msg)).
+
+parse_truncated_tail_fails_loud(_) ->
+    Msg = nlmsg_error(0, 42),
+    ?assertEqual({error, malformed_netlink_response},
+                 nfnl_response:parse(<<Msg/binary, 1, 2, 3>>)).
+
+parse_with_seq_truncated_tail_fails_loud(_) ->
+    Msg = nlmsg_error(0, 42),
+    ?assertEqual({error, malformed_netlink_response},
+                 nfnl_response:parse_with_seq(<<Msg/binary, 1, 2, 3>>)).
 
 %% --- Helpers ---
 

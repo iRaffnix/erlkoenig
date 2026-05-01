@@ -13,7 +13,7 @@ a binary blob that can be sent to the C runtime via CMD_NFT_SETUP.
 The C runtime applies it inside the container's network namespace.
 
 The batch is a complete nftables transaction:
-  BATCH_BEGIN + DELTABLE(if exists) + NEWTABLE + NEWCHAIN*N + NEWRULE*M + BATCH_END
+  BATCH_BEGIN + NEWTABLE + DELTABLE + NEWTABLE + NEWCHAIN*N + NEWRULE*M + BATCH_END
 
 Reuses the existing nft_encode/nft_table/nft_chain/nft_batch modules.
 """.
@@ -44,13 +44,15 @@ Config shape:
 """.
 -spec build_batch(map()) -> binary().
 build_batch(NftConfig) ->
-    build_batch(NftConfig, <<"ct_container">>).
+    build_batch(NftConfig, maps:get(table, NftConfig, <<"ct_container">>)).
 
 -spec build_batch(map(), binary()) -> binary().
 build_batch(#{chains := Chains} = _Config, TableName) ->
-    %% Create table (NLM_F_CREATE — succeeds if already exists).
-    %% First call: creates. Subsequent calls: no-op, chains/rules are appended.
-    %% For atomic replacement: flush chains first, then re-add.
+    %% Atomic replace in the container netns. The leading add makes the
+    %% delete deterministic even on first apply; the second add installs
+    %% the fresh table before chains and rules are appended.
+    EnsureFun = fun(S) -> nft_table:add(?FAMILY_INT, TableName, S) end,
+    DeleteFun = fun(S) -> nft_delete:table(?FAMILY_INT, TableName, S) end,
     CreateFun = fun(S) -> nft_table:add(?FAMILY_INT, TableName, S) end,
 
     ChainFuns = lists:flatmap(fun(Chain) ->
@@ -78,7 +80,7 @@ build_batch(#{chains := Chains} = _Config, TableName) ->
         [ChainFun | RuleFuns]
     end, Chains),
 
-    AllFuns = [CreateFun | ChainFuns],
+    AllFuns = [EnsureFun, DeleteFun, CreateFun | ChainFuns],
 
     %% Build the batch binary (same as nfnl_server:apply_msgs but without socket)
     {Msgs, _Seqs, _LastSeq} = build_msgs(AllFuns, 1, [], []),
@@ -89,7 +91,9 @@ build_batch(#{chains := Chains} = _Config, TableName) ->
 %%%===================================================================
 
 %% Translate DSL option keys to internal keys used by compile_generic_rule.
-%% Same mapping as erlkoenig_config_nft:expand_nft_rule but without veth_of/replica_ips.
+%% Same mapping as erlkoenig_config_nft:expand_nft_rule but without
+%% replica_ips (cross-container ref unresolvable in own netns) and with
+%% an explicit `veth_of` refusal guard for operator-supplied raw terms.
 %%
 %% Note: container-local nft runs in the container's netns and knows
 %% ONLY its own IP.  Cross-container references
@@ -148,11 +152,17 @@ translate_opts(Opts) ->
         %% cryptic badarg instead of the documented
         %% unresolvable_*_in_container_nft hint. Operator readability
         %% matters: Glasbox means the error names the limitation.
+        %% Note: post-6i, `veth_of' is also refused on the host path
+        %% (`erlkoenig_config_nft:expand_nft_rule/4'); this guard
+        %% covers operator-supplied raw container-nft terms that
+        %% bypass the host expander.
         (Key, {veth_of, Pod, Ct}, _Acc)
             when Key =:= iifname; Key =:= oifname; Key =:= oifname_ne ->
             error({unresolvable_veth_of_in_container_nft,
                    #{key => Key, pod => Pod, container => Ct,
-                     hint => <<"veth_of refs must live in host nft_table">>}});
+                     hint => <<"veth_of was removed post-6i; IPVLAN slaves "
+                               "are not visible on the host. Use ip_saddr "
+                               "or replica_ips instead.">>}});
         (Key, {replica_ips, Pod, Ct}, _Acc)
             when Key =:= ip_saddr; Key =:= ip_daddr ->
             error({unresolvable_replica_ips_in_container_nft,

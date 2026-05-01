@@ -54,6 +54,7 @@ Usage:
 
 -export([
     eval_chain/2, eval_chain/3,
+    eval_ruleset/3, eval_ruleset/4,
     eval_rule/3,
     eval_expr/3,
     print_trace/1,
@@ -157,6 +158,29 @@ Evaluate a chain with explicit default policy.
 -spec eval_chain([rule()], packet(), verdict()) -> {verdict(), [trace_entry()]}.
 eval_chain(Rules, Pkt, DefaultPolicy) ->
     eval_rules(Rules, Pkt, DefaultPolicy, []).
+
+-doc """
+Evaluate a map of named chains, following jump/goto/return.
+
+`ChainMap` maps chain names to rule lists. The start chain is treated
+as a base chain: if no terminal verdict is reached, `DefaultPolicy`
+is returned. Jumped chains return to the caller when they end or hit
+`return`; goto chains do not return to the current rule stream.
+""".
+-spec eval_ruleset(#{binary() => [rule()]}, binary(), packet()) ->
+    {verdict(), [trace_entry()]} | {error, term()}.
+eval_ruleset(ChainMap, StartChain, Pkt) ->
+    eval_ruleset(ChainMap, StartChain, Pkt, drop).
+
+-doc "Evaluate a named-chain ruleset with explicit base-chain policy.".
+-spec eval_ruleset(#{binary() => [rule()]}, binary(), packet(), verdict()) ->
+    {verdict(), [trace_entry()]} | {error, term()}.
+eval_ruleset(ChainMap, StartChain, Pkt, DefaultPolicy) ->
+    case eval_chain_ref(ChainMap, StartChain, Pkt, base, [], 0) of
+        {final, Verdict, Trace} -> {Verdict, Trace};
+        {returned, Trace} -> {DefaultPolicy, Trace};
+        {error, _} = Err -> Err
+    end.
 
 -doc """
 Evaluate a single rule against a packet with given register state.
@@ -597,6 +621,81 @@ eval_rules([Rule | Rest], Pkt, DefaultPolicy, AllTrace) ->
         {queue, _, _} -> {Verdict, lists:reverse(NewTrace)};
         {synproxy, _} -> {Verdict, lists:reverse(NewTrace)};
         return -> {return, lists:reverse(NewTrace)}
+    end.
+
+-define(MAX_CHAIN_DEPTH, 64).
+
+-spec eval_chain_ref(
+    #{binary() => [rule()]},
+    binary(),
+    packet(),
+    base | regular,
+    [binary()],
+    non_neg_integer()
+) ->
+    {final, verdict(), [trace_entry()]} | {returned, [trace_entry()]} | {error, term()}.
+eval_chain_ref(_ChainMap, Chain, _Pkt, _Kind, Stack, Depth)
+  when Depth > ?MAX_CHAIN_DEPTH ->
+    {error, {chain_depth_exceeded, Chain, lists:reverse(Stack)}};
+eval_chain_ref(ChainMap, Chain, Pkt, Kind, Stack, Depth) ->
+    case maps:find(Chain, ChainMap) of
+        {ok, Rules} ->
+            eval_rules_graph(Rules, ChainMap, Pkt, Kind, Stack, Depth, []);
+        error ->
+            {error, {unknown_chain, Chain, maps:keys(ChainMap)}}
+    end.
+
+-spec eval_rules_graph(
+    [rule()],
+    #{binary() => [rule()]},
+    packet(),
+    base | regular,
+    [binary()],
+    non_neg_integer(),
+    [trace_entry()]
+) ->
+    {final, verdict(), [trace_entry()]} | {returned, [trace_entry()]} | {error, term()}.
+eval_rules_graph([], _ChainMap, _Pkt, base, _Stack, _Depth, TraceAcc) ->
+    {returned, lists:reverse(TraceAcc)};
+eval_rules_graph([], _ChainMap, _Pkt, regular, _Stack, _Depth, TraceAcc) ->
+    {returned, lists:reverse(TraceAcc)};
+eval_rules_graph([Rule | Rest], ChainMap, Pkt, Kind, Stack, Depth, TraceAcc) ->
+    {Verdict, _Regs, RuleTrace} = eval_rule(Rule, Pkt, new_regs()),
+    NewTraceAcc = lists:reverse(RuleTrace) ++ TraceAcc,
+    case Verdict of
+        break ->
+            eval_rules_graph(Rest, ChainMap, Pkt, Kind, Stack, Depth, NewTraceAcc);
+        continue ->
+            eval_rules_graph(Rest, ChainMap, Pkt, Kind, Stack, Depth, NewTraceAcc);
+        accept ->
+            {final, accept, lists:reverse(NewTraceAcc)};
+        drop ->
+            {final, drop, lists:reverse(NewTraceAcc)};
+        {queue, _, _} ->
+            {final, Verdict, lists:reverse(NewTraceAcc)};
+        {synproxy, _} ->
+            {final, Verdict, lists:reverse(NewTraceAcc)};
+        return ->
+            {returned, lists:reverse(NewTraceAcc)};
+        {jump, Target} ->
+            case eval_chain_ref(ChainMap, Target, Pkt, regular, [Target | Stack], Depth + 1) of
+                {returned, JumpTrace} ->
+                    eval_rules_graph(Rest, ChainMap, Pkt, Kind, Stack, Depth,
+                                     lists:reverse(JumpTrace) ++ NewTraceAcc);
+                {final, FinalVerdict, JumpTrace} ->
+                    {final, FinalVerdict, lists:reverse(NewTraceAcc) ++ JumpTrace};
+                {error, _} = Err ->
+                    Err
+            end;
+        {goto, Target} ->
+            case eval_chain_ref(ChainMap, Target, Pkt, regular, [Target | Stack], Depth + 1) of
+                {returned, GotoTrace} ->
+                    {returned, lists:reverse(NewTraceAcc) ++ GotoTrace};
+                {final, FinalVerdict, GotoTrace} ->
+                    {final, FinalVerdict, lists:reverse(NewTraceAcc) ++ GotoTrace};
+                {error, _} = Err ->
+                    Err
+            end
     end.
 
 eval_exprs([], _Pkt, Regs, Trace) ->

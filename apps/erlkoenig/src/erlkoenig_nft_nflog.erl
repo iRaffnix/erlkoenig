@@ -33,7 +33,7 @@ Events are broadcast via pg group `nflog_events`:
 
 -behaviour(gen_server).
 
--export([start_link/1, stop/1]).
+-export([start_link/1, ensure_started/1, stop/1, name_for/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 %% Exposed for fuzzing / property tests.  Pure functions — no side
 %% effects.  Do not call from production code; use the gen_server
@@ -51,6 +51,43 @@ Events are broadcast via pg group `nflog_events`:
 -spec start_link(non_neg_integer()) -> {ok, pid()} | {error, term()}.
 start_link(Group) ->
     gen_server:start_link(?MODULE, Group, []).
+
+-doc """
+Ensure exactly one nflog receiver is running for the given group.
+
+Returns the existing pid if a receiver is already registered for
+this group; otherwise starts a new one under the deterministic
+local name returned by `name_for/1'. Idempotent under concurrent
+callers — the registration is atomic and a lost race resolves to
+`{ok, ExistingPid}'.
+
+The returned pid is linked to the caller (same as `start_link/1');
+callers that should not own the lifecycle of the receiver must
+unlink afterwards.
+""".
+-spec ensure_started(non_neg_integer()) -> {ok, pid()} | {error, term()}.
+ensure_started(Group) when is_integer(Group), Group >= 0 ->
+    Name = name_for(Group),
+    case whereis(Name) of
+        Pid when is_pid(Pid) ->
+            link(Pid),
+            {ok, Pid};
+        undefined ->
+            case gen_server:start_link({local, Name}, ?MODULE, Group, []) of
+                {ok, Pid} ->
+                    {ok, Pid};
+                {error, {already_started, Pid}} ->
+                    link(Pid),
+                    {ok, Pid};
+                {error, _} = Err ->
+                    Err
+            end
+    end.
+
+-doc "Deterministic local registration name for a given nflog group.".
+-spec name_for(non_neg_integer()) -> atom().
+name_for(Group) when is_integer(Group), Group >= 0 ->
+    list_to_atom("erlkoenig_nft_nflog_" ++ integer_to_list(Group)).
 
 -spec stop(pid()) -> ok.
 stop(Pid) ->

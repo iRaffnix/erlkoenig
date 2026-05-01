@@ -152,6 +152,17 @@ eval_vmap_dispatch_test() ->
     {Verdict, _} = nft_vm:eval_chain(Rules, PktV, drop),
     ?assertEqual({jump, <<"ssh_chain">>}, Verdict).
 
+eval_vmap_dispatch_ruleset_follows_jump_test() ->
+    {ok, [Config]} = file:consult("examples/scenarios/anti_spoofing.term"),
+    ChainMap = nft_vm_config:load_term(Config),
+    VmapMap = nft_vm_config:vmap_map(Config),
+    Pkt = nft_vm_pkt:tcp(#{saddr => {10,0,0,1}, ct_state => new, iifname => <<"eth0">>},
+                         #{dport => 80}),
+    PktV = nft_vm_pkt:with_vmaps(Pkt, VmapMap),
+    {Verdict, Trace} = nft_vm:eval_ruleset(ChainMap, <<"inbound">>, PktV, drop),
+    ?assertEqual(accept, Verdict),
+    ?assert(length(Trace) > 3).
+
 %% --- Vmap extraction ---
 
 vmap_map_test() ->

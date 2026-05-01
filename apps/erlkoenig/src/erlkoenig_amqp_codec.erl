@@ -364,6 +364,12 @@ encode_payload({ct_guard_ban_failed, #{ip := Ip, reason := Reason}}) ->
         <<"reason">> => atom_to_binary(Reason)
     }};
 
+encode_payload({ct_guard_unban_failed, #{ip := Ip} = Details}) ->
+    {ok, <<"guard.threat.unban_failed">>, #{
+        <<"ip">> => format_ip(Ip),
+        <<"code">> => ensure_binary(maps:get(code, Details, undefined))
+    }};
+
 encode_payload({guard_stats, #{actors := Actors, bans := Bans,
                                 events_seen := Events} = Stats}) ->
     {ok, <<"guard.stats.summary">>, #{

@@ -37,12 +37,14 @@ Anti-entropy: on nodeup, all active bans are re-broadcast.
 -behaviour(gen_server).
 
 -include("erlkoenig_error.hrl").
+-include("nft_tables.hrl").
 
 -export([start_link/1, local_ban/3, local_unban/1, active_bans/0, reconfigure/1]).
 -export([init/1, handle_cast/2, handle_info/2, handle_call/3, terminate/2]).
 
 -ifdef(TEST).
--export([kernel_ban_error/3, kernel_unban_error/2, normalize_whitelist/1]).
+-export([extra_ban_set_targets/1, kernel_ban_error/3, kernel_unban_error/2,
+         normalize_whitelist/1]).
 -endif.
 
 -define(PG_SCOPE, erlkoenig_nft).
@@ -282,11 +284,22 @@ remove_source(IP, Source, #state{active_bans = Bans} = State) ->
 
 %% Apply ban to the kernel.
 -spec do_kernel_ban(binary(), integer(), atom()) -> ok.
-do_kernel_ban(IP, _EffectiveExpiry, Reason) ->
+do_kernel_ban(IP, EffectiveExpiry, Reason) ->
     try erlkoenig_nft:ban(IP) of
         ok ->
-            logger:notice("[threat_mesh] banned ~s reason=~p",
-                          [erlkoenig_nft_ip:format(IP), Reason]);
+            TimeoutMs = max(100, EffectiveExpiry - os:system_time(millisecond)),
+            case apply_extra_ban_targets(IP, TimeoutMs) of
+                ok ->
+                    logger:notice("[threat_mesh] banned ~s reason=~p",
+                                  [erlkoenig_nft_ip:format(IP), Reason]);
+                {error, Err} ->
+                    Error = kernel_ban_error(IP, Reason, Err),
+                    logger:warning("[threat_mesh] ban fan-out failed ~s code=~p: ~p",
+                                   [erlkoenig_nft_ip:format(IP), error_code(Error), Err]),
+                    broadcast_guard({ct_guard_ban_failed,
+                                     #{ip => IP, reason => Reason,
+                                       code => error_code(Error), error => Error}})
+            end;
         {error, Err} ->
             Error = kernel_ban_error(IP, Reason, Err),
             logger:warning("[threat_mesh] ban failed ~s code=~p: ~p",
@@ -319,21 +332,61 @@ do_kernel_ban(IP, _EffectiveExpiry, Reason) ->
 do_kernel_unban(IP) ->
     try erlkoenig_nft:unban(IP) of
         ok ->
-            logger:notice("[threat_mesh] unbanned ~s",
-                          [erlkoenig_nft_ip:format(IP)]),
-            broadcast_guard({ct_guard_unban, #{ip => IP}});
+            case apply_extra_unban_targets(IP) of
+                ok ->
+                    logger:notice("[threat_mesh] unbanned ~s",
+                                  [erlkoenig_nft_ip:format(IP)]),
+                    broadcast_guard({ct_guard_unban, #{ip => IP}});
+                {error, Err} ->
+                    Error = kernel_unban_error(IP, Err),
+                    logger:warning("[threat_mesh] unban fan-out failed ~s code=~p: ~p",
+                                   [erlkoenig_nft_ip:format(IP), error_code(Error), Err]),
+                    broadcast_guard({ct_guard_unban_failed,
+                                     #{ip => IP, code => error_code(Error),
+                                       error => Error}})
+            end;
         {error, Err} ->
             Error = kernel_unban_error(IP, Err),
             logger:warning("[threat_mesh] unban failed ~s code=~p: ~p",
-                           [erlkoenig_nft_ip:format(IP), error_code(Error), Err])
+                           [erlkoenig_nft_ip:format(IP), error_code(Error), Err]),
+            broadcast_guard({ct_guard_unban_failed,
+                             #{ip => IP, code => error_code(Error),
+                               error => Error}})
     catch
         C:R ->
             Error = threat_error(kernel_unban_crashed,
                                  #{ip => IP, class => C, error => R}),
             logger:warning("[threat_mesh] unban crashed ~s code=~p: ~p:~p",
-                           [erlkoenig_nft_ip:format(IP), error_code(Error), C, R])
+                           [erlkoenig_nft_ip:format(IP), error_code(Error), C, R]),
+            broadcast_guard({ct_guard_unban_failed,
+                             #{ip => IP, code => error_code(Error),
+                               error => Error}})
     end,
     ok.
+
+apply_extra_ban_targets(IP, TimeoutMs) ->
+    apply_extra_target_msgs(
+        [begin
+             Msg = nft_rules:ban_ip(Table, SetName, IP, TimeoutMs),
+             fun(S) -> Msg(S) end
+         end || {Table, SetName} <- extra_ban_set_targets(IP)]).
+
+apply_extra_unban_targets(IP) ->
+    apply_extra_target_msgs(
+        [begin
+             Msg = nft_rules:unban_ip(Table, SetName, IP),
+             fun(S) -> Msg(S) end
+         end || {Table, SetName} <- extra_ban_set_targets(IP)]).
+
+apply_extra_target_msgs([]) ->
+    ok;
+apply_extra_target_msgs(Msgs) ->
+    nfnl_server:apply_msgs(erlkoenig_nft_srv, Msgs).
+
+extra_ban_set_targets(IP) ->
+    lists:usort([{Table, SetName}
+                 || {Table, SetName} <- erlkoenig_config_nft:ban_set_targets(IP),
+                    Table =/= ?EK_NFT_TABLE_HOST]).
 
 %% Schedule a timer for kernel unban at the effective expiry.
 -spec schedule_unban_timer(binary(), #{node() => integer()}, #state{}) -> #state{}.

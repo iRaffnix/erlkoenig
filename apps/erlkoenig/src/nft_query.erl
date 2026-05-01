@@ -42,6 +42,11 @@ get responses contain data, not just ACK/error codes.
 
 -include("nft_constants.hrl").
 
+%% Large ruleset/set dumps may legitimately need more than the normal
+%% 5 second ACK timeout, but a timeout before NLMSG_DONE is still an
+%% incomplete dump and must not be reported as success.
+-define(DUMP_RECV_TIMEOUT, 30000).
+
 %% --- Public API ---
 
 -doc """
@@ -173,7 +178,7 @@ get_ruleset(Sock, Family) ->
 %% --- Internal: send/recv ---
 
 -spec send_and_collect(socket:socket(), binary()) ->
-    {ok, [[nfnl_attr:nla()]]} | {error, atom()}.
+    {ok, [[nfnl_attr:nla()]]} | {error, term()}.
 send_and_collect(Sock, Msg) ->
     case nfnl_socket:send(Sock, Msg) of
         ok -> collect_dump(Sock, []);
@@ -181,26 +186,27 @@ send_and_collect(Sock, Msg) ->
     end.
 
 -spec collect_dump(socket:socket(), [[nfnl_attr:nla()]]) ->
-    {ok, [[nfnl_attr:nla()]]} | {error, atom()}.
+    {ok, [[nfnl_attr:nla()]]} | {error, term()}.
 collect_dump(Sock, Acc) ->
-    case nfnl_socket:recv(Sock) of
+    case nfnl_socket:recv(Sock, ?DUMP_RECV_TIMEOUT) of
         {ok, Data} ->
             case parse_dump(Data, Acc) of
                 {more, NewAcc} -> collect_dump(Sock, NewAcc);
-                {done, NewAcc} -> {ok, lists:reverse(NewAcc)}
+                {done, NewAcc} -> {ok, lists:reverse(NewAcc)};
+                {error, _} = Err -> Err
             end;
         {error, timeout} ->
-            {ok, lists:reverse(Acc)};
+            {error, {timeout, missing_nlmsg_done, length(Acc)}};
         {error, _} = Err ->
             Err
     end.
 
 -spec parse_dump(binary(), [[nfnl_attr:nla()]]) ->
-    {more | done, [[nfnl_attr:nla()]]}.
+    {more | done, [[nfnl_attr:nla()]]} | {error, malformed_netlink_dump}.
 parse_dump(<<>>, Acc) ->
     {more, Acc};
-parse_dump(<<Len:32/little, ?NLMSG_DONE:16/little, _/binary>>, Acc) when
-    Len >= 16
+parse_dump(<<Len:32/little, ?NLMSG_DONE:16/little, _/binary>> = Bin, Acc) when
+    Len >= 16, Len =< byte_size(Bin)
 ->
     {done, Acc};
 parse_dump(
@@ -218,19 +224,17 @@ parse_dump(
     case Subsys of
         ?NFNL_SUBSYS_NFTABLES when byte_size(Payload) >= 4 ->
             <<_NfGenMsg:4/binary, AttrBin/binary>> = Payload,
-            %% nfnl_attr:decode raises on malformed NLA — treat as
-            %% skip rather than propagate out of a dump parser.
-            %% Log the error: silently skipping lets a compromised or
-            %% buggy kernel hide rules from the operator's view without
-            %% any signal that the dump was partial.
+            %% nfnl_attr:decode raises on malformed NLA. Fail the
+            %% whole dump instead of hiding a rule/object from the
+            %% operator's view.
             try nfnl_attr:decode(AttrBin) of
                 Attrs -> parse_dump(Tail, [Attrs | Acc])
             catch Class:Reason:Stack ->
                 logger:warning(
-                    "nft_query: skipping malformed nftables dump entry "
+                    "nft_query: malformed nftables dump entry "
                     "(~p:~p, attrs=~B bytes); stack=~p",
                     [Class, Reason, byte_size(AttrBin), Stack]),
-                parse_dump(Tail, Acc)
+                {error, malformed_netlink_dump}
             end;
         _ ->
             parse_dump(Tail, Acc)
@@ -239,8 +243,10 @@ parse_dump(<<Len:32/little, _/binary>> = Bin, Acc)
   when Len >= 16, Len =< byte_size(Bin) ->
     <<_:Len/binary, Tail/binary>> = Bin,
     parse_dump(Tail, Acc);
-parse_dump(_, Acc) ->
-    {more, Acc}.
+parse_dump(Other, _Acc) ->
+    logger:warning("nft_query: malformed netlink dump tail (~B bytes)",
+                   [byte_size(Other)]),
+    {error, malformed_netlink_dump}.
 
 %% --- Internal: attribute parsing ---
 

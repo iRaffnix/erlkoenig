@@ -38,20 +38,25 @@ groups() ->
 
 init_per_suite(Config) ->
     application:ensure_all_started(crypto),
-    application:ensure_all_started(erlkoenig),
-    Config.
+    ensure_pg_scope(Config).
 
-end_per_suite(_Config) ->
+end_per_suite(Config) ->
     application:stop(erlkoenig),
+    stop_manual_pg(Config),
     ok.
 
 init_per_group(root, Config) ->
     case os:cmd("id -u") of
-        "0\n" -> Config;
+        "0\n" ->
+            stop_manual_pg(Config),
+            case application:ensure_all_started(erlkoenig) of
+                {ok, _} -> Config;
+                {error, Reason} -> {skip, {erlkoenig_start_failed, Reason}}
+            end;
         _     -> {skip, "needs root"}
     end;
 init_per_group(_Group, Config) ->
-    Config.
+    ensure_pg_scope(Config).
 
 end_per_group(_Group, _Config) ->
     ok.
@@ -66,10 +71,42 @@ end_per_testcase(_TC, _Config) ->
 %% Helpers
 %%====================================================================
 
+ensure_pg_scope(Config) ->
+    case whereis(erlkoenig_pg) of
+        undefined ->
+            case pg:start_link(erlkoenig_pg) of
+                {ok, Pid} ->
+                    unlink(Pid),
+                    [{manual_pg, Pid} | Config];
+                {error, {already_started, Pid}} ->
+                    [{manual_pg, Pid} | Config]
+            end;
+        _Pid ->
+            Config
+    end.
+
+stop_manual_pg(Config) ->
+    case proplists:get_value(manual_pg, Config) of
+        Pid when is_pid(Pid) ->
+            unlink(Pid),
+            exit(Pid, shutdown),
+            ok;
+        _ ->
+            ok
+    end.
+
 hello_static() ->
     %% Walk up from CWD to find examples/hello_static
     {ok, Cwd} = file:get_cwd(),
-    find_up(Cwd, "examples/hello_static").
+    case find_up(Cwd, "examples/hello_static", optional) of
+        {ok, Path} ->
+            Path;
+        not_found ->
+            %% Release smoke hosts install the C-runtime demo binaries,
+            %% but the historical source-tree fixture is not tracked.
+            %% Use the installed static hello-output demo when present.
+            list_to_binary("/opt/erlkoenig/rt/demo/test-erlkoenig-hello_output")
+    end.
 
 find_up(Dir, RelPath) ->
     Path = filename:join(Dir, RelPath),
@@ -81,6 +118,19 @@ find_up(Dir, RelPath) ->
             case Parent =:= Dir of
                 true -> error({not_found, RelPath});
                 false -> find_up(Parent, RelPath)
+            end
+    end.
+
+find_up(Dir, RelPath, optional) ->
+    Path = filename:join(Dir, RelPath),
+    case filelib:is_regular(Path) of
+        true ->
+            {ok, list_to_binary(Path)};
+        false ->
+            Parent = filename:dirname(Dir),
+            case Parent =:= Dir of
+                true -> not_found;
+                false -> find_up(Parent, RelPath, optional)
             end
     end.
 
@@ -119,6 +169,7 @@ proto_spawn_roundtrip(_Config) ->
         erlkoenig_proto:decode(Payload).
 
 uuid_format(_Config) ->
+    _ = ensure_pg_scope([]),
     %% Test make_id() directly by spawning and catching the crash
     %% We unlink so the crash doesn't kill the test process
     {ok, Pid} = erlkoenig_ct:start_link(<<"/nonexistent">>, #{}),

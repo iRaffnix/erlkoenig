@@ -28,8 +28,17 @@ no_host_table_no_concern_test() ->
     ?assertEqual({ok, no_concern},
                  erlkoenig_host_fw_preflight:analyze(Cfg, [22])).
 
-host_table_without_input_drop_no_concern_test() ->
+legacy_host_table_no_concern_test() ->
     Cfg = #{nft_tables => [#{name => <<"host">>,
+                             chains => [#{name => <<"input">>,
+                                          hook => input,
+                                          policy => drop,
+                                          rules => []}]}]},
+    ?assertEqual({ok, no_concern},
+                 erlkoenig_host_fw_preflight:analyze(Cfg, [22])).
+
+host_table_without_input_drop_no_concern_test() ->
+    Cfg = #{nft_tables => [#{name => <<"erlkoenig_host">>,
                              chains => [#{name => <<"input">>,
                                           hook => input,
                                           policy => accept,
@@ -57,6 +66,15 @@ ssh_port_not_in_dport_whitelist_aborts_test() ->
     ?assertMatch([#{kind := ssh_port_not_accepted, port := 22} | _],
                  Findings).
 
+erlkoenig_host_table_input_drop_without_ssh_accept_aborts_test() ->
+    Cfg = #{nft_tables => [#{name => <<"erlkoenig_host">>,
+                             chains => [#{name => <<"input">>,
+                                          hook => input,
+                                          policy => drop,
+                                          rules => []}]}]},
+    {abort, [#{kind := ssh_port_not_accepted, port := 22}]} =
+        erlkoenig_host_fw_preflight:analyze(Cfg, [22]).
+
 ssh_port_in_dport_whitelist_passes_test() ->
     Cfg = host_input_drop_with_dport(22),
     ?assertEqual({ok, no_concern},
@@ -74,7 +92,7 @@ multi_ssh_one_whitelisted_one_not_test() ->
 
 empty_input_chain_with_drop_aborts_test() ->
     %% policy=drop with zero accept rules — full lockout.
-    Cfg = #{nft_tables => [#{name => <<"host">>,
+    Cfg = #{nft_tables => [#{name => <<"erlkoenig_host">>,
                              chains => [#{name => <<"input">>,
                                           hook => input,
                                           policy => drop,
@@ -118,7 +136,7 @@ honeypot_unrelated_port_no_finding_test() ->
 
 non_integer_dport_ignored_test() ->
     Cfg = #{nft_tables => [
-                #{name => <<"host">>,
+                #{name => <<"erlkoenig_host">>,
                   chains => [#{name => <<"input">>,
                                hook => input,
                                policy => drop,
@@ -133,7 +151,7 @@ non_integer_dport_ignored_test() ->
 malformed_table_skipped_test() ->
     Cfg = #{nft_tables => [
                 not_a_map,
-                #{name => <<"host">>,
+                #{name => <<"erlkoenig_host">>,
                   chains => [#{name => <<"input">>,
                                hook => input,
                                policy => drop,
@@ -160,7 +178,7 @@ format_findings_renders_test() ->
 
 host_input_drop_with_dport(Dport) ->
     #{nft_tables => [
-          #{name => <<"host">>,
+          #{name => <<"erlkoenig_host">>,
             chains => [
                 #{name => <<"input">>,
                   hook => input,

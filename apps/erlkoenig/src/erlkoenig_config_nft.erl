@@ -45,26 +45,21 @@ Major concerns in this module:
 
   * **Rule expansion.**
     `expand_nft_rule/4' is the Glasbox seam for
-    `{veth_of, _, _}' and `{replica_ips, _, _}' references —
-    unresolved refs become `__unresolved__' placeholders that
+    `{replica_ips, _, _}' references — unresolved refs become
+    `__unresolved__' placeholders that
     `expanded_rule_has_unresolved/1' filters before the batch,
     so the atomic transaction still lands for the rest of the
     chain. History in the function body: every behaviour here
     is there to prevent a Glasbox silent-widening (bugs
     #75-78 from the audit sweep).
 
-  * **Zone chain apply.**
-    `apply_zone_chains/2' + `resolve_host_refs/2' +
-    `find_all_replica_ips/3' + `expand_pod_ref_rules/3'
-    translate the zone-scoped rule terms into nft_tables
-    rules in the shared `erlkoenig' table.
-
-  * **Pod-local forward chains.**
-    `apply_pod_forward_chains/3' +
-    `apply_pod_chains_for_replicas/5' +
-    `resolve_and_compile_rule/4' + `resolve_ref_ip/3' +
-    `has_unresolved/1' + `expanded_rule_has_unresolved/1'
-    handle the legacy pod-level chains path.
+  * **Zone-forward topology.**
+    `apply_forward_topology/4' (with `/5' for tests injecting
+    the NFLOG setup function) + `build_forward_topology_msgs/3'
+    build the atomic netlink batch for the zone-forward
+    surface: the forward base chain in `erlkoenig_zone' plus
+    per-zone and per-pod regular chains. One transaction, one
+    writer.
 
 The public entry points `apply_nft_tables/5',
 `expand_nft_rule/4', `parse_container_name/1',
@@ -82,15 +77,43 @@ change.
     %% Host nft_tables apply
     apply_nft_tables/5,
     apply_nft_table/3,
+    ban_set_targets/1,
     %% Rule expansion
     expand_nft_rule/4,
-    %% Zone chains
-    apply_zone_chains/2,
+    %% Zone-forward topology (Phase 6e.1.b)
+    %%
+    %% `apply_forward_topology/4` is the single production
+    %% entry point for installing the zone-forward surface.
+    %% It replaces the per-zone/per-pod incremental
+    %% `apply_zone_chains/2` + `apply_pod_forward_chains/3`
+    %% pair from before 6e.1.b — that shape encoded the bug
+    %% (append-without-replace, reload accumulation) into the
+    %% API, and would mislead a future reader into adding
+    %% another incremental writer. No compat-wrappers are
+    %% kept; the old shape is deleted.
+    apply_forward_topology/4,
+    apply_forward_topology/5,
+    build_forward_topology_msgs/3,
     resolve_host_refs/2,
-    find_all_replica_ips/3,
-    %% Pod forward chains
-    apply_pod_forward_chains/3
+    find_all_replica_ips/3
 ]).
+
+-ifdef(TEST).
+-export([ban_set_entries/2]).
+-endif.
+
+-include("nft_tables.hrl").
+
+-define(DSL_BAN_SETS_KEY, erlkoenig_dsl_ban_sets).
+
+%% Module-local mirrors of the constants `erlkoenig_ct_firewall`
+%% uses for its base chains. Phase 6e.1.b's topology builder
+%% writes into the same forward base chain that ct_firewall's
+%% setup creates, so the names have to agree exactly. NFPROTO_INET
+%% is 1 in the kernel UAPI; the same literal flows through every
+%% nft_* encoder in this module.
+-define(FAMILY, 1).
+-define(FORWARD_CHAIN, <<"forward">>).
 
 %% =================================================================
 %% Name ↔ IP plumbing
@@ -124,8 +147,8 @@ build_veth_map(Results) ->
 %%   "web-0-nginx-plus"     → pod="web", ct="plus", idx="0-nginx" (WRONG ct)
 %%
 %% Both cases meant VethMap and ReplicaIpMap got bogus keys and every
-%% downstream {veth_of, Pod, Ct} or {replica_ips, Pod, Ct} lookup
-%% silently fell to the unresolved path.
+%% downstream {replica_ips, Pod, Ct} lookup silently fell to the
+%% unresolved path.
 -spec parse_container_name(binary()) -> {binary(), binary(), binary()} | error.
 parse_container_name(Name) ->
     Parts = binary:split(Name, <<"-">>, [global]),
@@ -178,13 +201,38 @@ build_replica_ip_map(IpMap, _Pods, _Zones) ->
 %% =================================================================
 
 %% Apply nft_tables from the DSL config.
--spec apply_nft_tables([map()], map(), map(), [map()], [map()]) -> ok.
+-spec apply_nft_tables([map()], map(), map(), [map()], [map()]) ->
+    ok | {error, term()}.
 apply_nft_tables([], _, _, _, _) -> ok;
 apply_nft_tables(Tables, IpMap, VethMap, Pods, Zones) ->
-    ReplicaIpMap = build_replica_ip_map(IpMap, Pods, Zones),
-    lists:foreach(fun(Table) ->
-        apply_nft_table(Table, VethMap, ReplicaIpMap)
-    end, Tables).
+    case validate_table_names(Tables) of
+        ok ->
+            ReplicaIpMap = build_replica_ip_map(IpMap, Pods, Zones),
+            lists:foreach(fun(Table) ->
+                apply_nft_table(Table, VethMap, ReplicaIpMap)
+            end, Tables),
+            ok;
+        {error, _} = Err ->
+            Err
+    end.
+
+validate_table_names(Tables) ->
+    Allowed = [?EK_NFT_TABLE_HOST, ?EK_NFT_TABLE_ZONE, ?EK_NFT_TABLE_CT],
+    case [to_bin_or_raw(maps:get(name, T, undefined))
+          || T <- Tables,
+             not lists:member(to_bin_or_raw(maps:get(name, T, undefined)), Allowed)] of
+        [] ->
+            ok;
+        [Bad | _] ->
+            {error, {unknown_nft_table, Bad,
+                     #{allowed => Allowed,
+                       hint => <<"legacy nft_table/raw table names are refused after phase 6i; rewrite firewall.term to nft_host/nft_zone/nft_ct">>}}}
+    end.
+
+to_bin_or_raw(V) ->
+    try iolist_to_binary(V)
+    catch _:_ -> V
+    end.
 
 apply_nft_table(#{name := TableName, chains := Chains} = Table, VethMap, ReplicaIpMap) ->
     Family = maps:get(family, Table, inet),
@@ -325,7 +373,8 @@ apply_nft_table(#{name := TableName, chains := Chains} = Table, VethMap, Replica
                  length(AllRuleCreates)]),
     case AllMsgs of
         [] ->
-            logger:info("erlkoenig_config: nft_table ~s: empty (no chains)", [TableName]);
+            logger:info("erlkoenig_config: nft_table ~s: empty (no chains)", [TableName]),
+            register_ban_sets(TableBin, Table);
         _ ->
             case nfnl_server:apply_msgs(erlkoenig_nft_srv, AllMsgs) of
                 ok ->
@@ -339,6 +388,7 @@ apply_nft_table(#{name := TableName, chains := Chains} = Table, VethMap, Replica
                                         NewMapNames),
                     persistent_term:put({erlkoenig_dsl_sets, TableBin},
                                         NewSetNames),
+                    register_ban_sets(TableBin, Table),
                     logger:notice("erlkoenig_config: nft_table ~s applied ok", [TableName]),
                     erlkoenig_events:notify({firewall_applied, TableName});
                 {error, Reason} ->
@@ -348,6 +398,104 @@ apply_nft_table(#{name := TableName, chains := Chains} = Table, VethMap, Replica
             end
     end;
 apply_nft_table(_, _, _) -> ok.
+
+%% Return the currently live DSL-owned ban-set targets for this IP
+%% family. The registry is only committed after a table apply
+%% succeeds, so threat_mesh fans out to kernel state that is known to
+%% have landed.
+-spec ban_set_targets(binary()) -> [{binary(), binary()}].
+ban_set_targets(IPBin) when is_binary(IPBin) ->
+    TargetType = case byte_size(IPBin) of
+        4 -> ipv4_addr;
+        16 -> ipv6_addr;
+        _ -> undefined
+    end,
+    TargetsByTable = persistent_term:get(?DSL_BAN_SETS_KEY, #{}),
+    lists:usort([{Table, SetName}
+                 || {_TableKey, Entries} <- maps:to_list(TargetsByTable),
+                    #{table := Table, set := SetName, type := Type} <- Entries,
+                    Type =:= TargetType]).
+
+register_ban_sets(TableBin, Table) ->
+    Entries = ban_set_entries(TableBin, Table),
+    Current = persistent_term:get(?DSL_BAN_SETS_KEY, #{}),
+    Next = case Entries of
+        [] -> maps:remove(TableBin, Current);
+        _ -> Current#{TableBin => Entries}
+    end,
+    persistent_term:put(?DSL_BAN_SETS_KEY, Next).
+
+-spec ban_set_entries(binary(), map()) -> [map()].
+ban_set_entries(TableBin, Table) ->
+    Sets = maps:get(sets, Table, []),
+    case maps:get(ban_set, Table, undefined) of
+        undefined ->
+            [];
+        BanSet when is_map(BanSet) ->
+            lists:filtermap(
+                fun({Keys, Type}) ->
+                    case first_ban_set_value(Keys, BanSet) of
+                        {ok, SetName0} ->
+                            case to_bin(SetName0) of
+                                {ok, SetName} ->
+                                    case set_type_in(SetName, Sets) of
+                                        Type ->
+                                            {true, #{table => TableBin,
+                                                     set => SetName,
+                                                     type => Type}};
+                                        _ ->
+                                            false
+                                    end;
+                                error ->
+                                    false
+                            end;
+                        error ->
+                            false
+                    end
+                end,
+                [{[ipv4, ipv4_addr, v4], ipv4_addr},
+                 {[ipv6, ipv6_addr, v6], ipv6_addr}]);
+        BanSet ->
+            case to_bin(BanSet) of
+                {ok, SetName} ->
+                    case set_type_in(SetName, Sets) of
+                        ipv4_addr ->
+                            [#{table => TableBin, set => SetName, type => ipv4_addr}];
+                        _ ->
+                            []
+                    end;
+                error ->
+                    []
+            end
+    end.
+
+first_ban_set_value([], _BanSet) ->
+    error;
+first_ban_set_value([Key | Rest], BanSet) ->
+    case maps:find(Key, BanSet) of
+        {ok, Value} -> {ok, Value};
+        error -> first_ban_set_value(Rest, BanSet)
+    end.
+
+set_type_in(_SetName, []) ->
+    undefined;
+set_type_in(SetName, [{Name, Type} | Rest]) ->
+    case to_bin(Name) of
+        {ok, SetName} -> Type;
+        _ -> set_type_in(SetName, Rest)
+    end;
+set_type_in(SetName, [{Name, Type, _Opts} | Rest]) ->
+    case to_bin(Name) of
+        {ok, SetName} -> Type;
+        _ -> set_type_in(SetName, Rest)
+    end.
+
+to_bin(Value) ->
+    try iolist_to_binary(Value) of
+        Bin when is_binary(Bin) -> {ok, Bin}
+    catch
+        _:_ -> error
+    end.
 
 %% =================================================================
 %% Set / map / vmap compilation
@@ -439,13 +587,13 @@ compile_nft_chain_split(Family, Table, #{name := Name, rules := Rules} = Chain,
             }, S) end]
     end,
 
-    %% Expand all rules (resolve veth_of, replica_ips)
+    %% Expand all rules (resolve replica_ips)
     AllExpanded0 = lists:flatmap(fun({Action, Opts}) ->
         expand_nft_rule(Action, Opts, VethMap, ReplicaIpMap)
     end, Rules),
     %% Filter out rules that carry an `__unresolved__' placeholder —
-    %% generated by `expand_nft_rule' when a `replica_ips'/`veth_of'
-    %% reference resolves to nothing at apply time (e.g. parallel pod
+    %% generated by `expand_nft_rule' when a `replica_ips' reference
+    %% resolves to nothing at apply time (e.g. parallel pod
     %% bring-up). Keeping them would either (a) send a literal
     %% `__unresolved__' binary as an IP/iface to the kernel and get
     %% the whole atomic batch rolled back — wiping the chain itself
@@ -550,15 +698,13 @@ compile_explicit_vmap(Family, Table, #{name := Name, concat := true,
 compile_explicit_vmap(Family, Table, #{name := Name, type := Type,
                                         entries := Entries},
                       VethMap, _ReplicaIpMap) ->
-    %% Simple (non-concat) vmap — resolve {veth_of, Pod, Ct} keys
+    %% Simple (non-concat) vmap — encode each key for the kernel.
     VmapName = iolist_to_binary(Name),
     VmapId = erlang:phash2(VmapName) band 16#FFFF,
-    BinEntries = lists:filtermap(fun({K, V}) ->
-        case resolve_vmap_key(Type, K, VethMap) of
-            {ok, BinKey} -> {true, {BinKey, verdict_atom(V)}};
-            skip -> false
-        end
-    end, Entries),
+    BinEntries = [begin
+                      {ok, BinKey} = resolve_vmap_key(Type, K, VethMap),
+                      {BinKey, verdict_atom(V)}
+                  end || {K, V} <- Entries],
     CreateVmap = fun(S) ->
         nft_set:add_vmap(Family, #{
             table => Table, name => VmapName, type => Type
@@ -644,19 +790,23 @@ vmap_key(ifname, Name) ->
     <<Bin/binary, 0:(Pad*8)>>;
 vmap_key(_, Val) when is_binary(Val) -> Val.
 
-%% Resolve a vmap key — expand {veth_of, Pod, Ct} via VethMap
-resolve_vmap_key(Type, {veth_of, Pod, Ct}, VethMap) ->
-    PodBin = iolist_to_binary(Pod),
-    CtBin = iolist_to_binary(Ct),
-    case maps:find({PodBin, CtBin}, VethMap) of
-        {ok, Veth} -> {ok, vmap_key(Type, Veth)};
-        error ->
-            logger:warning("erlkoenig_config: veth_of ~s.~s not found for vmap",
-                           [Pod, Ct]),
-            skip
-    end;
+resolve_vmap_key(_Type, {veth_of, Pod, Ct}, _VethMap) ->
+    refuse_legacy_veth_of(Pod, Ct);
 resolve_vmap_key(Type, Key, _VethMap) ->
     {ok, vmap_key(Type, Key)}.
+
+%% Post-6i refusal for the legacy `{veth_of, Pod, Ct}` symbol. IPVLAN
+%% slaves are not visible on the host, so the symbol resolved to no
+%% kernel-effective rule under any current production layout. Kept as
+%% a fail-loud structured error so a hand-written firewall.term that
+%% still carries the legacy form gets a clear refusal instead of a
+%% silent badarg or an `__unresolved__' rule that drops on apply.
+refuse_legacy_veth_of(Pod, Ct) ->
+    error({legacy_veth_of_refused,
+           #{pod => Pod, container => Ct,
+             hint => <<"veth_of was removed post-6i; IPVLAN slaves are not "
+                       "visible on the host. Use ip_saddr or "
+                       "{replica_ips, Pod, Ct} instead.">>}}).
 
 nft_type_atom_to_int(mark) -> 19;
 nft_type_atom_to_int(ipv4_addr) -> 7;
@@ -672,7 +822,7 @@ nft_type_len(_) -> 4.
 %% Rule expansion
 %% =================================================================
 
-%% Expand a single nft rule, resolving {:veth_of,...} and {:replica_ips,...}.
+%% Expand a single nft rule, resolving {:replica_ips,...}.
 %% Returns a list of rules (one per replica IP when expanded).
 -spec expand_nft_rule(atom(), map(), map(), map()) -> [term()].
 
@@ -688,8 +838,8 @@ expand_nft_rule(jump, #{to := Target} = Opts, VethMap, ReplicaIpMap) ->
     %% Fix: delegate the per-key translation to the generic clause
     %% below (accept is just a placeholder verdict — we overwrite it),
     %% then graft the resolved chain name on top. The generic path
-    %% already handles iifname {:veth_of, _, _} → iif, tcp_dport → tcp,
-    %% counter → binary, saddr prefix, etc.
+    %% already handles iifname → iif, tcp_dport → tcp, counter →
+    %% binary, saddr prefix, etc.
     RestOpts = maps:remove(to, Opts),
     [{rule, _, Expanded}] =
         expand_nft_rule(accept, RestOpts, VethMap, ReplicaIpMap),
@@ -712,7 +862,7 @@ expand_nft_rule(vmap_lookup, #{vmap := VmapName} = Opts, _VethMap, _ReplicaIpMap
 expand_nft_rule(flow_offload, #{flowtable := FtName}, _VethMap, _ReplicaIpMap) ->
     [{flow_offload, iolist_to_binary(FtName)}];
 
-expand_nft_rule(dnat_jhash, Opts, VethMap, _ReplicaIpMap) ->
+expand_nft_rule(dnat_jhash, Opts, _VethMap, _ReplicaIpMap) ->
     MapName = maps:get(map, Opts),
     %% Accept either `port:' (internal shorthand) or `dport:' (DSL
     %% tutorial form). `tcp_dport:' is the explicit tcp-specific
@@ -723,29 +873,7 @@ expand_nft_rule(dnat_jhash, Opts, VethMap, _ReplicaIpMap) ->
     end,
     Mod = maps:get(mod, Opts),
     BaseOpts = maps:fold(fun
-        (iifname, {veth_of, P, C}, Acc) ->
-            case maps:find({P, C}, VethMap) of
-                {ok, Veth} ->
-                    Acc#{iif => Veth};
-                error ->
-                    %% Match the generic-clause behavior: emit
-                    %% `__unresolved__' as a fail-CLOSED placeholder.
-                    %% Silent `Acc' (no iif key) would DROP the
-                    %% interface constraint entirely and let the
-                    %% dnat_jhash rule fire on ANY inbound interface
-                    %% — the declared boundary was "traffic from
-                    %% pod.ct's veth", the actual boundary became
-                    %% "any traffic matching the port". Fail-open
-                    %% Glasbox violation. `__unresolved__' never
-                    %% matches a real interface so the rule is dead
-                    %% until the reference can be resolved.
-                    logger:warning(
-                        "erlkoenig_config: dnat_jhash veth_of ~s.~s "
-                        "unresolved — rule pinned to __unresolved__ "
-                        "until target pod spawns",
-                        [P, C]),
-                    Acc#{iif => <<"__unresolved__">>}
-            end;
+        (_, {veth_of, P, C}, _Acc) -> refuse_legacy_veth_of(P, C);
         (iifname, V, Acc) -> Acc#{iif => iolist_to_binary(V)};
         (tcp_dport, P, Acc) -> Acc#{tcp => P};
         (counter, N, Acc) -> Acc#{counter => iolist_to_binary(N)};
@@ -762,8 +890,10 @@ expand_nft_rule(dnat_jhash, Opts, VethMap, _ReplicaIpMap) ->
     end, #{}, Opts),
     [{rule, dnat_jhash, BaseOpts#{map => MapName, dport => Port, mod => Mod}}];
 
-%% dnat_lb: legacy — collect ALL replica IPs into one rule (not expanded to N rules)
-expand_nft_rule(dnat_lb, Opts, VethMap, ReplicaIpMap) ->
+%% dnat_lb: collect ALL replica IPs into one rule (not expanded to N rules).
+%% Source-IP-hash loadbalancing primitive, used by tutorial 06 and any
+%% multi-replica DNAT scenario.
+expand_nft_rule(dnat_lb, Opts, _VethMap, ReplicaIpMap) ->
     Port = maps:get(port, Opts, 0),
     Targets = case maps:get(targets, Opts, undefined) of
         {replica_ips, Pod, Ct} ->
@@ -795,23 +925,7 @@ expand_nft_rule(dnat_lb, Opts, VethMap, ReplicaIpMap) ->
             error({dnat_lb_bad_targets, #{value => Other}})
     end,
     BaseOpts = maps:fold(fun
-        (iifname, {veth_of, P, C}, Acc) ->
-            case maps:find({P, C}, VethMap) of
-                {ok, Veth} ->
-                    Acc#{iif => Veth};
-                error ->
-                    %% See dnat_jhash above — fail-closed via
-                    %% `__unresolved__' placeholder. Silent-skip
-                    %% would widen dnat_lb to match ANY inbound
-                    %% interface (security regression vs. declared
-                    %% pod.ct-scoped traffic).
-                    logger:warning(
-                        "erlkoenig_config: dnat_lb veth_of ~s.~s "
-                        "unresolved — rule pinned to __unresolved__ "
-                        "until target pod spawns",
-                        [P, C]),
-                    Acc#{iif => <<"__unresolved__">>}
-            end;
+        (_, {veth_of, P, C}, _Acc) -> refuse_legacy_veth_of(P, C);
         (iifname, V, Acc) -> Acc#{iif => iolist_to_binary(V)};
         (tcp_dport, P, Acc) -> Acc#{tcp => P};
         (counter, N, Acc) -> Acc#{counter => iolist_to_binary(N)};
@@ -826,32 +940,20 @@ expand_nft_rule(dnat_lb, Opts, VethMap, ReplicaIpMap) ->
     end, #{}, Opts),
     [{rule, dnat_lb, BaseOpts#{targets => Targets, dport => Port}}];
 
-expand_nft_rule(Action, Opts, VethMap, ReplicaIpMap) ->
-    %% Resolve all {:veth_of,...} and {:replica_ips,...} in opts.
+expand_nft_rule(Action, Opts, _VethMap, ReplicaIpMap) ->
+    %% Resolve all {:replica_ips,...} in opts.
     %%
-    %% Muster-9 hazard: the generic `(Key, V, Acc) -> iolist_to_binary(V)'
-    %% clauses for oifname/oifname_ne would happily gobble a
-    %% `{veth_of, Pod, Ct}' tuple and crash in iolist_to_binary/1 with
-    %% a cryptic badarg. Specific tuple clauses therefore come FIRST,
-    %% mirroring the iifname handler one line below. See also
-    %% finding_nft_container_veth_of_unreachable.md for the same
-    %% pattern caught in translate_opts/1.
+    %% `{veth_of, _, _}' is refused fail-loud as the very first arm:
+    %% the symbol was removed post-6i (IPVLAN slaves are not visible
+    %% on the host, so the legacy resolver produced no kernel-effective
+    %% rule). The fail-loud arm comes BEFORE the generic
+    %% `iolist_to_binary' clauses for oifname/oifname_ne; otherwise a
+    %% `{veth_of, _, _}' tuple in those keys would crash with a cryptic
+    %% badarg. See also `erlkoenig_nft_container:translate_opts/1' for
+    %% the matching container-side guard
+    %% (finding_nft_container_veth_of_unreachable.md).
     Resolved = maps:fold(fun
-        (iifname, {veth_of, Pod, Ct}, Acc) ->
-            case maps:find({Pod, Ct}, VethMap) of
-                {ok, Veth} -> Acc#{iif => Veth};
-                error -> Acc#{iif => <<"__unresolved__">>}
-            end;
-        (oifname, {veth_of, Pod, Ct}, Acc) ->
-            case maps:find({Pod, Ct}, VethMap) of
-                {ok, Veth} -> Acc#{oif => Veth};
-                error -> Acc#{oif => <<"__unresolved__">>}
-            end;
-        (oifname_ne, {veth_of, Pod, Ct}, Acc) ->
-            case maps:find({Pod, Ct}, VethMap) of
-                {ok, Veth} -> Acc#{oif_neq => Veth};
-                error -> Acc#{oif_neq => <<"__unresolved__">>}
-            end;
+        (_, {veth_of, Pod, Ct}, _Acc) -> refuse_legacy_veth_of(Pod, Ct);
         (iifname, V, Acc) -> Acc#{iif => iolist_to_binary(V)};
         (oifname, V, Acc) -> Acc#{oif => iolist_to_binary(V)};
         (oifname_ne, V, Acc) -> Acc#{oif_neq => iolist_to_binary(V)};
@@ -1016,73 +1118,357 @@ priority_to_int(raw) -> -300;
 priority_to_int(N) when is_integer(N) -> N.
 
 %% =================================================================
-%% Zone chains
+%% Zone-forward topology — Phase 6e.1.b
 %% =================================================================
+%%
+%% Single atomic apply for the zone-forward surface: forward base
+%% chain rebuild + per-zone (`zone_<name>`) and per-pod-replica
+%% (`pod_<name>_<idx>`) regular chains, jumped from the forward
+%% base chain. Replaces the pre-6e.1.b
+%% `apply_zone_chains/2` + `apply_pod_forward_chains/3` pair which
+%% appended rules to the forward chain incrementally and never
+%% removed them on reload (Stage B from §11 6c).
+%%
+%% Reload-idempotency contract:
+%%   - `flush_chain forward` clears the base chain.
+%%   - `add chain X` (idempotent — modify-or-create, no NLM_F_EXCL)
+%%     re-asserts each regular chain.
+%%   - `flush_chain X` clears any prior rules in regular chains.
+%%   - re-add of `ct_established_accept`, deterministic jumps,
+%%     per-chain rules.
+%% All in one `nfnl_server:apply_msgs/2` — kernel commits or rolls
+%% back atomically.
+%%
+%% NFLOG ordering (Glasbox):
+%% Phase 6.0c's `erlkoenig_nft_nflog:ensure_started/1` runs
+%% sequentially **before** the netlink batch. Failure aborts the
+%% apply with a structured `{error, {nflog_start_failed, ...}}` —
+%% we never install drop+log rules without an Erlang-side observer.
 
-%% Apply zone-level chains as nft rules in the erlkoenig_ct forward chain.
-%% Zone chains contain explicit rule terms ({rule, Verdict, Opts}) that get
-%% compiled via erlkoenig_ct_firewall:compile_generic_rule and added to
-%% the forward chain.
--spec apply_zone_chains(map(), map()) -> ok.
-apply_zone_chains(#{chains := Chains} = Zone, IpMap) ->
-    ZoneName = maps:get(name, Zone, <<"?">>),
+-spec apply_forward_topology([map()], [map()], map(), [{binary(), pid()}]) ->
+    ok | {error, term()}.
+apply_forward_topology(Zones, Pods, IpMap, SpawnedPids) ->
+    apply_forward_topology(Zones, Pods, IpMap, SpawnedPids,
+                           fun erlkoenig_nft_nflog:ensure_started/1).
+
+%% Same as `apply_forward_topology/4` with the NFLOG receiver-setup
+%% function injected. Production callsites use `/4` (which wires
+%% in `erlkoenig_nft_nflog:ensure_started/1`); tests pass an
+%% explicit `NflogFun` to deterministically pin the failure path
+%% (`fun(_) -> {error, _} end`) without spinning up actual NFLOG
+%% sockets in eunit. The Glasbox "fail-loud, no batch on NFLOG
+%% failure" contract is enforced here in `/5`, so testing through
+%% `/5` exercises the same code path that `/4` runs in production.
+-spec apply_forward_topology(
+        [map()], [map()], map(), [{binary(), pid()}],
+        fun((non_neg_integer()) -> {ok, pid()} | {error, term()})) ->
+    ok | {error, term()}.
+apply_forward_topology(Zones, Pods, IpMap, SpawnedPids, NflogFun) ->
+    FwdTable = erlkoenig_ct_firewall:forward_table(),
+    RunningMap = build_running_map(SpawnedPids),
+    case ensure_zone_nflogs(Zones, NflogFun) of
+        {error, _} = Err ->
+            Err;
+        {ok, ZoneNflogGroups} ->
+            Ctx = #{
+                ip_map => IpMap,
+                running_map => RunningMap,
+                zone_nflog_groups => ZoneNflogGroups,
+                fwd_table => FwdTable
+            },
+            %% Phase 6e.1.c: run the same §6.2 ct-state audit used
+            %% for host input/drop chains over the generated
+            %% zone-forward base chain. This is a soft audit like the
+            %% host path: log structured issues, then continue. The
+            %% generated chain is intentionally tiny here; 6e.1.b
+            %% moved policy into regular chains, so the base chain
+            %% carries the established/related fast-path plus jumps.
+            erlkoenig_nft_firewall:log_audit_issues(
+                erlkoenig_nft_firewall:validate_ct_state_audit(
+                    zone_forward_audit_config())),
+            Msgs = build_forward_topology_msgs(Zones, Pods, Ctx),
+            %% `nfnl_server:apply_msgs/2` is a `gen_server:call`,
+            %% which raises `exit({noproc, ...})` if the server
+            %% isn't running (boot ordering, eunit context, or a
+            %% crashed nft_srv). Catch and lift to a structured
+            %% error so the caller never sees a raw exit and
+            %% partially-installed state is unambiguous.
+            try nfnl_server:apply_msgs(erlkoenig_nft_srv, Msgs) of
+                ok ->
+                    logger:info("erlkoenig_config: forward topology applied "
+                                "(~p zones, ~p pods, ~p msgs)",
+                                [length(Zones), length(Pods), length(Msgs)]),
+                    ok;
+                {error, Reason} ->
+                    logger:warning("erlkoenig_config: forward topology apply "
+                                   "failed: ~p", [Reason]),
+                    {error, {batch_failed, Reason}}
+            catch
+                exit:{noproc, _} = Err ->
+                    {error, {batch_failed, Err}};
+                Class:Reason ->
+                    {error, {batch_failed, {Class, Reason}}}
+            end
+    end.
+
+%% Pure helper. Builds the deterministic netlink message sequence
+%% that realises the zone-forward topology under the supplied
+%% context. Tests drive this directly to inspect the batch shape
+%% without a live nfnl_server.
+%%
+%% Order is fixed and load-bearing — atomic batch processes
+%% messages sequentially within the kernel transaction:
+%%   1. flush forward base chain
+%%   2. add+flush every regular chain (zone_*, pod_*)
+%%   3. add per-zone drop counter (idempotent — preserves count)
+%%   4. re-add `ct_established_accept` first in forward
+%%   5. add jumps in forward, in {zones, pods} order
+%%   6. add rules into the now-empty regular chains
+%%
+%% A jump rule cannot precede its target chain's add, hence (2)
+%% before (5).
+-spec build_forward_topology_msgs([map()], [map()], map()) -> [fun()].
+build_forward_topology_msgs(Zones, Pods, Ctx) ->
+    FwdTable = maps:get(fwd_table, Ctx),
+    %% (1) Clear forward base chain.
+    FlushFwd = [forward_flush_msg(FwdTable)],
+    %% (2) Regular chains: zone_*, pod_*. Each gets add+flush.
+    ZoneChainStruct = lists:flatmap(
+        fun(Zone) -> regular_chain_struct_msgs(zone_chain_name(Zone), FwdTable) end,
+        active_zones(Zones)),
+    PodReplicas = expand_pod_replicas(Pods),
+    PodChainStruct = lists:flatmap(
+        fun(#{pod_name := PodName, idx := Idx}) ->
+            regular_chain_struct_msgs(pod_chain_name(PodName, Idx), FwdTable)
+        end, PodReplicas),
+    %% (3) Per-zone drop counters. Idempotent add — preserves the
+    %% kernel's running count across reload.
+    ZoneCounters = lists:map(
+        fun(Zone) -> zone_drop_counter_msg(Zone, FwdTable) end,
+        active_zones(Zones)),
+    %% (4) Base contract rules as the first rules in forward.
+    BaseFwdRules = [nft_encode:rule_fun(inet, FwdTable, ?FORWARD_CHAIN,
+                                        erlkoenig_ct_firewall:compile_rule(Rule))
+                    || Rule <- zone_forward_base_rules()],
+    %% (5) Jumps in forward → regular chains.
+    ZoneJumps = lists:map(
+        fun(Zone) -> jump_in_forward_msg(zone_chain_name(Zone), FwdTable) end,
+        active_zones(Zones)),
+    PodJumps = lists:map(
+        fun(#{pod_name := PodName, idx := Idx}) ->
+            jump_in_forward_msg(pod_chain_name(PodName, Idx), FwdTable)
+        end, PodReplicas),
+    %% (6) Rules inside regular chains.
+    ZoneRules = lists:flatmap(
+        fun(Zone) -> zone_rule_msgs(Zone, Ctx) end,
+        active_zones(Zones)),
+    PodRules = lists:flatmap(
+        fun(Replica) -> pod_rule_msgs(Replica, Ctx) end, PodReplicas),
+
+    FlushFwd
+        ++ ZoneChainStruct ++ PodChainStruct
+        ++ ZoneCounters
+        ++ BaseFwdRules ++ ZoneJumps ++ PodJumps
+        ++ ZoneRules ++ PodRules.
+
+%% --- helpers (impure) ---
+
+build_running_map(SpawnedPids) ->
+    lists:foldl(fun({Name, Pid}, Acc) ->
+        try erlkoenig:inspect(Pid) of
+            #{net_info := #{host_veth := Veth, ip := Ip}} ->
+                Acc#{Name => #{host_veth => Veth, ip => Ip}};
+            Other when is_map(Other) ->
+                logger:warning("erlkoenig_config: inspect ~s: no net_info: ~p",
+                               [Name, maps:keys(Other)]),
+                Acc;
+            Other ->
+                logger:warning("erlkoenig_config: inspect ~s: unexpected: ~p",
+                               [Name, Other]),
+                Acc
+        catch C:E ->
+            logger:warning("erlkoenig_config: inspect ~s failed: ~p:~p",
+                           [Name, C, E]),
+            Acc
+        end
+    end, #{}, SpawnedPids).
+
+ensure_zone_nflogs(Zones, NflogFun) ->
+    %% Sequential ensure_started; abort on first failure with a
+    %% structured error so the caller can attribute it. Glasbox:
+    %% never proceed with the netlink batch if a receiver setup
+    %% fails — silent install of drop+log rules would break the
+    %% audit guarantee.
+    do_ensure_zone_nflogs(active_zones(Zones), NflogFun, #{}).
+
+do_ensure_zone_nflogs([], _NflogFun, Acc) ->
+    {ok, Acc};
+do_ensure_zone_nflogs([Zone | Rest], NflogFun, Acc) ->
+    ZoneName = iolist_to_binary(maps:get(name, Zone, <<"?">>)),
+    Group = erlkoenig_ct_firewall:nflog_group_for_zone(ZoneName),
+    case NflogFun(Group) of
+        {ok, _Pid} ->
+            do_ensure_zone_nflogs(Rest, NflogFun, Acc#{ZoneName => Group});
+        {error, Reason} ->
+            {error, {nflog_start_failed, ZoneName, Group, Reason}}
+    end.
+
+%% --- helpers (pure) ---
+
+%% A zone is "active" only when at least one of its chains carries
+%% rules. Zones without rules contribute nothing to the topology
+%% and must not waste an NFLOG receiver or a regular chain.
+active_zones(Zones) ->
+    [Z || Z <- Zones,
+          lists:any(
+            fun(C) -> maps:get(rules, C, []) =/= [] end,
+            maps:get(chains, Z, []))].
+
+zone_chain_name(Zone) ->
+    ZoneName = iolist_to_binary(maps:get(name, Zone, <<"?">>)),
+    <<"zone_", ZoneName/binary>>.
+
+pod_chain_name(PodName, Idx) ->
+    IdxBin = integer_to_binary(Idx),
+    <<"pod_", PodName/binary, "_", IdxBin/binary>>.
+
+forward_flush_msg(FwdTable) ->
+    fun(S) -> nft_delete:flush_chain(?FAMILY, FwdTable,
+                                     ?FORWARD_CHAIN, S) end.
+
+regular_chain_struct_msgs(ChainName, FwdTable) ->
+    %% Idempotent pair: add_regular (modify-or-create) + flush.
+    %% Order matters within the atomic batch — flush before any
+    %% subsequent add-rule into this chain.
+    [fun(S) -> nft_chain:add_regular(?FAMILY, #{
+                  table => FwdTable, name => ChainName}, S) end,
+     fun(S) -> nft_delete:flush_chain(?FAMILY, FwdTable, ChainName, S) end].
+
+zone_drop_counter_msg(Zone, FwdTable) ->
+    ZoneName = iolist_to_binary(maps:get(name, Zone, <<"?">>)),
+    DropCounter = <<"zone_", ZoneName/binary, "_drop">>,
+    fun(S) -> nft_object:add_counter(1, FwdTable, DropCounter, S) end.
+
+zone_forward_audit_config() ->
+    #{chains => [
+        #{
+            name => ?FORWARD_CHAIN,
+            hook => forward,
+            type => filter,
+            policy => drop,
+            rules => zone_forward_base_rules()
+        }
+    ]}.
+
+zone_forward_base_rules() ->
+    [ct_established_accept].
+
+jump_in_forward_msg(TargetChain, FwdTable) ->
+    %% A bare `jump` rule with no match — packets in the forward
+    %% chain reach the target unconditionally; the target chain
+    %% then carries the per-zone or per-pod policy. Note:
+    %% `compile_generic_rule/2` treats its first argument as an
+    %% atom verdict (accept/drop/...) and silently coerces a
+    %% `{jump, Chain}` tuple to `accept` — using
+    %% `nft_expr_ir:jump/1` directly is the only way to emit a
+    %% real NFT_VERDICT_JUMP with a chain-name.
+    Compiled = [nft_expr_ir:jump(TargetChain)],
+    nft_encode:rule_fun(inet, FwdTable, ?FORWARD_CHAIN, Compiled).
+
+zone_rule_msgs(Zone, Ctx) ->
+    ZoneName = iolist_to_binary(maps:get(name, Zone, <<"?">>)),
     BridgeName = iolist_to_binary(maps:get(bridge, Zone,
-        <<"ek_br_", (iolist_to_binary(ZoneName))/binary>>)),
-    Ctx = #{bridge => BridgeName, ip_map => IpMap},
-    lists:foreach(fun(#{rules := Rules} = Chain) ->
-        ChainTarget = case maps:get(hook, Chain, nil) of
-            nil -> <<"forward">>;
-            input -> <<"input">>;
-            forward -> <<"forward">>;
-            postrouting -> <<"postrouting">>;
-            prerouting -> <<"prerouting">>;
-            output -> <<"output">>
-        end,
-        %% Named counter + NFLOG for zone forward drops (SPEC-EK-005)
-        DropCounterName = <<"zone_", (iolist_to_binary(ZoneName))/binary, "_drop">>,
-        NflogGroup = erlkoenig_ct_firewall:next_nflog_group(),
-        DropCounterMsg = [fun(S) ->
-            nft_object:add_counter(1, <<"erlkoenig">>, DropCounterName, S)
-        end],
-        RuleMsgs = lists:flatmap(fun(Rule) ->
-            Resolved = resolve_host_refs(Rule, Ctx),
+        <<"ek_br_", ZoneName/binary>>)),
+    DropCounter = <<"zone_", ZoneName/binary, "_drop">>,
+    NflogGroups = maps:get(zone_nflog_groups, Ctx),
+    NflogGroup = maps:get(ZoneName, NflogGroups),
+    FwdTable = maps:get(fwd_table, Ctx),
+    ChainName = zone_chain_name(Zone),
+    ResolveCtx = #{bridge => BridgeName, ip_map => maps:get(ip_map, Ctx)},
+    lists:flatmap(fun(#{rules := Rules}) ->
+        lists:flatmap(fun(Rule) ->
+            Resolved = resolve_host_refs(Rule, ResolveCtx),
             lists:filtermap(fun(R) ->
                 try
                     Compiled = erlkoenig_ct_firewall:compile_rule(R),
-                    %% Inject counter + nflog on drop rules
                     Compiled2 = erlkoenig_ct_firewall:inject_drop_observability(
-                        [Compiled], DropCounterName, NflogGroup),
-                    {true, nft_encode:rule_fun(inet, <<"erlkoenig">>,
-                        ChainTarget, hd(Compiled2))}
+                        [Compiled], DropCounter, NflogGroup),
+                    {true, nft_encode:rule_fun(inet, FwdTable,
+                                               ChainName, hd(Compiled2))}
                 catch _:Err ->
-                    logger:warning("erlkoenig_config: zone ~s rule compile error: ~p for ~p",
+                    logger:warning("erlkoenig_config: zone ~s rule compile "
+                                   "error: ~p for ~p",
                                    [ZoneName, Err, R]),
                     false
                 end
             end, Resolved)
-        end, Rules),
-        case RuleMsgs of
-            [] -> ok;
+        end, Rules)
+    end, maps:get(chains, Zone, [])).
+
+%% Pod replicas: expand each pod with non-empty chains into one
+%% replica map per index. Each replica carries every field a
+%% downstream consumer (chain-struct, jump, rule) needs, so the
+%% three iteration sites in `build_forward_topology_msgs/3` agree
+%% on the expansion without re-computing it.
+%%
+%% Yields maps of the form
+%%   #{pod_name => binary(), idx => non_neg_integer(),
+%%     container_names => [binary()], chains => [map()]}
+expand_pod_replicas(Pods) ->
+    lists:flatmap(fun(Pod) ->
+        PodName = iolist_to_binary(maps:get(name, Pod, <<"?">>)),
+        PodChains = maps:get(chains, Pod, []),
+        case PodChains of
+            [] -> [];
             _ ->
-                %% Start NFLOG receiver for this zone's drops
-                _ = case erlkoenig_nft_nflog:start_link(NflogGroup) of
-                    {ok, _} ->
-                        logger:info("erlkoenig_config: nflog group ~p for zone ~s",
-                                    [NflogGroup, ZoneName]);
-                    {error, NflogErr} ->
-                        logger:warning("erlkoenig_config: nflog failed for zone ~s: ~p",
-                                        [ZoneName, NflogErr])
-                end,
-                case nfnl_server:apply_msgs(erlkoenig_nft_srv, DropCounterMsg ++ RuleMsgs) of
-                    ok ->
-                        logger:info("erlkoenig_config: zone ~s: ~p forward rules applied",
-                                    [ZoneName, length(RuleMsgs)]);
-                    {error, Reason} ->
-                        logger:warning("erlkoenig_config: zone ~s chain apply failed: ~p",
-                                       [ZoneName, Reason])
-                end
+                Replicas = pod_replica_count(Pod),
+                ContainerNames = [iolist_to_binary(maps:get(name, C, <<"?">>))
+                                  || C <- maps:get(containers, Pod, [])],
+                [#{pod_name => PodName,
+                   idx => Idx,
+                   container_names => ContainerNames,
+                   chains => PodChains}
+                 || Idx <- lists:seq(0, Replicas - 1)]
         end
-    end, Chains).
+    end, Pods).
+
+pod_replica_count(Pod) ->
+    PodContainers = maps:get(containers, Pod, []),
+    %% Replicas are declared inline on each container; the legacy
+    %% `zone.deployments[].replicas' shape was refused at the
+    %% validator (post-6k, see SPEC §11) so it can no longer reach
+    %% this function.
+    lists:max(
+        [1 | [maps:get(replicas, C, 1) || C <- PodContainers]]).
+
+pod_rule_msgs(Replica, Ctx) ->
+    #{pod_name := PodName, idx := Idx,
+      container_names := ContainerNames, chains := PodChains} = Replica,
+    RunningMap = maps:get(running_map, Ctx),
+    FwdTable = maps:get(fwd_table, Ctx),
+    ChainName = pod_chain_name(PodName, Idx),
+    IdxBin = integer_to_binary(Idx),
+    RefMap = lists:foldl(fun(CtName, Acc) ->
+        FullName = <<PodName/binary, "-", IdxBin/binary, "-", CtName/binary>>,
+        case maps:find(FullName, RunningMap) of
+            {ok, Info} when is_map(Info) ->
+                Acc#{CtName => Info};
+            _ ->
+                logger:warning("erlkoenig_config: pod ~s ref ~s not found "
+                               "in running containers",
+                               [PodName, FullName]),
+                Acc
+        end
+    end, #{}, ContainerNames),
+    lists:flatmap(fun(#{rules := Rules}) ->
+        lists:filtermap(fun(Rule) ->
+            resolve_and_compile_rule(Rule, RefMap, PodName, ChainName, FwdTable)
+        end, Rules)
+    end, PodChains).
+
+%% =================================================================
+%% Zone-forward symbolic-ref resolver (used by the topology builder)
+%% =================================================================
 
 %% Resolve symbolic references in rules:
 %%   :bridge      → zone bridge name (e.g. "ek_br_test")
@@ -1172,130 +1558,26 @@ expand_pod_ref_rules(_Verdict, BaseOpts, _) ->
     [{rule, _Verdict, BaseOpts}].
 
 %% =================================================================
-%% Pod forward chains
+%% Pod-rule resolver (used by pod_rule_msgs/2 in the topology builder)
 %% =================================================================
-
-%% Apply pod-internal forward chains after containers are spawned.
-%% Resolves @ref (container name → veth) and adds rules to nft.
-%% Returns [{PodChainName, [Veth, ...]}] for forward chain rebuild.
--spec apply_pod_forward_chains([map()], [map()], [{binary(), pid()}]) ->
-    [{binary(), [binary()]}].
-apply_pod_forward_chains(Pods, Zones, SpawnedPids) ->
-    %% Build Name → veth map from spawned pids via inspect
-    RunningMap = lists:foldl(fun({Name, Pid}, Acc) ->
-        try erlkoenig:inspect(Pid) of
-            #{net_info := #{host_veth := Veth, ip := Ip}} ->
-                logger:info("erlkoenig_config: pod veth map: ~s → ~s ~p",
-                            [Name, Veth, Ip]),
-                Acc#{Name => #{host_veth => Veth, ip => Ip}};
-            Other when is_map(Other) ->
-                logger:warning("erlkoenig_config: inspect ~s: no net_info: ~p",
-                               [Name, maps:keys(Other)]),
-                Acc;
-            Other ->
-                logger:warning("erlkoenig_config: inspect ~s: unexpected: ~p",
-                               [Name, Other]),
-                Acc
-        catch C:E ->
-            logger:warning("erlkoenig_config: inspect ~s failed: ~p:~p", [Name, C, E]),
-            Acc
-        end
-    end, #{}, SpawnedPids),
-
-    lists:flatmap(fun(Pod) ->
-        PodName = iolist_to_binary(maps:get(name, Pod, <<"?">>)),
-        PodChains = maps:get(chains, Pod, []),
-        case PodChains of
-            [] -> [];
-            _ ->
-                %% Legacy format: replicas attached to zone deployments.
-                ReplicaCounts = lists:filtermap(fun(Zone) ->
-                    Deps = maps:get(deployments, Zone, []),
-                    case lists:search(fun(#{pod := P}) ->
-                        iolist_to_binary(P) =:= PodName
-                    end, Deps) of
-                        {value, #{replicas := N}} -> {true, N};
-                        _ -> false
-                    end
-                end, Zones),
-                ZoneReplicas = lists:sum(ReplicaCounts),
-                PodContainers = maps:get(containers, Pod, []),
-                ContainerNames = [iolist_to_binary(maps:get(name, C, <<"?">>))
-                                  || C <- PodContainers],
-                %% New format: replicas declared inline on each container.
-                %% Use the max across containers as the pod instance
-                %% count — a pod with frontend:3+backend:1 still gets
-                %% 3 rule-instances, and container-level missing veths
-                %% land in the existing RefMap warning path. Without
-                %% this fallback, any pod declared in the new DSL style
-                %% without matching zone deployments would silently emit
-                %% 0 pod chains (lists:seq(0, -1) = []).
-                InlineReplicas = lists:max(
-                    [1 | [maps:get(replicas, C, 1) || C <- PodContainers]]),
-                Replicas = case ZoneReplicas of
-                    0 -> InlineReplicas;
-                    _ -> ZoneReplicas
-                end,
-                apply_pod_chains_for_replicas(PodName, PodChains, ContainerNames,
-                                              Replicas, RunningMap)
-        end
-    end, Pods).
-
--spec apply_pod_chains_for_replicas(binary(), [map()], [binary()],
-                                     non_neg_integer(), map()) ->
-    [{binary(), [binary()]}].
-apply_pod_chains_for_replicas(PodName, PodChains, ContainerNames, Replicas, RunningMap) ->
-    lists:filtermap(fun(ReplicaIdx) ->
-        %% Build ref map for this replica: "frontend" → "vh_abc123"
-        IdxBin = integer_to_binary(ReplicaIdx),
-        RefMap = lists:foldl(fun(CtName, Acc) ->
-            FullName = <<PodName/binary, "-", IdxBin/binary, "-", CtName/binary>>,
-            case maps:find(FullName, RunningMap) of
-                {ok, Info} when is_map(Info) ->
-                    Acc#{CtName => Info};
-                _ ->
-                    logger:warning("erlkoenig_config: pod ~s ref ~s not found in running containers",
-                                   [PodName, FullName]),
-                    Acc
-            end
-        end, #{}, ContainerNames),
-
-        %% Create a dedicated regular chain for this pod instance's forward rules.
-        %% Then add a jump from the main forward chain BEFORE the per-container
-        %% jump rules (which would otherwise intercept the traffic).
-        PodChainName = iolist_to_binary([<<"pod_">>, PodName, <<"_">>, IdxBin]),
-
-        HasChains = lists:any(fun(#{rules := R}) -> R =/= []; (_) -> false end, PodChains),
-        %% Resolve @ref to IP and add rules directly to forward chain.
-        %% Bridge traffic uses saddr/daddr because br_netfilter shows
-        %% the bridge as iifname/oifname, not the container veths.
-        _ = HasChains,
-        _ = PodChainName,
-        lists:foreach(fun(#{rules := Rules} = _Chain) ->
-            ResolvedRules = lists:filtermap(fun(Rule) ->
-                resolve_and_compile_rule(Rule, RefMap, PodName, <<"forward">>)
-            end, Rules),
-            case ResolvedRules of
-                [] -> ok;
-                _ ->
-                    case nfnl_server:apply_msgs(erlkoenig_nft_srv, ResolvedRules) of
-                        ok ->
-                            logger:info("erlkoenig_config: pod ~s-~p: ~p forward rules",
-                                        [PodName, ReplicaIdx, length(ResolvedRules)]);
-                        {error, Reason} ->
-                            logger:warning("erlkoenig_config: pod ~s-~p forward failed: ~p",
-                                           [PodName, ReplicaIdx, Reason])
-                    end
-            end
-        end, PodChains),
-        false
-    end, lists:seq(0, Replicas - 1)).
+%%
+%% The pre-6e.1.b `apply_pod_forward_chains/3` and
+%% `apply_pod_chains_for_replicas/5` were deleted in 6e.1.b — they
+%% expressed the old per-pod incremental-apply shape. Their work
+%% is now done atomically inside `build_forward_topology_msgs/3`
+%% (chain creation, jumps, rules) and `pod_rule_msgs/2` (per-pod
+%% rule compilation). The per-replica RefMap construction logic
+%% lives in `pod_rule_msgs/2`. Only the per-rule compiler below
+%% (`resolve_and_compile_rule/5`) is shared.
 
 %% Resolve {ref, Name} in a rule's iif/oif to concrete veth names,
 %% then compile to nft expression list targeting the pod chain.
--spec resolve_and_compile_rule(term(), map(), binary(), binary()) ->
+%% `FwdTable` is the zone forward table, passed through so all
+%% pod-emitted forward-chain rules target the same owner table.
+-spec resolve_and_compile_rule(term(), map(), binary(), binary(), binary()) ->
     {true, fun()} | false.
-resolve_and_compile_rule({rule, Verdict, Opts}, RefMap, PodName, ChainName) when is_map(Opts) ->
+resolve_and_compile_rule({rule, Verdict, Opts}, RefMap, PodName,
+                         ChainName, FwdTable) when is_map(Opts) ->
     Resolved = maps:fold(fun
         (iif, {ref, Name}, Acc) ->
             case resolve_ref_ip(Name, RefMap, PodName) of
@@ -1321,7 +1603,8 @@ resolve_and_compile_rule({rule, Verdict, Opts}, RefMap, PodName, ChainName) when
             logger:warning("erlkoenig_config: pod-local rule in "
                            "pod ~s has unknown key ~p=~p "
                            "(passing through to compile_generic_rule — "
-                           "this path is legacy, prefer host nft_table)",
+                           "verify the key is intentional, otherwise it "
+                           "is silently ignored downstream)",
                            [PodName, K, V]),
             Acc#{K => V}
     end, #{}, Opts),
@@ -1333,7 +1616,7 @@ resolve_and_compile_rule({rule, Verdict, Opts}, RefMap, PodName, ChainName) when
         false ->
             try
                 Compiled = erlkoenig_ct_firewall:compile_generic_rule(Verdict, Resolved),
-                {true, nft_encode:rule_fun(inet, <<"erlkoenig">>,
+                {true, nft_encode:rule_fun(inet, FwdTable,
                     ChainName, Compiled)}
             catch _:Err ->
                 logger:warning("erlkoenig_config: pod ~s rule compile error: ~p",
@@ -1341,10 +1624,10 @@ resolve_and_compile_rule({rule, Verdict, Opts}, RefMap, PodName, ChainName) when
                 false
             end
     end;
-resolve_and_compile_rule(Rule, _RefMap, PodName, ChainName) ->
+resolve_and_compile_rule(Rule, _RefMap, PodName, ChainName, FwdTable) ->
     try
         Compiled = erlkoenig_ct_firewall:compile_rule(Rule),
-        {true, nft_encode:rule_fun(inet, <<"erlkoenig">>,
+        {true, nft_encode:rule_fun(inet, FwdTable,
             ChainName, Compiled)}
     catch _:Err ->
         logger:warning("erlkoenig_config: pod ~s rule compile error: ~p for ~p",

@@ -57,8 +57,8 @@ prop_parse_with_seq_arbitrary_safe() ->
         run_safely(fun() -> nfnl_response:parse_with_seq(Bin) end, Bin)).
 
 %% A 4-byte Len field at the start of a binary that's shorter than
-%% Len.  Classic "Len Field Attack".  Must return a list, not
-%% crash.
+%% Len.  Classic "Len Field Attack".  Must return a structured result,
+%% not crash.
 prop_parse_lying_length_safe() ->
     ?FORALL({LyingLen, TailBytes},
             {proper_types:choose(20, 1000),
@@ -86,7 +86,7 @@ prop_parse_multi_ack() ->
             M2 = make_error_msg(Seq2, E2),
             Bin = <<M1/binary, M2/binary>>,
             case nfnl_response:parse_with_seq(Bin) of
-                [{Seq1, R1}, {Seq2, R2}] ->
+                {ok, [{Seq1, R1}, {Seq2, R2}]} ->
                     check_result(R1, E1) andalso check_result(R2, E2);
                 Other ->
                     io:format(user, "multi-ACK parse wrong: ~p~n", [Other]),
@@ -100,7 +100,8 @@ run_safely(F, Bin) ->
     Self = self(),
     Pid = spawn(fun() ->
         R = try F() of
-                V when is_list(V) -> ok_list;
+                {ok, V} when is_list(V) -> ok_result;
+                {error, malformed_netlink_response} -> ok_result;
                 Other -> {unexpected, Other}
             catch
                 C:E:_ -> {crash, C, E}
@@ -108,7 +109,7 @@ run_safely(F, Bin) ->
         Self ! {self(), R}
     end),
     receive
-        {Pid, ok_list} -> true;
+        {Pid, ok_result} -> true;
         {Pid, {unexpected, V}} ->
             io:format(user, "unexpected return: ~p on ~p~n", [V, Bin]),
             false;

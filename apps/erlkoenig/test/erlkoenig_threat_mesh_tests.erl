@@ -48,6 +48,32 @@ mesh_starts_test() ->
     ?assert(is_process_alive(Pid)),
     stop_mesh(Pid).
 
+extra_ban_set_targets_filters_host_and_deduplicates_test() ->
+    Key = erlkoenig_dsl_ban_sets,
+    persistent_term:put(Key, #{
+        <<"erlkoenig_host">> => [
+            #{table => <<"erlkoenig_host">>, set => <<"blocklist">>, type => ipv4_addr}
+        ],
+        <<"erlkoenig_zone">> => [
+            #{table => <<"erlkoenig_zone">>, set => <<"blocklist">>, type => ipv4_addr},
+            #{table => <<"erlkoenig_zone">>, set => <<"blocklist">>, type => ipv4_addr}
+        ],
+        <<"erlkoenig_ct">> => [
+            #{table => <<"erlkoenig_ct">>, set => <<"blocklist6">>, type => ipv6_addr}
+        ]
+    }),
+    try
+        ?assertEqual(
+            [{<<"erlkoenig_zone">>, <<"blocklist">>}],
+            erlkoenig_threat_mesh:extra_ban_set_targets(<<10, 0, 0, 1>>)),
+        ?assertEqual(
+            [{<<"erlkoenig_ct">>, <<"blocklist6">>}],
+            erlkoenig_threat_mesh:extra_ban_set_targets(
+                <<16#20,16#01,16#0d,16#b8,0,0,0,0,0,0,0,0,0,0,0,1>>))
+    after
+        persistent_term:erase(Key)
+    end.
+
 local_ban_records_source_test() ->
     setup(),
     Pid = start_mesh(),

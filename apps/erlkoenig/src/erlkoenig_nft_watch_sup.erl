@@ -28,7 +28,7 @@ boot via start_counter/1.
     erlkoenig_nft_watch_sup:start_counter(#{
         name   => <<"ssh">>,
         family => 1,
-        table  => <<"erlkoenig">>,
+        table  => <<"erlkoenig_host">>,
         interval => 2000
     })
 """.

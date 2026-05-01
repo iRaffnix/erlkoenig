@@ -79,6 +79,58 @@ validate_missing_file_test() ->
     ?assertMatch({error, {read_failed, _, _}},
                  erlkoenig_config:validate("/tmp/erlkoenig_nonexistent_42.term")).
 
+validate_zone_with_legacy_deployments_refused_test() ->
+    %% Post-6k: zone-level `deployments' is the pre-pod replica
+    %% shape and must be refused at the validator. Operator note in
+    %% §8.1 covers the manual rewrite to inline `zone:`+`replicas:`
+    %% on each container.
+    File = write_term_file(#{containers => [],
+                             zones => [#{name => <<"z">>,
+                                         deployments => [#{pod => <<"p">>,
+                                                           replicas => 2}]}]}),
+    ?assertMatch({error, {legacy_zone_shape_refused,
+                          #{zone := <<"z">>, field := deployments}}},
+                 erlkoenig_config:validate(File)),
+    file:delete(File).
+
+validate_zone_with_legacy_containers_refused_test() ->
+    %% Post-6k: zone-level `containers' is the pre-pod shape (raw
+    %% containers parented by a zone) and must be refused. The
+    %% current DSL parents containers under a pod and routes them
+    %% to a zone via the container's own `zone:` field.
+    File = write_term_file(#{containers => [],
+                             zones => [#{name => <<"z">>,
+                                         containers => [#{name => <<"c">>,
+                                                          binary => <<"b">>}]}]}),
+    ?assertMatch({error, {legacy_zone_shape_refused,
+                          #{zone := <<"z">>, field := containers}}},
+                 erlkoenig_config:validate(File)),
+    file:delete(File).
+
+%% =================================================================
+%% watches
+%% =================================================================
+
+watch_config_defaults_to_host_owner_table_test() ->
+    Watch = #{counters => [<<"input">>, <<"dropped">>], actions => []},
+    ?assertEqual(
+       #{family => 1,
+         table => <<"erlkoenig_host">>,
+         counters => [<<"input">>, <<"dropped">>],
+         interval => 2000},
+       erlkoenig_config:watch_config(Watch)).
+
+watch_config_honors_explicit_table_test() ->
+    Watch = #{table => <<"custom_table">>, family => 2,
+              counters => [<<"drops">>], interval => 5000,
+              actions => []},
+    ?assertEqual(
+       #{family => 2,
+         table => <<"custom_table">>,
+         counters => [<<"drops">>],
+         interval => 5000},
+       erlkoenig_config:watch_config(Watch)).
+
 %% =================================================================
 %% build_spawn_opts (internal, tested indirectly via module export)
 %% =================================================================
@@ -222,59 +274,31 @@ lambda_pattern_resolve_test() ->
 %% expand_nft_rule/4 -- translation seam (Muster 9: clause ordering)
 %% =================================================================
 
-expand_iifname_veth_of_resolves_test() ->
-    VethMap = #{{<<"pod1">>, <<"api">>} => <<"vp123">>},
-    [{rule, accept, Opts}] =
+expand_veth_of_refused_iifname_test() ->
+    %% Post-6i: {veth_of, _, _} is fail-loud at expansion time
+    %% regardless of whether VethMap can resolve it. IPVLAN slaves
+    %% are not visible on the host, so the legacy resolver produced
+    %% no kernel-effective rule. Refusal at the seam beats silent
+    %% no-op.
+    ?assertError({legacy_veth_of_refused, #{pod := <<"pod1">>,
+                                            container := <<"api">>}},
         erlkoenig_config_nft:expand_nft_rule(accept,
             #{iifname => {veth_of, <<"pod1">>, <<"api">>}},
-            VethMap, #{}),
-    ?assertEqual(<<"vp123">>, maps:get(iif, Opts)).
+            #{}, #{})).
 
-expand_oifname_veth_of_resolves_test() ->
-    %% Regression for a Muster-9 clause-ordering bug: without a
-    %% specific {veth_of, ...} handler the generic
-    %% `(oifname, V, Acc) -> iolist_to_binary(V)` clause runs
-    %% iolist_to_binary({veth_of, ...}) and crashes with badarg.
-    %% Operator would see an opaque error instead of a clean
-    %% "pod not found" fallback.
-    VethMap = #{{<<"pod1">>, <<"api">>} => <<"vp123">>},
-    [{rule, accept, Opts}] =
+expand_veth_of_refused_oifname_test() ->
+    ?assertError({legacy_veth_of_refused, #{pod := <<"pod1">>,
+                                            container := <<"api">>}},
         erlkoenig_config_nft:expand_nft_rule(accept,
             #{oifname => {veth_of, <<"pod1">>, <<"api">>}},
-            VethMap, #{}),
-    ?assertEqual(<<"vp123">>, maps:get(oif, Opts)).
+            #{}, #{})).
 
-expand_oifname_ne_veth_of_resolves_test() ->
-    VethMap = #{{<<"pod1">>, <<"api">>} => <<"vp123">>},
-    [{rule, accept, Opts}] =
+expand_veth_of_refused_oifname_ne_test() ->
+    ?assertError({legacy_veth_of_refused, #{pod := <<"pod1">>,
+                                            container := <<"api">>}},
         erlkoenig_config_nft:expand_nft_rule(accept,
             #{oifname_ne => {veth_of, <<"pod1">>, <<"api">>}},
-            VethMap, #{}),
-    ?assertEqual(<<"vp123">>, maps:get(oif_neq, Opts)).
-
-expand_iifname_veth_of_unresolved_marker_test() ->
-    %% When the target pod hasn't spawned yet, the resolver marks the
-    %% interface as `__unresolved__` so has_unresolved/1 can filter the
-    %% rule out downstream. Same fallback must apply to all three keys.
-    [{rule, accept, Opts}] =
-        erlkoenig_config_nft:expand_nft_rule(accept,
-            #{iifname => {veth_of, <<"pod_missing">>, <<"api">>}},
-            #{}, #{}),
-    ?assertEqual(<<"__unresolved__">>, maps:get(iif, Opts)).
-
-expand_oifname_veth_of_unresolved_marker_test() ->
-    [{rule, accept, Opts}] =
-        erlkoenig_config_nft:expand_nft_rule(accept,
-            #{oifname => {veth_of, <<"pod_missing">>, <<"api">>}},
-            #{}, #{}),
-    ?assertEqual(<<"__unresolved__">>, maps:get(oif, Opts)).
-
-expand_oifname_ne_veth_of_unresolved_marker_test() ->
-    [{rule, accept, Opts}] =
-        erlkoenig_config_nft:expand_nft_rule(accept,
-            #{oifname_ne => {veth_of, <<"pod_missing">>, <<"api">>}},
-            #{}, #{}),
-    ?assertEqual(<<"__unresolved__">>, maps:get(oif_neq, Opts)).
+            #{}, #{})).
 
 expand_plain_iif_name_binary_test() ->
     %% Non-veth_of values still pass through the generic clauses.
@@ -371,17 +395,16 @@ expand_jump_preserves_multiple_matches_test() ->
     ?assertEqual(22, maps:get(tcp, Opts)),
     ?assertEqual(<<"ssh_attempts">>, maps:get(counter, Opts)).
 
-expand_jump_resolves_iifname_veth_of_test() ->
-    %% When iifname: veth_of(...) is given, the resolved veth shows up
-    %% as `iif` in the rule — same as for accept rules.
-    VethMap = #{{<<"pod1">>, <<"api">>} => <<"vp1">>},
-    [{rule, jump, Opts}] =
+expand_jump_refuses_iifname_veth_of_test() ->
+    %% Post-6i: jump rules carrying a {veth_of, _, _} iifname must
+    %% bubble the refusal from the generic clause; the jump path
+    %% delegates to the generic expander, so the refusal arm there
+    %% covers this case too.
+    ?assertError({legacy_veth_of_refused, _},
         erlkoenig_config_nft:expand_nft_rule(jump,
             #{to => <<"target">>,
               iifname => {veth_of, <<"pod1">>, <<"api">>}},
-            VethMap, #{}),
-    ?assertEqual(<<"vp1">>, maps:get(iif, Opts)),
-    ?assertEqual(<<"target">>, maps:get(chain, Opts)).
+            #{}, #{})).
 
 expand_jump_bare_no_matches_test() ->
     %% A jump with no matches still produces a valid rule — just

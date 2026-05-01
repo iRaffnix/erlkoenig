@@ -31,6 +31,11 @@ Usage:
          declared_names/1]).
 
 -include("erlkoenig_error.hrl").
+-include("nft_tables.hrl").
+
+-ifdef(TEST).
+-export([watch_config/1]).
+-endif.
 
 %% nft compilation and host-table apply live in erlkoenig_config_nft.
 %% Call that module directly (apply_nft_tables/5 from ops escripts,
@@ -324,14 +329,22 @@ apply_config_with_reconciliation(OldConfig, Config) ->
     Pods = maps:get(pods, Config, []),
     NftTables = maps:get(nft_tables, Config, []),
 
-    _ = case NftTables of
+    %% Phase 6e.1.b: single atomic apply for the zone-forward
+    %% surface — replaces the pre-6e.1.b per-zone foreach +
+    %% separate apply_pod_forward_chains pair. Reload is now
+    %% idempotent (no rule accumulation) because the entry point
+    %% flushes the forward base chain and every regular chain in
+    %% one atomic netlink batch. A failure here means **no**
+    %% forward rules were installed (atomic batch rolls back, or
+    %% NFLOG receiver setup failed before the batch was sent),
+    %% so the reconciliation as a whole is not in a known good
+    %% state and the error must be propagated — the previous
+    %% logger:warning swallowed it and let the caller believe the
+    %% config was applied.
+    ForwardResult = case NftTables of
         [] ->
-            %% Legacy path: zone chains + pod forward chains (old DSL)
-            lists:foreach(fun(#{chains := Chains} = Zone) when is_list(Chains), Chains =/= [] ->
-                erlkoenig_config_nft:apply_zone_chains(Zone, IpMap);
-               (_) -> ok
-            end, Zones),
-            erlkoenig_config_nft:apply_pod_forward_chains(Pods, Zones, Results);
+            erlkoenig_config_nft:apply_forward_topology(
+                Zones, Pods, IpMap, Results);
         _ ->
             %% New path: nft-transparent DSL (ADR-0015)
             %% nft_tables define ALL firewall rules — skip legacy chain generation
@@ -339,18 +352,26 @@ apply_config_with_reconciliation(OldConfig, Config) ->
             erlkoenig_config_nft:apply_nft_tables(NftTables, IpMap, VethMap, Pods, Zones)
     end,
 
-    %% 7. Apply steering
-    Report4 = erlkoenig_config_zone:maybe_apply_steering(Config, AllContainers, Report3),
-
-    %% 8. Log report
-    Started = length(Results),
-    Stopped = length(ToStop),
-    Kept = length(DeclaredNames) - Started,
-    logger:info("erlkoenig_config: reconciled — ~p started, ~p stopped, ~p kept",
-                [Started, Stopped, Kept]),
-    erlkoenig_config_zone:log_deploy_report(Report4, Started, length(AllContainers)),
-
-    {ok, Results}.
+    case ForwardResult of
+        ok ->
+            %% 7. Apply steering
+            Report4 = erlkoenig_config_zone:maybe_apply_steering(
+                        Config, AllContainers, Report3),
+            %% 8. Log report
+            Started = length(Results),
+            Stopped = length(ToStop),
+            Kept = length(DeclaredNames) - Started,
+            logger:info("erlkoenig_config: reconciled — ~p started, "
+                        "~p stopped, ~p kept", [Started, Stopped, Kept]),
+            erlkoenig_config_zone:log_deploy_report(
+                Report4, Started, length(AllContainers)),
+            {ok, Results};
+        {error, ApplyErr} ->
+            logger:error(
+                "erlkoenig_config: forward topology apply failed — "
+                "config_load aborted: ~p", [ApplyErr]),
+            {error, {forward_topology_failed, ApplyErr}}
+    end.
 
 %% Drift detection (`detect_drifted/2', `containers_by_name/1',
 %% `container_differs/2', `running_container_names/0') lives in
@@ -448,14 +469,9 @@ maybe_configure_guard(_) ->
 %%====================================================================
 
 -spec start_watch(map()) -> ok.
-start_watch(#{counters := Counters, actions := Actions} = Watch) ->
-    Family   = maps:get(family, Watch, 1),
-    Table    = iolist_to_binary(maps:get(table, Watch, <<"erlkoenig">>)),
-    Interval = maps:get(interval, Watch, 2000),
+start_watch(#{counters := _Counters, actions := Actions} = Watch) ->
     Name     = iolist_to_binary(maps:get(name, Watch, <<"unnamed">>)),
-    CounterBins = [iolist_to_binary(C) || C <- Counters],
-    WatchConfig = #{family => Family, table => Table,
-                    counters => CounterBins, interval => Interval},
+    WatchConfig = watch_config(Watch),
     case erlkoenig_nft_watch:start_link(WatchConfig) of
         {ok, Pid} ->
             Thresholds = maps:get(thresholds, Watch, []),
@@ -464,7 +480,7 @@ start_watch(#{counters := Counters, actions := Actions} = Watch) ->
                 add_threshold(Pid, T, ActionFun)
             end, Thresholds),
             logger:info("erlkoenig_config: watch ~s started (~p counters)",
-                        [Name, length(CounterBins)]),
+                        [Name, length(maps:get(counters, WatchConfig))]),
             ok;
         {error, Reason} ->
             logger:warning("erlkoenig_config: failed to start watch ~s: ~p",
@@ -473,6 +489,15 @@ start_watch(#{counters := Counters, actions := Actions} = Watch) ->
     end;
 start_watch(_) ->
     ok.
+
+-spec watch_config(map()) -> map().
+watch_config(#{counters := Counters} = Watch) ->
+    Family = maps:get(family, Watch, 1),
+    Table = iolist_to_binary(maps:get(table, Watch, ?EK_NFT_TABLE_HOST)),
+    Interval = maps:get(interval, Watch, 2000),
+    CounterBins = [iolist_to_binary(C) || C <- Counters],
+    #{family => Family, table => Table,
+      counters => CounterBins, interval => Interval}.
 
 -spec add_threshold(pid(), tuple(), fun()) -> ok.
 add_threshold(Pid, {Counter, _Obj, Metric, Op, Value}, ActionFun) ->

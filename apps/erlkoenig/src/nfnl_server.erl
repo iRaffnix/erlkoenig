@@ -55,7 +55,7 @@ Then used by name from any process:
 -export_type([server_ref/0]).
 
 -ifdef(TEST).
--export([next_seq/1, process_acks/3, wrap_query_error/3]).
+-export([advance_seq/2, next_seq/1, process_acks/3, wrap_query_error/3]).
 -endif.
 
 %% --- Types ---
@@ -64,6 +64,7 @@ Then used by name from any process:
 
 -type state() :: #{
     socket := socket:socket(),
+    socket_mod := module(),
     seq := non_neg_integer()
 }.
 
@@ -155,20 +156,27 @@ stop(Server) ->
 %% --- gen_server callbacks ---
 
 -spec init(list()) -> {ok, state()} | {stop, term()}.
-init(_Opts) ->
+init(Opts) ->
     proc_lib:set_label(nfnl_server),
-    case nfnl_socket:open() of
+    SocketMod = proplists:get_value(socket_mod, Opts, nfnl_socket),
+    OpenResult =
+        case proplists:get_value(socket, Opts, undefined) of
+            undefined -> SocketMod:open();
+            InjectedSock -> {ok, InjectedSock}
+        end,
+    case OpenResult of
         {ok, Sock} ->
             Seq = erlang:system_time(second) band 16#FFFFFFFF,
-            {ok, #{socket => Sock, seq => Seq}};
+            {ok, #{socket => Sock, socket_mod => SocketMod, seq => Seq}};
         {error, Reason} ->
             {stop, nft_error(socket_open_failed, #{reason => Reason})}
     end.
 
 -spec handle_call(term(), {pid(), term()}, state()) ->
     {reply, term(), state()}.
-handle_call({apply_msgs, MsgFuns}, _From, #{socket := Sock, seq := Seq} = State) ->
-    drain_stale(Sock),
+handle_call({apply_msgs, MsgFuns}, _From,
+            #{socket := Sock, socket_mod := SocketMod, seq := Seq} = State) ->
+    drain_stale(Sock, SocketMod),
     FirstMsgSeq = next_seq(Seq),
     {Msgs, MsgSeqs, LastMsgSeq} = build_msgs(MsgFuns, FirstMsgSeq, [], []),
     BatchBeginSeq = Seq,
@@ -177,17 +185,27 @@ handle_call({apply_msgs, MsgFuns}, _From, #{socket := Sock, seq := Seq} = State)
     %% Expected: only the message seqs (batch_begin/end have no NLM_F_ACK)
     Expected = maps:from_keys(MsgSeqs, true),
     Result =
-        case nfnl_socket:send(Sock, Batch) of
+        case SocketMod:send(Sock, Batch) of
             ok ->
-                collect_until_seq(Sock, Expected, ok);
+                collect_until_seq(Sock, SocketMod, Expected, ok);
             {error, Reason} ->
                 {error, nft_error(netlink_send_failed, #{reason => Reason,
                                                          batch_bytes => byte_size(Batch)})}
         end,
-    {reply, Result, State#{seq => BatchEndSeq}};
+    NextSeq =
+        case Result of
+            {error, #{reason := netlink_send_failed}} ->
+                %% A send error can still race with kernel-side acceptance
+                %% of part of the datagram. Leave a gap so late ACKs cannot
+                %% collide with the next caller's message sequence range.
+                advance_seq(BatchEndSeq, length(MsgFuns));
+            _ ->
+                BatchEndSeq
+        end,
+    {reply, Result, State#{seq => NextSeq}};
 handle_call({get_counter, Family, Table, Name}, _From,
-            #{socket := Sock, seq := Seq} = State) ->
-    drain_stale(Sock),
+            #{socket := Sock, socket_mod := SocketMod, seq := Seq} = State) ->
+    drain_stale(Sock, SocketMod),
     QuerySeq = next_seq(Seq),
     Result = wrap_query_error(
         counter_query_failed,
@@ -195,8 +213,8 @@ handle_call({get_counter, Family, Table, Name}, _From,
         #{family => Family, table => Table, name => Name, seq => QuerySeq}),
     {reply, Result, State#{seq => next_seq(QuerySeq)}};
 handle_call({get_counter_reset, Family, Table, Name}, _From,
-            #{socket := Sock, seq := Seq} = State) ->
-    drain_stale(Sock),
+            #{socket := Sock, socket_mod := SocketMod, seq := Seq} = State) ->
+    drain_stale(Sock, SocketMod),
     QuerySeq = next_seq(Seq),
     Result = wrap_query_error(
         counter_query_failed,
@@ -205,8 +223,8 @@ handle_call({get_counter_reset, Family, Table, Name}, _From,
           reset => true}),
     {reply, Result, State#{seq => next_seq(QuerySeq)}};
 handle_call({list_set_elems, Family, Table, SetName}, _From,
-            #{socket := Sock, seq := Seq} = State) ->
-    drain_stale(Sock),
+            #{socket := Sock, socket_mod := SocketMod, seq := Seq} = State) ->
+    drain_stale(Sock, SocketMod),
     QuerySeq = next_seq(Seq),
     Result = wrap_query_error(
         list_set_elems_failed,
@@ -214,8 +232,8 @@ handle_call({list_set_elems, Family, Table, SetName}, _From,
         #{family => Family, table => Table, set => SetName, seq => QuerySeq}),
     {reply, Result, State#{seq => next_seq(QuerySeq)}};
 handle_call({list_chains, Family, Table}, _From,
-            #{socket := Sock, seq := Seq} = State) ->
-    drain_stale(Sock),
+            #{socket := Sock, socket_mod := SocketMod, seq := Seq} = State) ->
+    drain_stale(Sock, SocketMod),
     QuerySeq = next_seq(Seq),
     Result = wrap_query_error(
         list_chains_failed,
@@ -223,8 +241,8 @@ handle_call({list_chains, Family, Table}, _From,
         #{family => Family, table => Table, seq => QuerySeq}),
     {reply, Result, State#{seq => next_seq(QuerySeq)}};
 handle_call({get_ruleset, Family}, _From,
-            #{socket := Sock, seq := Seq} = State) ->
-    drain_stale(Sock),
+            #{socket := Sock, socket_mod := SocketMod, seq := Seq} = State) ->
+    drain_stale(Sock, SocketMod),
     QuerySeq = next_seq(Seq),
     Result = wrap_query_error(
         ruleset_query_failed,
@@ -243,8 +261,8 @@ handle_info(_Info, State) ->
     {noreply, State}.
 
 -spec terminate(term(), state()) -> ok.
-terminate(_Reason, #{socket := Sock}) ->
-    nfnl_socket:close(Sock).
+terminate(_Reason, #{socket := Sock, socket_mod := SocketMod}) ->
+    SocketMod:close(Sock).
 
 %% --- Internal ---
 
@@ -258,15 +276,15 @@ terminate(_Reason, #{socket := Sock}) ->
 %% skipped ACK cascades because every subsequent query then reads
 %% data intended for the previous call, in perpetuity until the
 %% socket is closed.
--spec drain_stale(socket:socket()) -> ok.
-drain_stale(Sock) ->
-    drain_stale(Sock, 0).
+-spec drain_stale(socket:socket(), module()) -> ok.
+drain_stale(Sock, SocketMod) ->
+    drain_stale(Sock, SocketMod, 0).
 
--spec drain_stale(socket:socket(), non_neg_integer()) -> ok.
-drain_stale(Sock, Count) ->
-    case socket:recv(Sock, 0, 0) of
+-spec drain_stale(socket:socket(), module(), non_neg_integer()) -> ok.
+drain_stale(Sock, SocketMod, Count) ->
+    case SocketMod:recv(Sock, 0) of
         {ok, _Stale} ->
-            drain_stale(Sock, Count + 1);
+            drain_stale(Sock, SocketMod, Count + 1);
         {error, _} when Count > 0 ->
             %% Finding stale messages here means a previous operation
             %% timed out and the kernel's late ACK landed after we
@@ -282,6 +300,10 @@ drain_stale(Sock, Count) ->
 %% 32-bit wraparound-safe sequence increment.
 -spec next_seq(non_neg_integer()) -> non_neg_integer().
 next_seq(Seq) -> (Seq + 1) band 16#FFFFFFFF.
+
+-spec advance_seq(non_neg_integer(), non_neg_integer()) -> non_neg_integer().
+advance_seq(Seq, Count) when Count >= 0 ->
+    (Seq + Count) band 16#FFFFFFFF.
 
 %% Build encoded messages and collect the sequence numbers assigned.
 -spec build_msgs(
@@ -306,18 +328,23 @@ build_msgs([Fun | Rest], Seq, MsgAcc, SeqAcc) ->
 %% clean after this function returns (no stale ACKs in the buffer).
 -spec collect_until_seq(
     socket:socket(),
+    module(),
     #{non_neg_integer() => true},
     ok | {error, term()}
 ) ->
     ok | {error, term()}.
-collect_until_seq(_Sock, Expected, Acc) when map_size(Expected) =:= 0 ->
+collect_until_seq(_Sock, _SocketMod, Expected, Acc) when map_size(Expected) =:= 0 ->
     Acc;
-collect_until_seq(Sock, Expected, Acc) ->
-    case nfnl_socket:recv(Sock) of
+collect_until_seq(Sock, SocketMod, Expected, Acc) ->
+    case SocketMod:recv(Sock) of
         {ok, Data} ->
-            Parsed = nfnl_response:parse_with_seq(Data),
-            {Expected2, Acc2} = process_acks(Parsed, Expected, Acc),
-            collect_until_seq(Sock, Expected2, Acc2);
+            case nfnl_response:parse_with_seq(Data) of
+                {ok, Parsed} ->
+                    {Expected2, Acc2} = process_acks(Parsed, Expected, Acc),
+                    collect_until_seq(Sock, SocketMod, Expected2, Acc2);
+                {error, Reason} ->
+                    {error, nft_error(netlink_recv_failed, #{reason => Reason})}
+            end;
         {error, timeout} ->
             %% Timeout: not all ACKs received. Return what we have.
             logger:warning("nfnl_server: timeout waiting for ~p ACKs",
@@ -333,7 +360,7 @@ collect_until_seq(Sock, Expected, Acc) ->
 %% Process parsed ACKs against the expected set.
 %% Removes matched seqs from Expected, accumulates first error.
 -spec process_acks(
-    nfnl_response:seq_response(),
+    [nfnl_response:seq_result()],
     #{non_neg_integer() => true},
     ok | {error, term()}
 ) ->

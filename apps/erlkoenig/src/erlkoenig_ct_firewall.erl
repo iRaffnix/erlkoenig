@@ -18,15 +18,19 @@
 -moduledoc """
 nf_tables operations for per-container firewall chains.
 
-Creates and manages a dedicated nf_tables table (erlkoenig_ct)
-with:
-  - Forward chain (filter, policy drop) for container isolation
-  - Postrouting chain (nat, masquerade) for internet access
-  - Prerouting chain (nat) for port-forwarding / DNAT
-  - Per-container regular chains with isolation rules
+Owns two logical chain groups in fixed per-owner tables:
 
-All operations go through nfnl_server (erlkoenig_nft_srv) as atomic
-batches.
+  * **Filter side** — forward chain (policy drop) plus the
+    per-container helper chains and their sets/counters. Lives in
+    `erlkoenig_zone`.
+  * **NAT side** — prerouting/dstnat (port-forwards), postrouting/
+    srcnat (masquerade for container egress) and the
+    output/dstnat chain (host-locally-generated traffic). Lives
+    in `erlkoenig_ct`.
+
+The helpers `forward_table/0` and `nat_table/0` make the
+distinction explicit at every call site. All operations go
+through `nfnl_server` (`erlkoenig_nft_srv`) as atomic batches.
 """.
 
 -export([setup_table/0, setup_table/1, teardown_table/0,
@@ -39,11 +43,27 @@ batches.
          inject_drop_counter/2,
          inject_drop_observability/3,
          next_nflog_group/0,
-         set_msg/1]).
+         nflog_group_for_zone/1,
+         set_msg/1,
+         %% Phase 6e.1.a: forward_table/0 is the production
+         %% choke point for the zone-owned forward-chain table.
+         %% `erlkoenig_config_nft:apply_zone_chains/2` and
+         %% `apply_pod_chains_for_replicas/5` route through it,
+         %% so the export must be unconditional — it was TEST-
+         %% only in 6c when nothing outside this module called
+         %% it, and that gate would crash the writer with
+         %% `undef` in non-TEST builds.
+         forward_table/0]).
+
+-ifdef(TEST).
+-export([build_setup_msgs/3, nat_table/0]).
+-endif.
+
+-include("nft_tables.hrl").
 
 %% NFPROTO_INET = 1
 -define(FAMILY, 1).
--define(TABLE, <<"erlkoenig">>).
+-define(TABLE, ?EK_NFT_TABLE_ZONE).
 -define(FORWARD_CHAIN, <<"forward">>).
 -define(POSTROUTING_CHAIN, <<"postrouting">>).
 -define(PREROUTING_CHAIN, <<"prerouting">>).
@@ -51,17 +71,96 @@ batches.
 -define(SERVER, erlkoenig_nft_srv).
 -define(IP_FORWARD_PATH, "/proc/sys/net/ipv4/ip_forward").
 
+%% --- Owner table helpers ---
+
+-spec nat_table() -> binary().
+nat_table() ->
+    ?EK_NFT_TABLE_CT.
+
+-spec forward_table() -> binary().
+forward_table() ->
+    ?EK_NFT_TABLE_ZONE.
+
+%% Build the setup batch as one atomic list of msg-funs. Pure
+%% function; isolates the table layout decision from the
+%% gen_server send so tests can inspect the batch without a live
+%% nfnl_server.
+%%
+%% Layout invariants:
+%% - Forward table is always added (idempotent).
+%% - NAT table is added only when it differs from the forward
+%%   table.
+%% - Forward chain + established-accept land in forward table.
+%% - postrouting/prerouting/output (NAT) land in NAT table.
+%% - Extra (masq/loopback rules from ADR-pre work) are appended at
+%%   the end so the kernel sees them in one transaction.
+-spec build_setup_msgs(binary(), binary(), [fun()]) -> [fun()].
+build_setup_msgs(FwdTable, NatTable, Extra) when is_list(Extra) ->
+    TableMsgs =
+        case NatTable of
+            FwdTable ->
+                [fun(S) -> nft_table:add(?FAMILY, FwdTable, S) end];
+            _ ->
+                [fun(S) -> nft_table:add(?FAMILY, FwdTable, S) end,
+                 fun(S) -> nft_table:add(?FAMILY, NatTable, S) end]
+        end,
+    FwdMsgs = [
+        fun(S) -> nft_chain:add(?FAMILY, #{
+            table    => FwdTable,
+            name     => ?FORWARD_CHAIN,
+            hook     => forward,
+            type     => filter,
+            priority => 0,
+            policy   => drop
+        }, S) end,
+        nft_encode:rule_fun(inet, FwdTable, ?FORWARD_CHAIN,
+            nft_rules:ct_established_accept())
+    ],
+    NatMsgs = [
+        fun(S) -> nft_chain:add(?FAMILY, #{
+            table    => NatTable,
+            name     => ?POSTROUTING_CHAIN,
+            hook     => postrouting,
+            type     => nat,
+            priority => 100,
+            policy   => accept
+        }, S) end,
+        fun(S) -> nft_chain:add(?FAMILY, #{
+            table    => NatTable,
+            name     => ?PREROUTING_CHAIN,
+            hook     => prerouting,
+            type     => nat,
+            priority => -100,
+            policy   => accept
+        }, S) end,
+        fun(S) -> nft_chain:add(?FAMILY, #{
+            table    => NatTable,
+            name     => ?OUTPUT_CHAIN,
+            hook     => output,
+            type     => nat,
+            priority => -100,
+            policy   => accept
+        }, S) end
+    ],
+    TableMsgs ++ FwdMsgs ++ NatMsgs ++ Extra.
+
 %%====================================================================
 %% Public API
 %%====================================================================
 
 -doc """
-Create the erlkoenig_ct table with forward, postrouting, and
-prerouting chains.
+Create the table(s) this module owns and install their base
+chains. Sent to the kernel as one atomic netlink batch so a
+partial failure cannot leave half a layout installed.
 
-- forward: policy drop, per-container jump rules
-- postrouting: masquerade for internet access
-- prerouting: DNAT for port-forwarding
+`erlkoenig_ct` is added alongside the forward table and the NAT
+chains live there:
+
+  * forward (filter, policy drop, in `forward_table()`) — per-container jump rules
+  * postrouting (nat, srcnat, in `nat_table()`) — masquerade for container egress
+  * prerouting (nat, dstnat, in `nat_table()`) — DNAT for port-forwarding
+  * output (nat, dstnat, in `nat_table()`) — host-locally-generated DNAT
+    (note: §10.6 §4.1 deviation — decision deferred)
 
 Also enables ip_forward so the kernel routes between interfaces.
 """.
@@ -83,63 +182,20 @@ setup_table() ->
                            "will not work",
                            [?IP_FORWARD_PATH, IpFwdReason])
     end,
-    nfnl_server:apply_msgs(?SERVER, [
-        fun(S) -> nft_table:add(?FAMILY, ?TABLE, S) end,
-
-        %% Forward chain: per-container isolation
-        fun(S) -> nft_chain:add(?FAMILY, #{
-            table    => ?TABLE,
-            name     => ?FORWARD_CHAIN,
-            hook     => forward,
-            type     => filter,
-            priority => 0,
-            policy   => drop
-        }, S) end,
-
-        %% Established connections in forward chain (before per-container rules)
-        nft_encode:rule_fun(inet, ?TABLE, ?FORWARD_CHAIN,
-            nft_rules:ct_established_accept()),
-
-        %% Postrouting chain: masquerade for internet access
-        fun(S) -> nft_chain:add(?FAMILY, #{
-            table    => ?TABLE,
-            name     => ?POSTROUTING_CHAIN,
-            hook     => postrouting,
-            type     => nat,
-            priority => 100,
-            policy   => accept
-        }, S) end,
-
-        %% Prerouting chain: DNAT for port-forwarding (external traffic)
-        fun(S) -> nft_chain:add(?FAMILY, #{
-            table    => ?TABLE,
-            name     => ?PREROUTING_CHAIN,
-            hook     => prerouting,
-            type     => nat,
-            priority => -100,
-            policy   => accept
-        }, S) end,
-
-        %% Output chain: DNAT for locally-generated traffic (host -> container)
-        fun(S) -> nft_chain:add(?FAMILY, #{
-            table    => ?TABLE,
-            name     => ?OUTPUT_CHAIN,
-            hook     => output,
-            type     => nat,
-            priority => -100,
-            policy   => accept
-        }, S) end
-    ]).
+    nfnl_server:apply_msgs(?SERVER, build_setup_msgs(forward_table(), nat_table(), [])).
 
 -doc """
-Create the shared `erlkoenig` nft table and its forward chain.
+Same atomic setup as `setup_table/0` but accepts a zone list for
+API shape compatibility. Tables and chains are identical to
+`setup_table/0`.
 
-Zones is a list of zone config maps (kept for API shape, even though
-IPVLAN-only zones do not need masquerade/route_localnet — see ADR-0020):
+Zones is a list of zone config maps (IPVLAN-only zones do not
+need masquerade/route_localnet — see ADR-0020):
   [#{subnet => {10,0,0,0}, netmask => 24, policy => allow_outbound}, ...]
 
-Policies `isolate` and `strict` add no additional rules; `allow_outbound`
-still reserves the hook for future per-zone egress rules.
+Policies `isolate` and `strict` add no additional rules;
+`allow_outbound` still reserves the hook for future per-zone
+egress rules.
 """.
 -spec setup_table([map()]) -> ok | {error, term()}.
 setup_table(Zones) when is_list(Zones) ->
@@ -150,77 +206,68 @@ setup_table(Zones) when is_list(Zones) ->
     %% ADR-0020: IPVLAN-only, no bridge masquerade/route_localnet needed.
     MasqRules = [],
     LoopbackRules = [],
-    nfnl_server:apply_msgs(?SERVER, [
-        fun(S) -> nft_table:add(?FAMILY, ?TABLE, S) end,
-
-        fun(S) -> nft_chain:add(?FAMILY, #{
-            table    => ?TABLE,
-            name     => ?FORWARD_CHAIN,
-            hook     => forward,
-            type     => filter,
-            priority => 0,
-            policy   => drop
-        }, S) end,
-
-        nft_encode:rule_fun(inet, ?TABLE, ?FORWARD_CHAIN,
-            nft_rules:ct_established_accept()),
-
-        fun(S) -> nft_chain:add(?FAMILY, #{
-            table    => ?TABLE,
-            name     => ?POSTROUTING_CHAIN,
-            hook     => postrouting,
-            type     => nat,
-            priority => 100,
-            policy   => accept
-        }, S) end
-    ] ++ MasqRules ++ LoopbackRules ++ [
-        fun(S) -> nft_chain:add(?FAMILY, #{
-            table    => ?TABLE,
-            name     => ?PREROUTING_CHAIN,
-            hook     => prerouting,
-            type     => nat,
-            priority => -100,
-            policy   => accept
-        }, S) end,
-
-        fun(S) -> nft_chain:add(?FAMILY, #{
-            table    => ?TABLE,
-            name     => ?OUTPUT_CHAIN,
-            hook     => output,
-            type     => nat,
-            priority => -100,
-            policy   => accept
-        }, S) end
-    ]).
+    Extra = MasqRules ++ LoopbackRules,
+    nfnl_server:apply_msgs(?SERVER,
+        build_setup_msgs(forward_table(), nat_table(), Extra)).
 
 
--doc "Delete the entire erlkoenig_ct table.".
+-doc """
+Delete the tables this module owns: the zone forward table and
+the dedicated NAT table `erlkoenig_ct`.
+""".
 -spec teardown_table() -> ok | {error, term()}.
 teardown_table() ->
-    nfnl_server:apply_msgs(?SERVER, [
-        fun(S) -> nft_delete:table(?FAMILY, ?TABLE, S) end
-    ]).
+    FwdTable = forward_table(),
+    NatTable = nat_table(),
+    Tables = case NatTable of
+        FwdTable -> [FwdTable];
+        _        -> [FwdTable, NatTable]
+    end,
+    %% Best-effort delete of every owned table — a missing table on
+    %% one side must not block the other. Aggregate the result so a
+    %% later success does not mask an earlier failure.
+    lists:foldl(
+        fun(Table, Acc) ->
+            Result = nfnl_server:apply_msgs(?SERVER, [
+                fun(S) -> nft_delete:table(?FAMILY, Table, S) end
+            ]),
+            case {Acc, Result} of
+                {ok, ok}            -> ok;
+                {ok, {error, _}}    -> Result;
+                {{error, _}, _}     -> Acc
+            end
+        end,
+        ok,
+        Tables
+    ).
 
 %% Flush own chains without deleting the table.
 %% Preserves chains/maps/sets from other subsystems (erlkoenig_config/DSL).
 flush_own_chains() ->
-    OwnChains = [?FORWARD_CHAIN, ?POSTROUTING_CHAIN, ?PREROUTING_CHAIN, ?OUTPUT_CHAIN],
-    %% Also flush per-container chains from ETS
+    FwdTable = forward_table(),
+    NatTable = nat_table(),
+    %% Filter chains live in the forward table; NAT chains live in
+    %% the NAT table.
+    FilterChains = [?FORWARD_CHAIN],
+    NatChains    = [?POSTROUTING_CHAIN, ?PREROUTING_CHAIN, ?OUTPUT_CHAIN],
+    %% Also flush per-container chains from ETS — they are filter
+    %% helpers that live with the forward chain.
     PerCtChains = case ets:info(erlkoenig_firewall_ports) of
         undefined -> [];
         _ ->
             [element(5, R) || R <- ets:tab2list(erlkoenig_firewall_ports),
                               is_tuple(R), tuple_size(R) =:= 5]
     end,
-    AllChains = OwnChains ++ PerCtChains,
-    lists:foreach(fun(CN) ->
+    Targets = [{FwdTable, CN} || CN <- FilterChains ++ PerCtChains]
+        ++ [{NatTable, CN} || CN <- NatChains],
+    lists:foreach(fun({Table, CN}) ->
         _ = nfnl_server:apply_msgs(?SERVER, [
-            fun(S) -> nft_delete:flush_chain(?FAMILY, ?TABLE, CN, S) end
+            fun(S) -> nft_delete:flush_chain(?FAMILY, Table, CN, S) end
         ]),
         _ = nfnl_server:apply_msgs(?SERVER, [
-            fun(S) -> nft_delete:chain(?FAMILY, ?TABLE, CN, S) end
+            fun(S) -> nft_delete:chain(?FAMILY, Table, CN, S) end
         ])
-    end, AllChains),
+    end, Targets),
     ok.
 
 -doc "Add firewall rules for a container (no port-forwarding).".
@@ -311,10 +358,11 @@ add_container(ContainerId, Ip, HostVeth, Ports, FirewallTerm, Name) ->
       ++ JumpMsgs ++ FwdInboundMsgs,
 
     %% DNAT rules in prerouting (external) + output (local) chains
+    NatTable = nat_table(),
     DnatMsgs = lists:append([
-        [nft_encode:rule_fun(inet, ?TABLE, ?PREROUTING_CHAIN,
+        [nft_encode:rule_fun(inet, NatTable, ?PREROUTING_CHAIN,
             nft_rules:tcp_dnat(HostPort, IpBin, ContainerPort)),
-         nft_encode:rule_fun(inet, ?TABLE, ?OUTPUT_CHAIN,
+         nft_encode:rule_fun(inet, NatTable, ?OUTPUT_CHAIN,
             nft_rules:tcp_dnat(HostPort, IpBin, ContainerPort))]
      || {HostPort, ContainerPort} <- Ports
     ]),
@@ -371,17 +419,21 @@ remove_container(ContainerId) ->
     Remaining = [R || R <- ets:tab2list(erlkoenig_firewall_ports),
                       is_tuple(R), tuple_size(R) =:= 5,
                       element(1, R) =/= ContainerId],
-    %% 1. Flush shared chains + container chain, then delete container chain
+    %% 1. Flush shared chains + container chain, then delete container chain.
+    %%    Forward + per-container chains live in forward_table, NAT
+    %%    chains in nat_table.
+    FwdTable = forward_table(),
+    NatTable = nat_table(),
     FlushMsgs = [
-        fun(S) -> nft_delete:flush_chain(?FAMILY, ?TABLE, ?FORWARD_CHAIN, S) end,
-        fun(S) -> nft_delete:flush_chain(?FAMILY, ?TABLE, ?PREROUTING_CHAIN, S) end,
-        fun(S) -> nft_delete:flush_chain(?FAMILY, ?TABLE, ?OUTPUT_CHAIN, S) end,
-        fun(S) -> nft_delete:flush_chain(?FAMILY, ?TABLE, Chain, S) end,
-        fun(S) -> nft_delete:chain(?FAMILY, ?TABLE, Chain, S) end
+        fun(S) -> nft_delete:flush_chain(?FAMILY, FwdTable, ?FORWARD_CHAIN, S) end,
+        fun(S) -> nft_delete:flush_chain(?FAMILY, NatTable, ?PREROUTING_CHAIN, S) end,
+        fun(S) -> nft_delete:flush_chain(?FAMILY, NatTable, ?OUTPUT_CHAIN, S) end,
+        fun(S) -> nft_delete:flush_chain(?FAMILY, FwdTable, Chain, S) end,
+        fun(S) -> nft_delete:chain(?FAMILY, FwdTable, Chain, S) end
     ],
     %% 2. Re-add base rules for shared chains
     BaseMsgs = [
-        nft_encode:rule_fun(inet, ?TABLE, ?FORWARD_CHAIN,
+        nft_encode:rule_fun(inet, FwdTable, ?FORWARD_CHAIN,
             nft_rules:ct_established_accept())
     ],
     %% 3. Re-add jump + DNAT rules for remaining containers
@@ -431,10 +483,11 @@ rebuild_shared_rules({_Id, Veth, Ip, Ports, Chain2}) ->
 -spec rebuild_port_forwards(inet:ip_address(), [{non_neg_integer(), non_neg_integer()}]) -> [fun()].
 rebuild_port_forwards(Ip, Ports) ->
     IpBin = ip_to_binary(Ip),
+    NatTable = nat_table(),
     lists:append([
-        [nft_encode:rule_fun(inet, ?TABLE, ?PREROUTING_CHAIN,
+        [nft_encode:rule_fun(inet, NatTable, ?PREROUTING_CHAIN,
             nft_rules:tcp_dnat(HP, IpBin, CP)),
-         nft_encode:rule_fun(inet, ?TABLE, ?OUTPUT_CHAIN,
+         nft_encode:rule_fun(inet, NatTable, ?OUTPUT_CHAIN,
             nft_rules:tcp_dnat(HP, IpBin, CP))]
      || {HP, CP} <- Ports
     ]).
@@ -566,12 +619,40 @@ inject_before_verdict([Expr | Rest], CounterName, NflogGroup) ->
 -define(NFLOG_BASE_GROUP, 100).
 
 next_nflog_group() ->
+    ensure_ets(),
     try
         ets:update_counter(erlkoenig_firewall_ports, nflog_group_counter, 1)
     catch
         error:badarg ->
             ets:insert(erlkoenig_firewall_ports, {nflog_group_counter, ?NFLOG_BASE_GROUP}),
             ?NFLOG_BASE_GROUP
+    end.
+
+-doc """
+Return the NFLOG group reserved for the given zone, allocating one
+on first use. Idempotent across reloads — the second call for the
+same zone returns the same group, so the matching nflog receiver
+can be re-used via `erlkoenig_nft_nflog:ensure_started/1' instead
+of leaking a new gen_server per `apply_zone_chains/2' call.
+""".
+-spec nflog_group_for_zone(binary()) -> non_neg_integer().
+nflog_group_for_zone(ZoneName) when is_binary(ZoneName) ->
+    ensure_ets(),
+    Key = {zone_nflog, ZoneName},
+    case ets:lookup(erlkoenig_firewall_ports, Key) of
+        [{_, Group}] ->
+            Group;
+        [] ->
+            Group = next_nflog_group(),
+            case ets:insert_new(erlkoenig_firewall_ports, {Key, Group}) of
+                true ->
+                    Group;
+                false ->
+                    %% Concurrent caller won the race; their group wins.
+                    [{_, Existing}] =
+                        ets:lookup(erlkoenig_firewall_ports, Key),
+                    Existing
+            end
     end.
 
 -doc "Convert a single DSL rule atom/tuple to nft_rules expression list.".
@@ -718,8 +799,19 @@ set_type_atom(ipv6_addr) -> ipv6_addr.
 ensure_ets() ->
     case ets:whereis(erlkoenig_firewall_ports) of
         undefined ->
-            ets:new(erlkoenig_firewall_ports,
-                    [set, named_table, public, {read_concurrency, true}]);
+            try
+                ets:new(erlkoenig_firewall_ports,
+                        [set, named_table, public, {read_concurrency, true}]),
+                ok
+            catch
+                error:badarg ->
+                    %% Another process can win the named-table create
+                    %% race between whereis/1 and ets:new/2.
+                    case ets:whereis(erlkoenig_firewall_ports) of
+                        undefined -> error(badarg);
+                        _Tid -> ok
+                    end
+            end;
         _Tid ->
             ok
     end.
@@ -729,7 +821,8 @@ ensure_ets() ->
 %%====================================================================
 
 -doc """
-Apply zone-level network policy to the erlkoenig_ct forward chain.
+Apply zone-level network policy to the forward chain in
+`forward_table()`. This function does not write to the NAT table.
 
 Translates allow directives into nftables rules:
   dns              → allow UDP/TCP port 53 to gateway IP

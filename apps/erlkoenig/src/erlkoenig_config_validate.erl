@@ -122,16 +122,26 @@ replica_name(PodName, CtName, Idx) ->
 
 -spec validate_zones(list()) -> ok | {error, term()}.
 validate_zones([]) -> ok;
-validate_zones([#{name := _, containers := Cts} | Rest]) when is_list(Cts) ->
-    case validate_containers(Cts) of
-        ok -> validate_zones(Rest);
-        Err -> Err
-    end;
-validate_zones([#{name := _, deployments := Deps} | Rest]) when is_list(Deps) ->
-    %% New format: zone with pod deployments (containers come from pods)
-    validate_zones(Rest);
+validate_zones([#{name := Name, deployments := _} | _]) ->
+    %% Legacy zone-level `deployments' field (replicas attached to a
+    %% zone) is refused post-6k. The current DSL puts each container
+    %% in a pod with its own `zone:` and inline `replicas:'.
+    {error, {legacy_zone_shape_refused,
+             #{zone => Name, field => deployments,
+               hint => <<"zones no longer carry `deployments`; declare "
+                         "containers inside a pod with inline `zone:` "
+                         "and `replicas:` per the current DSL">>}}};
+validate_zones([#{name := Name, containers := _} | _]) ->
+    %% Legacy zone-level `containers' field is refused post-6k. The
+    %% current DSL routes each container through a pod; raw zone-
+    %% level container lists were the pre-pod shape.
+    {error, {legacy_zone_shape_refused,
+             #{zone => Name, field => containers,
+               hint => <<"zones no longer carry `containers`; declare "
+                         "containers inside a pod with `zone:` set on "
+                         "the container">>}}};
 validate_zones([#{name := _} | Rest]) ->
-    %% Zone with no containers and no deployments (isolated or chains-only)
+    %% Zone with no containers/deployments (isolated or chains-only).
     validate_zones(Rest);
 validate_zones([Bad | _]) ->
     {error, {invalid_zone, Bad}}.

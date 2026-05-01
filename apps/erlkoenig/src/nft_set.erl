@@ -211,7 +211,7 @@ Used for jhash loadbalancing: hash result (integer) → container IP.
 
 Example:
     Msg = nft_set:add_data_map(1, #{
-        table     => <<"erlkoenig">>,
+        table     => <<"erlkoenig_ct">>,
         name      => <<"__lb_web_nginx">>,
         key_type  => 0,       %% integer (NFT_TYPE_UNKNOWN works for plain u32)
         key_len   => 4,       %% u32
@@ -324,7 +324,7 @@ of individual rules with a single O(1) lookup.
 
 Example:
     Msg = nft_set:add_concat_vmap(1, #{
-        table  => <<"erlkoenig">>,
+        table  => <<"erlkoenig_zone">>,
         name   => <<"fwd_policy">>,
         fields => [ipv4_addr, ipv4_addr, inet_service],
         id     => 50

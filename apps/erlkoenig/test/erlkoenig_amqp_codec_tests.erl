@@ -59,6 +59,17 @@ capability_unmet_dns_test() ->
     ?assertEqual(<<"dns.local">>, maps:get(<<"capability">>, Payload)),
     ?assertEqual(<<"no_resolv_conf">>, maps:get(<<"action">>, Payload)).
 
+ct_guard_unban_failed_test() ->
+    {ok, Key, Payload} =
+        erlkoenig_amqp_codec:encode_payload(
+          {ct_guard_unban_failed,
+           #{ip => <<10, 0, 0, 7>>,
+             code => 'EK_THREAT_KERNEL_UNBAN_REJECTED'}}),
+    ?assertEqual(<<"guard.threat.unban_failed">>, Key),
+    ?assertEqual(<<"10.0.0.7">>, maps:get(<<"ip">>, Payload)),
+    ?assertEqual(<<"EK_THREAT_KERNEL_UNBAN_REJECTED">>,
+                 maps:get(<<"code">>, Payload)).
+
 %% Sanity: the full encode/1 path (envelope + JSON) wraps these
 %% correctly. We just check it produces an iolist that decodes back
 %% to a map containing our routing key — anything else means the

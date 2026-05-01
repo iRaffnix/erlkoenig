@@ -21,7 +21,8 @@ Shared configuration utilities.
 Locates the firewall.term config file using the search order:
   1. $ERLKOENIG_CONFIG_DIR/firewall.term (explicit override)
   2. etc/firewall.term (relative to CWD — works for release and dev)
-  3. /opt/erlkoenig_nft/etc/firewall.term (installed release)
+  3. /etc/erlkoenig/firewall.term (installer/operator config)
+  4. /opt/erlkoenig_nft/etc/firewall.term (legacy installed release)
 """.
 
 -export([config_path/0]).
@@ -33,6 +34,7 @@ config_path() ->
             false ->
                 [
                     "etc/firewall.term",
+                    "/etc/erlkoenig/firewall.term",
                     "/opt/erlkoenig_nft/etc/firewall.term"
                 ];
             Dir ->

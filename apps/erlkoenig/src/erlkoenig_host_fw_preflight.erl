@@ -9,8 +9,9 @@
 %%% the operator passed an explicit override.
 %%%
 %%% Scope (v1, intentionally narrow):
-%%%   - Only `nft_tables' with name `<<"host">>' and a chain on
-%%%     hook=input with policy=drop is considered.
+%%%   - Only the host-owner table (`<<"erlkoenig_host">>') and a chain
+%%%     on hook=input with policy=drop is considered. Legacy raw table
+%%%     names are rejected later by the nft table-name validator.
 %%%   - Only `tcp_dport' accept-rules count toward the SSH whitelist.
 %%%     Source-IP allowlists (`ip_saddr') are out of scope: this is
 %%%     glasbox-friendly (operator must declare the port explicitly)
@@ -107,8 +108,8 @@ host_table([]) ->
     none;
 host_table([T | Rest]) when is_map(T) ->
     case maps:get(name, T, undefined) of
-        <<"host">> -> {ok, T};
-        _          -> host_table(Rest)
+        <<"erlkoenig_host">> -> {ok, T};
+        _                    -> host_table(Rest)
     end;
 host_table([_ | Rest]) ->
     host_table(Rest).

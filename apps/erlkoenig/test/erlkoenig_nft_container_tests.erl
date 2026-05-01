@@ -18,6 +18,7 @@
 
 -module(erlkoenig_nft_container_tests).
 
+-include("nft_constants.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
 %%%===================================================================
@@ -186,7 +187,9 @@ build_batch_test_() ->
      {"single chain with one rule", fun t_chain_one_rule/0},
      {"multiple chains in one batch", fun t_multi_chain/0},
      {"default table name is ct_container", fun t_default_table_name/0},
+     {"table field is honoured by build_batch/1", fun t_table_field_name/0},
      {"custom table name is honoured", fun t_custom_table_name/0},
+     {"batch atomically replaces table before adding chains", fun t_batch_replaces_table/0},
      {"combined match + protocol rule compiles", fun t_combined_match/0},
      {"unknown key in rule opts propagates", fun t_build_batch_propagates_unknown_key/0},
      {"replica_ips in rule opts propagates", fun t_build_batch_propagates_replica_ips/0}].
@@ -237,11 +240,28 @@ t_default_table_name() ->
     Batch = erlkoenig_nft_container:build_batch(#{chains => []}),
     ?assertNotEqual(nomatch, binary:match(Batch, <<"ct_container">>)).
 
+t_table_field_name() ->
+    Batch = erlkoenig_nft_container:build_batch(
+        #{table => <<"ct_api_fw">>, chains => []}),
+    ?assertNotEqual(nomatch, binary:match(Batch, <<"ct_api_fw">>)),
+    ?assertEqual(nomatch, binary:match(Batch, <<"ct_container">>)).
+
 t_custom_table_name() ->
     Batch = erlkoenig_nft_container:build_batch(#{chains => []},
                                                 <<"ct_api_fw">>),
     ?assertNotEqual(nomatch, binary:match(Batch, <<"ct_api_fw">>)),
     ?assertEqual(nomatch, binary:match(Batch, <<"ct_container">>)).
+
+t_batch_replaces_table() ->
+    Batch = erlkoenig_nft_container:build_batch(#{chains => []}, <<"ct_api_fw">>),
+    Types = nft_msg_types(Batch),
+    ?assertEqual([
+        ?NFNL_MSG_BATCH_BEGIN,
+        nft_type(?NFT_MSG_NEWTABLE),
+        nft_type(?NFT_MSG_DELTABLE),
+        nft_type(?NFT_MSG_NEWTABLE),
+        ?NFNL_MSG_BATCH_END
+    ], Types).
 
 t_combined_match() ->
     %% Regression guard for the compile_generic_special Co-Match bug
@@ -281,3 +301,21 @@ t_build_batch_propagates_replica_ips() ->
                                 #{ip_saddr => {replica_ips, <<"p">>, <<"c">>}}}]}]},
     ?assertError({unresolvable_replica_ips_in_container_nft, _},
                  erlkoenig_nft_container:build_batch(Config)).
+
+nft_type(MsgType) ->
+    (?NFNL_SUBSYS_NFTABLES bsl 8) bor MsgType.
+
+nft_msg_types(Bin) ->
+    nft_msg_types(Bin, []).
+
+nft_msg_types(<<>>, Acc) ->
+    lists:reverse(Acc);
+nft_msg_types(<<Len:32/little, Type:16/little, _Flags:16/little,
+                _Seq:32/little, _Pid:32/little, _Rest/binary>> = Bin, Acc)
+  when Len >= 16, byte_size(Bin) >= Len ->
+    Next = align4(Len),
+    <<_Msg:Next/binary, Tail/binary>> = Bin,
+    nft_msg_types(Tail, [Type | Acc]).
+
+align4(N) ->
+    (N + 3) band bnot 3.

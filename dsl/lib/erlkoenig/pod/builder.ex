@@ -20,16 +20,17 @@ defmodule Erlkoenig.Pod.Builder do
   containers that belong together.
 
   A pod has no runtime effect beyond grouping. Each `container` inside
-  declares its own deployment: `zone:` (which IPVLAN zone it runs in)
-  and `replicas:` (how many instances). There is no separate `attach`
-  step — the container tells the compiler where and how many.
+  declares its own deployment: `zone:` (which IPVLAN zone it runs in).
+  Multiple instances should be declared explicitly with `for_each` in
+  the DSL. There is no separate `attach`
+  step — the container tells the compiler where it runs.
 
   ## Structure
 
       pod "three_tier", strategy: :one_for_one do
         container "nginx",
           binary: "/opt/nginx", args: ["8443"],
-          zone: "containers", replicas: 3,
+          zone: "containers",
           restart: :permanent do
           nft do
             output do
@@ -41,13 +42,13 @@ defmodule Erlkoenig.Pod.Builder do
 
         container "api",
           binary: "/opt/api", args: ["4000"],
-          zone: "containers", replicas: 1,
+          zone: "containers",
           restart: :permanent
       end
 
   ## Required vs. optional
 
-  - **Required** on `container`: `binary:`, `zone:`, `replicas:`, `restart:`
+  - **Required** on `container`: `binary:`, `zone:`, `restart:`
   - **Required** on `pod`: `strategy:`
   - **Optional** (with documented defaults): `args: []`, `limits: %{}`,
     `uid: 65534`, `gid: 65534`, `seccomp: :default`, `caps: []`
@@ -90,7 +91,7 @@ defmodule Erlkoenig.Pod.Builder do
   def begin_container(%__MODULE__{} = pod, name, opts) when is_binary(name) do
     binary  = require_opt!(opts, :binary, name, "path to the binary")
     zone    = require_opt!(opts, :zone, name, "IPVLAN zone name")
-    replicas = require_opt!(opts, :replicas, name, "positive integer")
+    replicas = Keyword.get(opts, :replicas, 1)
     restart  = require_opt!(opts, :restart, name,
                             "one of #{inspect(@valid_restart_policies)}")
 
@@ -393,12 +394,19 @@ defmodule Erlkoenig.Pod.Builder do
   end
 
   # --- Per-container nft (SPEC-EK-023) ---
+  #
+  # Owner model (SPEC-NFT-OWNERSHIP-SPLIT §7, phase 6e.0.b):
+  # the container-local nft block carries `owner: :in_container`
+  # at the top of the block IR and denormalized on each chain.
+  # Container nft is netns-local — no layout-bridge use, no fixed
+  # host table name — so the owner tag is a pure Glasbox/audit
+  # signal, not a routing decision.
 
   def begin_nft(%__MODULE__{current_ct: nil}) do
     raise CompileError, description: "nft block must be inside a container"
   end
   def begin_nft(%__MODULE__{} = pod) do
-    %{pod | current_nft: %{chains: []}, nft_rules_acc: []}
+    %{pod | current_nft: %{owner: :in_container, chains: []}, nft_rules_acc: []}
   end
 
   def end_nft(%__MODULE__{current_nft: nil} = pod), do: pod
@@ -414,6 +422,7 @@ defmodule Erlkoenig.Pod.Builder do
     policy = Keyword.get(opts, :policy, :accept)
     chain = %{
       name: Atom.to_string(hook),
+      owner: :in_container,
       hook: hook,
       type: :filter,
       priority: 0,

@@ -53,7 +53,7 @@ defmodule Erlkoenig.TutorialShapeTest do
 
     test "emits host nft table with input_drop counter + input chain", %{config: c} do
       assert [table] = c.nft_tables
-      assert table.name == "host"
+      assert table.name == "erlkoenig_host"
       assert table.family == :inet
       assert "input_drop" in table.counters
       chain_names = Enum.map(table.chains, & &1.name)

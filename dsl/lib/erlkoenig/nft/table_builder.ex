@@ -8,10 +8,22 @@ defmodule Erlkoenig.Nft.TableBuilder do
   Accumulates nft table definitions: counters, base_chains, chains.
 
   A table maps 1:1 to an nf_tables table. One block per table name.
+
+  The `:owner` field is the single authoritative writer of ownership
+  per Spec SPEC-NFT-OWNERSHIP-SPLIT §7. It is set by the enclosing
+  block macro (`nft_host` / `nft_zone` / `nft_ct` /
+  `nft_in_container`), and the validator
+  enforces that every chain in the table carries the same owner.
+  Chain / set / counter / map / vmap / flowtable constructors do
+  not accept an owner argument — owner is copied during the
+  finalization pass.
   """
+
+  @valid_owners [:host, :zone, :ct, :in_container]
 
   defstruct family: :inet,
             name: nil,
+            owner: nil,
             counters: [],
             sets: [],
             maps: [],
@@ -19,16 +31,56 @@ defmodule Erlkoenig.Nft.TableBuilder do
             flowtables: [],
             chains: []
 
-  def new(family, name) do
-    %__MODULE__{family: family, name: name}
+  def new(family, name, opts \\ []) do
+    owner =
+      Keyword.get_lazy(opts, :owner, fn ->
+        raise CompileError,
+          description:
+            "nft table #{inspect(name)} must declare an explicit owner " <>
+              "(one of #{inspect(@valid_owners)}). Use nft_host / nft_zone / " <>
+              "nft_ct / nft_in_container instead of constructing raw tables."
+      end)
+
+    unless owner in @valid_owners do
+      raise CompileError,
+        description:
+          "nft table #{inspect(name)}: invalid owner #{inspect(owner)} — " <>
+            "must be one of #{inspect(@valid_owners)}"
+    end
+
+    %__MODULE__{family: family, name: name, owner: owner}
   end
+
+  @doc "List of valid owner atoms (Spec §7)."
+  def valid_owners, do: @valid_owners
 
   def add_counter(%__MODULE__{counters: cs} = t, name) do
     %{t | counters: cs ++ [name]}
   end
 
-  def add_chain(%__MODULE__{chains: cs} = t, chain) do
-    %{t | chains: cs ++ [chain]}
+  def add_chain(%__MODULE__{chains: cs, owner: owner} = t, chain) do
+    # Finalization pass: stamp the table's owner onto the chain.
+    # Chains are constructed without an owner argument; this is
+    # the only writer (per Spec §7 owner-model contract). If a
+    # caller hands in a chain whose owner is already set and
+    # differs from the table's owner, we surface that loud — that
+    # is the "second source of truth" failure mode the contract
+    # is meant to make impossible.
+    case Map.get(chain, :owner) do
+      nil ->
+        %{t | chains: cs ++ [%{chain | owner: owner}]}
+
+      ^owner ->
+        %{t | chains: cs ++ [chain]}
+
+      other ->
+        raise CompileError,
+          description:
+            "nft_table #{inspect(t.name)} (owner #{inspect(owner)}): chain " <>
+              "#{inspect(chain.name)} arrived with owner #{inspect(other)}. " <>
+              "Chains must not be constructed with an explicit owner — " <>
+              "owner is copied from the enclosing block (Spec §7)."
+    end
   end
 
   def add_set(%__MODULE__{sets: ss} = t, name, type, opts \\ []) do
@@ -78,9 +130,11 @@ defmodule Erlkoenig.Nft.TableBuilder do
   """
   def add_cidr_set(%__MODULE__{} = t, name, cidrs) do
     validate_cidr_list!(name, cidrs)
+
     add_set(t, name, :ipv4_addr,
       flags: [:interval],
-      elements: cidrs)
+      elements: cidrs
+    )
   end
 
   defp validate_cidr_list!(name, []) do
@@ -110,8 +164,7 @@ defmodule Erlkoenig.Nft.TableBuilder do
 
   defp validate_cidr_list!(name, _not_list) do
     raise CompileError,
-      description:
-        "nft_cidr_set #{inspect(name)}: second argument must be a list of strings"
+      description: "nft_cidr_set #{inspect(name)}: second argument must be a list of strings"
   end
 
   def add_map(%__MODULE__{maps: ms} = t, name, key_type, data_type, entries) do
@@ -124,10 +177,15 @@ defmodule Erlkoenig.Nft.TableBuilder do
   # values the operator passed.
   def normalize_map_entries({:replica_ips, _pod, _ct} = ref), do: ref
   def normalize_map_entries([]), do: []
+
   def normalize_map_entries(list) when is_list(list) do
     cond do
-      Keyword.keyword?(list) -> Keyword.get(list, :entries, [])
-      Enum.all?(list, &match?({_, _}, &1)) -> list
+      Keyword.keyword?(list) ->
+        Keyword.get(list, :entries, [])
+
+      Enum.all?(list, &match?({_, _}, &1)) ->
+        list
+
       true ->
         raise CompileError,
           description:
@@ -136,10 +194,10 @@ defmodule Erlkoenig.Nft.TableBuilder do
               "`{:replica_ips, pod, ct}`; got #{inspect(list)}"
     end
   end
+
   def normalize_map_entries(other) do
     raise CompileError,
-      description:
-        "nft_map entries: unexpected shape #{inspect(other)}"
+      description: "nft_map entries: unexpected shape #{inspect(other)}"
   end
 
   def add_vmap(%__MODULE__{vmaps: vs} = t, name, type, entries) do
@@ -167,6 +225,7 @@ defmodule Erlkoenig.Nft.TableBuilder do
       priority: priority,
       devices: devices
     }
+
     %{t | flowtables: fts ++ [ft]}
   end
 
@@ -176,8 +235,39 @@ defmodule Erlkoenig.Nft.TableBuilder do
         description: "nft_table #{inspect(t.name)}: must have at least one chain"
     end
 
+    # Owner-model invariant (Spec §7): every chain's denormalized
+    # owner tag must match the table's authoritative owner. The
+    # only writer is `add_chain/2`, so a divergence at this point
+    # would be a downstream bug — but checking here keeps the
+    # invariant locally enforced and audit-visible at compile time.
+    Enum.each(t.chains, fn chain ->
+      case Map.get(chain, :owner) do
+        nil ->
+          raise CompileError,
+            description:
+              "nft_table #{inspect(t.name)} (owner #{inspect(t.owner)}): chain " <>
+                "#{inspect(chain.name)} has no owner tag. " <>
+                "This is a TableBuilder invariant failure (Spec §7)."
+
+        owner when owner == t.owner ->
+          :ok
+
+        other ->
+          raise CompileError,
+            description:
+              "nft_table #{inspect(t.name)} (owner #{inspect(t.owner)}): chain " <>
+                "#{inspect(chain.name)} carries divergent owner #{inspect(other)}. " <>
+                "Mixed ownership inside one table is a hard violation of " <>
+                "Spec §7 — if you need this, use a different block."
+      end
+    end)
+
     # Check chain name uniqueness
-    Erlkoenig.Validation.check_uniqueness(t.chains, :name, "chain names in nft_table #{inspect(t.name)}")
+    Erlkoenig.Validation.check_uniqueness(
+      t.chains,
+      :name,
+      "chain names in nft_table #{inspect(t.name)}"
+    )
 
     # Check name uniqueness across every named object in the table.
     # The kernel rejects a batch containing two NEWSET / NEWMAP / NEWFLOWTABLE
@@ -187,23 +277,36 @@ defmodule Erlkoenig.Nft.TableBuilder do
     # time and names the offender.
     ensure_unique_names!(t.counters, "counter names in nft_table #{inspect(t.name)}")
     ensure_unique_names!(set_names(t.sets), "set names in nft_table #{inspect(t.name)}")
-    ensure_unique_names!(Enum.map(t.maps, & &1.name),
-                         "map names in nft_table #{inspect(t.name)}")
-    ensure_unique_names!(Enum.map(t.vmaps, & &1.name),
-                         "vmap names in nft_table #{inspect(t.name)}")
-    ensure_unique_names!(Enum.map(t.flowtables, & &1.name),
-                         "flowtable names in nft_table #{inspect(t.name)}")
+
+    ensure_unique_names!(
+      Enum.map(t.maps, & &1.name),
+      "map names in nft_table #{inspect(t.name)}"
+    )
+
+    ensure_unique_names!(
+      Enum.map(t.vmaps, & &1.name),
+      "vmap names in nft_table #{inspect(t.name)}"
+    )
+
+    ensure_unique_names!(
+      Enum.map(t.flowtables, & &1.name),
+      "flowtable names in nft_table #{inspect(t.name)}"
+    )
 
     # Check counter references exist
     declared_counters = MapSet.new(t.counters)
     all_rules = Enum.flat_map(t.chains, & &1.rules)
+
     Enum.each(all_rules, fn {_action, opts} ->
       case Map.get(opts, :counter) do
-        nil -> :ok
+        nil ->
+          :ok
+
         name ->
           unless MapSet.member?(declared_counters, name) do
             raise CompileError,
-              description: "nft_table #{inspect(t.name)}: counter #{inspect(name)} referenced but not declared"
+              description:
+                "nft_table #{inspect(t.name)}: counter #{inspect(name)} referenced but not declared"
           end
       end
     end)
@@ -215,6 +318,26 @@ defmodule Erlkoenig.Nft.TableBuilder do
     # leaving the operator with an empty table and no error pointing
     # at the actual cause (see Bug #2, tutorial 03).
     declared_chains = MapSet.new(Enum.map(t.chains, & &1.name))
+
+    # Per Spec §7 (block-scoped jump resolution): a chain-rule jump/goto
+    # whose target is not a chain declared in *this same block* is a
+    # hard CompileError. Each TableBuilder is one block; same-owner
+    # different-block does not share visibility. The diagnostic names
+    # §4.4 because that is the wire-format reason — nft jumps cannot
+    # cross tables.
+    Enum.each(t.chains, fn chain ->
+      Enum.each(chain.rules, fn
+        {:jump, %{to: target}} ->
+          ensure_jump_target_in_block!(t, chain, :jump, target, declared_chains)
+
+        {:goto, %{to: target}} ->
+          ensure_jump_target_in_block!(t, chain, :goto, target, declared_chains)
+
+        _ ->
+          :ok
+      end)
+    end)
+
     Enum.each(t.vmaps, fn vmap ->
       Enum.each(vmap.entries, fn
         {_key, {:jump, chain}} ->
@@ -246,6 +369,28 @@ defmodule Erlkoenig.Nft.TableBuilder do
     :ok
   end
 
+  # Block-scoped jump-target resolver. Raises with §4.4 reference
+  # so the operator gets the wire-format reason, not the misleading
+  # "is not a defined chain" diagnostic the global pool would emit.
+  defp ensure_jump_target_in_block!(table, chain, kind, target, declared_chains) do
+    target_str = to_string(target)
+
+    unless MapSet.member?(declared_chains, target_str) do
+      raise CompileError,
+        description:
+          "nft_table #{inspect(table.name)} (owner #{inspect(table.owner)}): " <>
+            "chain #{inspect(chain.name)} has rule #{inspect(kind)} " <>
+            "target #{inspect(target_str)} which is not a chain in this block. " <>
+            "Jumps and gotos are block-scoped (Spec §7); they cannot cross " <>
+            "tables (nft wire format §4.4 — NFT_VERDICT_JUMP carries no " <>
+            "table reference). Declared chains in this block: " <>
+            inspect(MapSet.to_list(declared_chains)) <>
+            ". If the target lives in a different owner block, declare it " <>
+            "in this block instead — same-owner different-block does not " <>
+            "share visibility."
+    end
+  end
+
   # Check a flat list of names for duplicates and raise a named
   # CompileError. Used for collections whose entries are bare strings
   # (counters) or where the :name field has already been projected.
@@ -254,8 +399,7 @@ defmodule Erlkoenig.Nft.TableBuilder do
 
     if dupes != [] do
       raise CompileError,
-        description:
-          "duplicate #{context}: #{inspect(Enum.uniq(dupes))}"
+        description: "duplicate #{context}: #{inspect(Enum.uniq(dupes))}"
     end
 
     :ok
@@ -275,9 +419,11 @@ defmodule Erlkoenig.Nft.TableBuilder do
     base = %{
       family: t.family,
       name: t.name,
+      owner: t.owner,
       counters: t.counters,
-      chains: Enum.map(t.chains, &chain_to_term/1)
+      chains: Enum.map(t.chains, &chain_to_term(&1, t.owner))
     }
+
     base = if t.sets != [], do: Map.put(base, :sets, t.sets), else: base
     base = if t.maps != [], do: Map.put(base, :maps, t.maps), else: base
     base = if t.vmaps != [], do: Map.put(base, :vmaps, t.vmaps), else: base
@@ -285,21 +431,26 @@ defmodule Erlkoenig.Nft.TableBuilder do
     base
   end
 
-  defp chain_to_term(%{type: :base} = c) do
-    base = %{
+  # Per Spec §7 IR-scope rule: emit owner on the table and
+  # denormalize it into each chain (for audit/diagnostics).
+  # Sets/counters/maps/vmaps/flowtables keep their existing
+  # tuple/map shape — owner is fixed by the table context.
+  defp chain_to_term(%{type: :base} = c, owner) do
+    %{
       name: c.name,
+      owner: owner,
       hook: c.hook,
       type: c.chain_type,
       priority: c.priority,
       policy: c.policy,
       rules: c.rules
     }
-    base
   end
 
-  defp chain_to_term(c) do
+  defp chain_to_term(c, owner) do
     %{
       name: c.name,
+      owner: owner,
       rules: c.rules
     }
   end

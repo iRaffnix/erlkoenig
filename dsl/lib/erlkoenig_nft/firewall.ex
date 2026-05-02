@@ -26,6 +26,7 @@ defmodule ErlkoenigNft.Firewall do
         firewall "web" do
           counters [:ssh, :dropped]
           set "blocklist", :ipv4_addr, timeout: 3_600_000
+          ban_set ipv4: "blocklist"
 
           chain "inbound", hook: :input, policy: :drop do
             rule :accept, ct: :established
@@ -101,6 +102,12 @@ defmodule ErlkoenigNft.Firewall do
   defmacro counters(names) do
     quote do
       @fw_builder Builder.add_counters(@fw_builder, unquote(names))
+    end
+  end
+
+  defmacro ban_set(name) do
+    quote do
+      @fw_builder Builder.set_ban_set(@fw_builder, unquote(name))
     end
   end
 

@@ -33,9 +33,9 @@ defmodule Erlkoenig.Nft.DslTest do
   # TableBuilder — basic accumulation
   # ------------------------------------------------------------------
 
-  describe "TableBuilder.new/2" do
+  describe "TableBuilder.new/3" do
     test "creates inet-family table with given name" do
-      t = TableBuilder.new(:inet, "t_test")
+      t = TableBuilder.new(:inet, "t_test", owner: :host)
       assert t.family == :inet
       assert t.name == "t_test"
       assert t.counters == []
@@ -47,7 +47,7 @@ defmodule Erlkoenig.Nft.DslTest do
     end
 
     test "respects family override" do
-      t = TableBuilder.new(:ip, "t4")
+      t = TableBuilder.new(:ip, "t4", owner: :host)
       assert t.family == :ip
     end
   end
@@ -55,7 +55,7 @@ defmodule Erlkoenig.Nft.DslTest do
   describe "TableBuilder.add_counter/2" do
     test "appends counter names preserving order" do
       t =
-        TableBuilder.new(:inet, "t")
+        TableBuilder.new(:inet, "t", owner: :host)
         |> TableBuilder.add_counter("c1")
         |> TableBuilder.add_counter("c2")
         |> TableBuilder.add_counter("c3")
@@ -70,13 +70,13 @@ defmodule Erlkoenig.Nft.DslTest do
 
   describe "TableBuilder.add_set/4" do
     test "name+type only produces 2-tuple (no meta map)" do
-      t = TableBuilder.new(:inet, "t") |> TableBuilder.add_set("s", :ipv4_addr)
+      t = TableBuilder.new(:inet, "t", owner: :host) |> TableBuilder.add_set("s", :ipv4_addr)
       assert t.sets == [{"s", :ipv4_addr}]
     end
 
     test "flags: [...] gets folded into meta" do
       t =
-        TableBuilder.new(:inet, "t")
+        TableBuilder.new(:inet, "t", owner: :host)
         |> TableBuilder.add_set("s", :ipv4_addr, flags: [:interval])
 
       assert t.sets == [{"s", :ipv4_addr, %{flags: [:interval]}}]
@@ -84,7 +84,7 @@ defmodule Erlkoenig.Nft.DslTest do
 
     test "timeout: integer gets folded in" do
       t =
-        TableBuilder.new(:inet, "t")
+        TableBuilder.new(:inet, "t", owner: :host)
         |> TableBuilder.add_set("s", :inet_service, timeout: 600)
 
       assert t.sets == [{"s", :inet_service, %{timeout: 600}}]
@@ -96,7 +96,7 @@ defmodule Erlkoenig.Nft.DslTest do
       # set without timeout, not a compile error. Pin the behaviour
       # so a future tightening is a deliberate decision.
       t =
-        TableBuilder.new(:inet, "t")
+        TableBuilder.new(:inet, "t", owner: :host)
         |> TableBuilder.add_set("s", :inet_service, timeout: "not-an-int")
 
       assert t.sets == [{"s", :inet_service}]
@@ -104,7 +104,7 @@ defmodule Erlkoenig.Nft.DslTest do
 
     test "non-list flags is silently ignored" do
       t =
-        TableBuilder.new(:inet, "t")
+        TableBuilder.new(:inet, "t", owner: :host)
         |> TableBuilder.add_set("s", :ipv4_addr, flags: :interval)
 
       assert t.sets == [{"s", :ipv4_addr}]
@@ -112,7 +112,7 @@ defmodule Erlkoenig.Nft.DslTest do
 
     test "unknown option is ignored, not carried into meta" do
       t =
-        TableBuilder.new(:inet, "t")
+        TableBuilder.new(:inet, "t", owner: :host)
         |> TableBuilder.add_set("s", :ipv4_addr, foobar: true)
 
       assert t.sets == [{"s", :ipv4_addr}]
@@ -126,7 +126,7 @@ defmodule Erlkoenig.Nft.DslTest do
   describe "TableBuilder.add_cidr_set/3" do
     test "happy path with CIDR strings" do
       t =
-        TableBuilder.new(:inet, "t")
+        TableBuilder.new(:inet, "t", owner: :host)
         |> TableBuilder.add_cidr_set("allowed", ["10.0.0.0/8", "192.168.1.1"])
 
       assert [{"allowed", :ipv4_addr, meta}] = t.sets
@@ -136,27 +136,27 @@ defmodule Erlkoenig.Nft.DslTest do
 
     test "rejects empty list (would match nothing silently)" do
       assert_raise CompileError, ~r/must not be empty/, fn ->
-        TableBuilder.new(:inet, "t") |> TableBuilder.add_cidr_set("allowed", [])
+        TableBuilder.new(:inet, "t", owner: :host) |> TableBuilder.add_cidr_set("allowed", [])
       end
     end
 
     test "rejects non-string element" do
       assert_raise CompileError, ~r/each entry must be a string/, fn ->
-        TableBuilder.new(:inet, "t")
+        TableBuilder.new(:inet, "t", owner: :host)
         |> TableBuilder.add_cidr_set("allowed", ["10.0.0.1", {10, 0, 0, 2}])
       end
     end
 
     test "rejects malformed CIDR" do
       assert_raise CompileError, ~r/is not a valid IPv4 CIDR/, fn ->
-        TableBuilder.new(:inet, "t")
+        TableBuilder.new(:inet, "t", owner: :host)
         |> TableBuilder.add_cidr_set("allowed", ["not-an-ip"])
       end
     end
 
     test "rejects non-list second arg" do
       assert_raise CompileError, ~r/must be a list/, fn ->
-        TableBuilder.new(:inet, "t")
+        TableBuilder.new(:inet, "t", owner: :host)
         |> TableBuilder.add_cidr_set("allowed", "10.0.0.0/8")
       end
     end
@@ -215,7 +215,7 @@ defmodule Erlkoenig.Nft.DslTest do
   describe "TableBuilder.add_flowtable/3" do
     test "records name, devices and default priority" do
       t =
-        TableBuilder.new(:inet, "t")
+        TableBuilder.new(:inet, "t", owner: :host)
         |> TableBuilder.add_flowtable("ft", devices: ["eth0", "eth1"])
 
       assert [%{name: "ft", hook: :ingress, priority: 0, devices: ["eth0", "eth1"]}] =
@@ -224,7 +224,7 @@ defmodule Erlkoenig.Nft.DslTest do
 
     test "custom priority overrides default" do
       t =
-        TableBuilder.new(:inet, "t")
+        TableBuilder.new(:inet, "t", owner: :host)
         |> TableBuilder.add_flowtable("ft", devices: ["eth0"], priority: -100)
 
       assert [%{priority: -100}] = t.flowtables
@@ -232,13 +232,13 @@ defmodule Erlkoenig.Nft.DslTest do
 
     test "rejects missing devices" do
       assert_raise CompileError, ~r/at least one interface/, fn ->
-        TableBuilder.new(:inet, "t") |> TableBuilder.add_flowtable("ft", [])
+        TableBuilder.new(:inet, "t", owner: :host) |> TableBuilder.add_flowtable("ft", [])
       end
     end
 
     test "rejects explicit empty devices" do
       assert_raise CompileError, ~r/at least one interface/, fn ->
-        TableBuilder.new(:inet, "t")
+        TableBuilder.new(:inet, "t", owner: :host)
         |> TableBuilder.add_flowtable("ft", devices: [])
       end
     end
@@ -250,7 +250,7 @@ defmodule Erlkoenig.Nft.DslTest do
 
   describe "TableBuilder.validate!/1" do
     test "rejects table with zero chains" do
-      t = TableBuilder.new(:inet, "t")
+      t = TableBuilder.new(:inet, "t", owner: :host)
 
       assert_raise CompileError, ~r/must have at least one chain/, fn ->
         TableBuilder.validate!(t)
@@ -259,10 +259,12 @@ defmodule Erlkoenig.Nft.DslTest do
 
     test "rejects duplicate chain names" do
       c1 = ChainBuilder.new_base("same", hook: :input, type: :filter, priority: 0, policy: :drop)
-      c2 = ChainBuilder.new_base("same", hook: :output, type: :filter, priority: 0, policy: :accept)
+
+      c2 =
+        ChainBuilder.new_base("same", hook: :output, type: :filter, priority: 0, policy: :accept)
 
       t =
-        TableBuilder.new(:inet, "t")
+        TableBuilder.new(:inet, "t", owner: :host)
         |> TableBuilder.add_chain(c1)
         |> TableBuilder.add_chain(c2)
 
@@ -273,12 +275,10 @@ defmodule Erlkoenig.Nft.DslTest do
 
     test "rejects rule referencing undeclared counter" do
       c =
-        ChainBuilder.new_base("input",
-          hook: :input, type: :filter, priority: 0, policy: :drop
-        )
+        ChainBuilder.new_base("input", hook: :input, type: :filter, priority: 0, policy: :drop)
         |> ChainBuilder.add_rule(:accept, counter: "unknown_ctr")
 
-      t = TableBuilder.new(:inet, "t") |> TableBuilder.add_chain(c)
+      t = TableBuilder.new(:inet, "t", owner: :host) |> TableBuilder.add_chain(c)
 
       assert_raise CompileError, ~r/counter "unknown_ctr" referenced but not declared/, fn ->
         TableBuilder.validate!(t)
@@ -287,13 +287,11 @@ defmodule Erlkoenig.Nft.DslTest do
 
     test "accepts rule referencing declared counter" do
       c =
-        ChainBuilder.new_base("input",
-          hook: :input, type: :filter, priority: 0, policy: :drop
-        )
+        ChainBuilder.new_base("input", hook: :input, type: :filter, priority: 0, policy: :drop)
         |> ChainBuilder.add_rule(:accept, counter: "ok_ctr")
 
       t =
-        TableBuilder.new(:inet, "t")
+        TableBuilder.new(:inet, "t", owner: :host)
         |> TableBuilder.add_counter("ok_ctr")
         |> TableBuilder.add_chain(c)
 
@@ -308,7 +306,7 @@ defmodule Erlkoenig.Nft.DslTest do
       c = ChainBuilder.new_base("input", hook: :input, type: :filter, priority: 0, policy: :drop)
 
       t =
-        TableBuilder.new(:inet, "t")
+        TableBuilder.new(:inet, "t", owner: :host)
         |> TableBuilder.add_chain(c)
         |> TableBuilder.add_vmap("dispatch", :ipv4_addr, [
           {<<10, 0, 0, 1>>, {:jump, "never_declared"}}
@@ -323,7 +321,7 @@ defmodule Erlkoenig.Nft.DslTest do
       c = ChainBuilder.new_base("input", hook: :input, type: :filter, priority: 0, policy: :drop)
 
       t =
-        TableBuilder.new(:inet, "t")
+        TableBuilder.new(:inet, "t", owner: :host)
         |> TableBuilder.add_chain(c)
         |> TableBuilder.add_vmap("dispatch", :ipv4_addr, [
           {<<10, 0, 0, 1>>, {:goto, "missing"}}
@@ -335,11 +333,13 @@ defmodule Erlkoenig.Nft.DslTest do
     end
 
     test "accepts vmap :jump to declared chain" do
-      input = ChainBuilder.new_base("input", hook: :input, type: :filter, priority: 0, policy: :drop)
+      input =
+        ChainBuilder.new_base("input", hook: :input, type: :filter, priority: 0, policy: :drop)
+
       target = ChainBuilder.new_regular("target")
 
       t =
-        TableBuilder.new(:inet, "t")
+        TableBuilder.new(:inet, "t", owner: :host)
         |> TableBuilder.add_chain(input)
         |> TableBuilder.add_chain(target)
         |> TableBuilder.add_vmap("dispatch", :ipv4_addr, [
@@ -356,7 +356,7 @@ defmodule Erlkoenig.Nft.DslTest do
       c = ChainBuilder.new_base("input", hook: :input, type: :filter, priority: 0, policy: :drop)
 
       t =
-        TableBuilder.new(:inet, "t")
+        TableBuilder.new(:inet, "t", owner: :host)
         |> TableBuilder.add_chain(c)
         |> TableBuilder.add_set("dup", :ipv4_addr)
         |> TableBuilder.add_set("dup", :inet_service)
@@ -370,7 +370,7 @@ defmodule Erlkoenig.Nft.DslTest do
       c = ChainBuilder.new_base("input", hook: :input, type: :filter, priority: 0, policy: :drop)
 
       t =
-        TableBuilder.new(:inet, "t")
+        TableBuilder.new(:inet, "t", owner: :host)
         |> TableBuilder.add_chain(c)
         |> TableBuilder.add_map("dup", :ipv4_addr, :verdict, [])
         |> TableBuilder.add_map("dup", :ipv4_addr, :mark, [])
@@ -384,7 +384,7 @@ defmodule Erlkoenig.Nft.DslTest do
       c = ChainBuilder.new_base("input", hook: :input, type: :filter, priority: 0, policy: :drop)
 
       t =
-        TableBuilder.new(:inet, "t")
+        TableBuilder.new(:inet, "t", owner: :host)
         |> TableBuilder.add_chain(c)
         |> TableBuilder.add_vmap("dup", :ipv4_addr, [])
         |> TableBuilder.add_vmap("dup", :ipv4_addr, [])
@@ -398,7 +398,7 @@ defmodule Erlkoenig.Nft.DslTest do
       c = ChainBuilder.new_base("input", hook: :input, type: :filter, priority: 0, policy: :drop)
 
       t =
-        TableBuilder.new(:inet, "t")
+        TableBuilder.new(:inet, "t", owner: :host)
         |> TableBuilder.add_chain(c)
         |> TableBuilder.add_flowtable("dup", devices: ["eth0"])
         |> TableBuilder.add_flowtable("dup", devices: ["eth1"])
@@ -412,7 +412,7 @@ defmodule Erlkoenig.Nft.DslTest do
       c = ChainBuilder.new_base("input", hook: :input, type: :filter, priority: 0, policy: :drop)
 
       t =
-        TableBuilder.new(:inet, "t")
+        TableBuilder.new(:inet, "t", owner: :host)
         |> TableBuilder.add_chain(c)
         |> TableBuilder.add_counter("dup")
         |> TableBuilder.add_counter("dup")
@@ -426,10 +426,11 @@ defmodule Erlkoenig.Nft.DslTest do
       # A verdict-only entry like `{key, :accept}` is legal — the
       # validator only needs to chase chain references, not every
       # possible verdict. Plain verdicts should not trip it.
-      input = ChainBuilder.new_base("input", hook: :input, type: :filter, priority: 0, policy: :drop)
+      input =
+        ChainBuilder.new_base("input", hook: :input, type: :filter, priority: 0, policy: :drop)
 
       t =
-        TableBuilder.new(:inet, "t")
+        TableBuilder.new(:inet, "t", owner: :host)
         |> TableBuilder.add_chain(input)
         |> TableBuilder.add_vmap("dispatch", :ipv4_addr, [
           {<<10, 0, 0, 1>>, :accept}
@@ -444,13 +445,16 @@ defmodule Erlkoenig.Nft.DslTest do
   # ------------------------------------------------------------------
 
   describe "TableBuilder.to_term/1" do
-    test "minimal table emits family, name, counters, chains only" do
+    test "minimal table emits family, name, owner, counters, chains" do
       c = ChainBuilder.new_base("input", hook: :input, type: :filter, priority: 0, policy: :drop)
-      t = TableBuilder.new(:inet, "t") |> TableBuilder.add_chain(c)
+      t = TableBuilder.new(:inet, "t", owner: :host) |> TableBuilder.add_chain(c)
       term = TableBuilder.to_term(t)
 
       assert term.family == :inet
       assert term.name == "t"
+      # owner is the Spec §7 single source of truth and is always
+      # present on the table-IR.
+      assert term.owner == :host
       assert term.counters == []
       assert is_list(term.chains)
       # Absent features stay out of the map — not nil.
@@ -464,7 +468,7 @@ defmodule Erlkoenig.Nft.DslTest do
       c = ChainBuilder.new_base("input", hook: :input, type: :filter, priority: 0, policy: :drop)
 
       t =
-        TableBuilder.new(:inet, "t")
+        TableBuilder.new(:inet, "t", owner: :host)
         |> TableBuilder.add_chain(c)
         |> TableBuilder.add_set("s", :ipv4_addr)
         |> TableBuilder.add_map("m", :ipv4_addr, :verdict, [])
@@ -481,6 +485,244 @@ defmodule Erlkoenig.Nft.DslTest do
   end
 
   # ------------------------------------------------------------------
+  # TableBuilder owner model — Spec SPEC-NFT-OWNERSHIP-SPLIT §7
+  #
+  # The owner field is the single authoritative writer of ownership
+  # at the block level; chain owner is denormalized at finalization.
+  # These tests pin the contract so a future refactor cannot
+  # reintroduce a per-object owner override without breaking them.
+  # ------------------------------------------------------------------
+
+  describe "TableBuilder owner model (Spec §7)" do
+    test "owner is required" do
+      assert_raise CompileError, ~r/must declare an explicit owner/, fn ->
+        TableBuilder.new(:inet, "t")
+      end
+    end
+
+    test "explicit owner accepted (host/zone/ct/in_container)" do
+      for owner <- [:host, :zone, :ct, :in_container] do
+        t = TableBuilder.new(:inet, "t_#{owner}", owner: owner)
+        assert t.owner == owner
+      end
+    end
+
+    test "legacy owner is rejected" do
+      assert_raise CompileError, ~r/invalid owner :legacy/, fn ->
+        TableBuilder.new(:inet, "t", owner: :legacy)
+      end
+    end
+
+    test "invalid owner is rejected at compile time" do
+      assert_raise CompileError, ~r/invalid owner :nope/, fn ->
+        TableBuilder.new(:inet, "t", owner: :nope)
+      end
+    end
+
+    test "to_term emits :owner on the table" do
+      c = ChainBuilder.new_base("input", hook: :input, type: :filter, priority: 0, policy: :drop)
+      t = TableBuilder.new(:inet, "t_host", owner: :host) |> TableBuilder.add_chain(c)
+      term = TableBuilder.to_term(t)
+
+      assert term.owner == :host
+    end
+
+    test "to_term denormalizes :owner onto each chain (base + regular)" do
+      base =
+        ChainBuilder.new_base("forward",
+          hook: :forward,
+          type: :filter,
+          priority: 0,
+          policy: :drop
+        )
+
+      reg = ChainBuilder.new_regular("container_db")
+
+      t =
+        TableBuilder.new(:inet, "t_zone", owner: :zone)
+        |> TableBuilder.add_chain(base)
+        |> TableBuilder.add_chain(reg)
+
+      term = TableBuilder.to_term(t)
+
+      Enum.each(term.chains, fn c ->
+        assert c.owner == :zone,
+               "chain #{inspect(c.name)} did not inherit table owner"
+      end)
+    end
+
+    test "add_chain stamps owner from table onto a nil-owner chain" do
+      c = ChainBuilder.new_regular("c")
+      assert c.owner == nil
+
+      t = TableBuilder.new(:inet, "t", owner: :host) |> TableBuilder.add_chain(c)
+      [stored] = t.chains
+
+      assert stored.owner == :host
+    end
+
+    test "add_chain accepts a chain whose pre-set owner matches the table" do
+      c = %{ChainBuilder.new_regular("c") | owner: :host}
+      t = TableBuilder.new(:inet, "t", owner: :host) |> TableBuilder.add_chain(c)
+
+      [stored] = t.chains
+      assert stored.owner == :host
+    end
+
+    test "add_chain rejects a chain whose pre-set owner diverges from the table" do
+      # Constructing a divergent chain by hand simulates a downstream
+      # bug that tries to set owner outside the block (the "second
+      # source of truth" loophole §7 explicitly forbids).
+      c = %{ChainBuilder.new_regular("c") | owner: :zone}
+
+      assert_raise CompileError,
+                   ~r/owner is copied from the enclosing block/,
+                   fn ->
+                     TableBuilder.new(:inet, "t", owner: :host) |> TableBuilder.add_chain(c)
+                   end
+    end
+
+    test "validate! raises when a chain has no owner tag (invariant failure)" do
+      c =
+        ChainBuilder.new_base("input", hook: :input, type: :filter, priority: 0, policy: :drop)
+
+      # Bypass add_chain to simulate a downstream bug: stuff the
+      # chain into the struct without going through the finalizer.
+      t = %{TableBuilder.new(:inet, "t", owner: :host) | chains: [c]}
+
+      assert_raise CompileError, ~r/has no owner tag/, fn ->
+        TableBuilder.validate!(t)
+      end
+    end
+
+    test "validate! raises on mixed ownership inside one table" do
+      base = %{
+        ChainBuilder.new_base("a", hook: :input, type: :filter, priority: 0, policy: :drop)
+        | owner: :host
+      }
+
+      mismatched = %{ChainBuilder.new_regular("b") | owner: :zone}
+
+      t = %{TableBuilder.new(:inet, "t", owner: :host) | chains: [base, mismatched]}
+
+      assert_raise CompileError, ~r/divergent owner :zone/, fn ->
+        TableBuilder.validate!(t)
+      end
+    end
+  end
+
+  # ------------------------------------------------------------------
+  # TableBuilder block-scoped jump validation — Spec §7, §4.4
+  #
+  # Each block (= each TableBuilder instance) is its own chain pool.
+  # Jumps and gotos resolve strictly within that pool. Same owner
+  # in two different blocks does NOT share visibility.
+  # ------------------------------------------------------------------
+
+  describe "TableBuilder block-scoped jump validation (Spec §7, §4.4)" do
+    test "jump rule whose target lives in the same block passes" do
+      base =
+        ChainBuilder.new_base("forward",
+          hook: :forward,
+          type: :filter,
+          priority: 0,
+          policy: :drop
+        )
+        |> ChainBuilder.add_rule(:jump, to: "container_db")
+
+      reg = ChainBuilder.new_regular("container_db")
+
+      t =
+        TableBuilder.new(:inet, "t_zone", owner: :zone)
+        |> TableBuilder.add_chain(base)
+        |> TableBuilder.add_chain(reg)
+
+      assert TableBuilder.validate!(t) == :ok
+    end
+
+    test "jump rule whose target is missing raises with §4.4 reference" do
+      base =
+        ChainBuilder.new_base("forward",
+          hook: :forward,
+          type: :filter,
+          priority: 0,
+          policy: :drop
+        )
+        |> ChainBuilder.add_rule(:jump, to: "missing_chain")
+
+      t =
+        TableBuilder.new(:inet, "t_zone", owner: :zone)
+        |> TableBuilder.add_chain(base)
+
+      assert_raise CompileError, ~r/Spec §7.*§4\.4/s, fn ->
+        TableBuilder.validate!(t)
+      end
+    end
+
+    test "two separate blocks with same owner do not share visibility" do
+      # Block A declares container_db; Block B is a second nft_zone
+      # block that tries to jump to container_db. Per Spec §7 the
+      # blocks are independent — even though both carry owner :zone,
+      # block B's chain pool is empty of container_db.
+      block_a_target = ChainBuilder.new_regular("container_db")
+
+      block_a =
+        TableBuilder.new(:inet, "t_zone_a", owner: :zone)
+        |> TableBuilder.add_chain(block_a_target)
+
+      block_b_jumper =
+        ChainBuilder.new_base("forward",
+          hook: :forward,
+          type: :filter,
+          priority: 0,
+          policy: :drop
+        )
+        |> ChainBuilder.add_rule(:jump, to: "container_db")
+
+      block_b =
+        TableBuilder.new(:inet, "t_zone_b", owner: :zone)
+        |> TableBuilder.add_chain(block_b_jumper)
+
+      # Block A on its own is fine.
+      assert TableBuilder.validate!(block_a) == :ok
+
+      # Block B on its own fails — same-owner different-block does
+      # not share the pool. The diagnostic must spell that out so
+      # the operator does not duplicate the chain into the wrong
+      # block looking for "container_db not declared".
+      assert_raise CompileError,
+                   ~r/same-owner different-block does not share visibility/,
+                   fn ->
+                     TableBuilder.validate!(block_b)
+                   end
+    end
+
+    test "jump-rule diagnostic names the declared chains in this block" do
+      # Operator-friendliness: the message lists what IS in scope so
+      # a typo is obvious.
+      base =
+        ChainBuilder.new_base("forward",
+          hook: :forward,
+          type: :filter,
+          priority: 0,
+          policy: :drop
+        )
+        |> ChainBuilder.add_rule(:jump, to: "container_db_typo")
+
+      sibling = ChainBuilder.new_regular("container_db")
+
+      t =
+        TableBuilder.new(:inet, "t_zone", owner: :zone)
+        |> TableBuilder.add_chain(base)
+        |> TableBuilder.add_chain(sibling)
+
+      assert_raise CompileError, ~r/container_db/, fn ->
+        TableBuilder.validate!(t)
+      end
+    end
+  end
+
+  # ------------------------------------------------------------------
   # ChainBuilder.new_base — whitelist enforcement
   # ------------------------------------------------------------------
 
@@ -488,7 +730,10 @@ defmodule Erlkoenig.Nft.DslTest do
     test "accepts valid hook/type/priority/policy" do
       c =
         ChainBuilder.new_base("input",
-          hook: :input, type: :filter, priority: :filter, policy: :drop
+          hook: :input,
+          type: :filter,
+          priority: :filter,
+          policy: :drop
         )
 
       assert c.name == "input"
@@ -502,7 +747,10 @@ defmodule Erlkoenig.Nft.DslTest do
     test "accepts integer priority (netfilter numeric value)" do
       c =
         ChainBuilder.new_base("input",
-          hook: :input, type: :filter, priority: -200, policy: :accept
+          hook: :input,
+          type: :filter,
+          priority: -200,
+          policy: :accept
         )
 
       assert c.priority == -200
@@ -510,9 +758,7 @@ defmodule Erlkoenig.Nft.DslTest do
 
     test "rejects invalid hook" do
       assert_raise CompileError, ~r/invalid hook/, fn ->
-        ChainBuilder.new_base("c",
-          hook: :ingress_typo, type: :filter, priority: 0, policy: :drop
-        )
+        ChainBuilder.new_base("c", hook: :ingress_typo, type: :filter, priority: 0, policy: :drop)
       end
     end
 
@@ -524,17 +770,13 @@ defmodule Erlkoenig.Nft.DslTest do
 
     test "rejects non-integer non-atom priority" do
       assert_raise CompileError, ~r/invalid priority/, fn ->
-        ChainBuilder.new_base("c",
-          hook: :input, type: :filter, priority: "high", policy: :drop
-        )
+        ChainBuilder.new_base("c", hook: :input, type: :filter, priority: "high", policy: :drop)
       end
     end
 
     test "rejects invalid policy" do
       assert_raise CompileError, ~r/invalid policy/, fn ->
-        ChainBuilder.new_base("c",
-          hook: :input, type: :filter, priority: 0, policy: :queue
-        )
+        ChainBuilder.new_base("c", hook: :input, type: :filter, priority: 0, policy: :queue)
       end
     end
   end

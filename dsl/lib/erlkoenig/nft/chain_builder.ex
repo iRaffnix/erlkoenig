@@ -18,7 +18,11 @@ defmodule Erlkoenig.Nft.ChainBuilder do
             chain_type: nil,  # :filter, :nat, :route
             priority: nil,    # :filter, :dstnat, :srcnat, or integer
             policy: nil,      # :accept, :drop
-            rules: []
+            rules: [],
+            # Spec §7 owner-model: chains do not accept an owner
+            # argument from the operator. The TableBuilder stamps
+            # owner during the add_chain finalization pass.
+            owner: nil
 
   @valid_hooks [:input, :output, :forward, :prerouting, :postrouting]
   @valid_types [:filter, :nat, :route]

@@ -28,7 +28,7 @@ defmodule ErlkoenigNft.Firewall.Builder do
 
   def new(name, opts) when is_binary(name) and is_list(opts) do
     owner = Keyword.get(opts, :owner, false)
-    %{name: name, owner: owner, sets: [], vmaps: [], counters: [], quotas: [],
+    %{name: name, owner: owner, ban_set: nil, sets: [], vmaps: [], counters: [], quotas: [],
       chains: [], flowtables: [], meters: [], rules_acc: [],
       zones: [], zone_inputs: [], zone_forwards: [], zone_masquerades: []}
   end
@@ -98,6 +98,22 @@ defmodule ErlkoenigNft.Firewall.Builder do
 
   def add_counters(state, names) when is_list(names) do
     %{state | counters: state.counters ++ Enum.map(names, &to_string/1)}
+  end
+
+  def set_ban_set(state, name) when is_binary(name) do
+    %{state | ban_set: name}
+  end
+
+  def set_ban_set(state, opts) when is_list(opts) do
+    ban_set =
+      opts
+      |> Enum.map(fn
+        {family, name} when family in [:ipv4, :ipv6, :ipv4_addr, :ipv6_addr, :v4, :v6] ->
+          {family, to_string(name)}
+      end)
+      |> Map.new()
+
+    %{state | ban_set: ban_set}
   end
 
   # --- Quotas ---
@@ -398,6 +414,7 @@ defmodule ErlkoenigNft.Firewall.Builder do
     }
 
     base = if state.owner, do: Map.put(base, :owner, true), else: base
+    base = if state.ban_set, do: Map.put(base, :ban_set, state.ban_set), else: base
     base = if state.sets != [], do: Map.put(base, :sets, state.sets), else: base
     base = if state.vmaps != [], do: Map.put(base, :vmaps, state.vmaps), else: base
     base = if state.counters != [], do: Map.put(base, :counters, state.counters), else: base

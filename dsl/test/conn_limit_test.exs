@@ -106,7 +106,7 @@ defmodule Erlkoenig.ConnLimitTest do
     host do
       ipvlan "demo", parent: {:dummy, "ek_demo"}, subnet: {10, 70, 0, 0, 24}
 
-      nft_table :inet, "host" do
+      nft_host do
         base_chain "input",
           hook: :input,
           type: :filter,

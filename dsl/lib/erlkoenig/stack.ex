@@ -4,8 +4,10 @@ defmodule Erlkoenig.Stack do
 
   Topology and policy in one file, readable by network engineers. One
   `pod` is the **logical bracket** around all containers that belong
-  together; each container declares its own `zone:` and `replicas:`
-  inline — there is no separate `attach` step.
+  together; each container declares its own `zone:` inline. Multiple
+  instances are written with explicit `for_each` loops, so generated
+  names and per-instance options stay visible in the stack file.
+  There is no separate `attach` step.
 
       defmodule MyInfra do
         use Erlkoenig.Stack
@@ -13,7 +15,7 @@ defmodule Erlkoenig.Stack do
         host do
           ipvlan "dmz", parent: {:device, "eth0"}, subnet: {10, 0, 0, 0, 24}
 
-          nft_table :inet, "host" do
+          nft_host do
             base_chain "input", hook: :input, type: :filter,
               priority: :filter, policy: :drop do
               nft_rule :accept, ct_state: [:established, :related]
@@ -23,15 +25,16 @@ defmodule Erlkoenig.Stack do
         end
 
         pod "web", strategy: :one_for_one do
-          container "frontend",
-            binary: "/opt/frontend",
-            zone: "dmz",
-            replicas: 3,
-            restart: :permanent do
-            nft do
-              output do
-                nft_rule :accept, ct_state: [:established, :related]
-                nft_rule :drop
+          for_each i <- 0..2 do
+            container "frontend-\#{i}",
+              binary: "/opt/frontend",
+              zone: "dmz",
+              restart: :permanent do
+              nft do
+                output do
+                  nft_rule :accept, ct_state: [:established, :related]
+                  nft_rule :drop
+                end
               end
             end
           end
@@ -41,7 +44,7 @@ defmodule Erlkoenig.Stack do
   ## Required options (nothing implicit)
 
   - `pod`: `strategy:`
-  - `container`: `binary:`, `zone:`, `replicas:`, `restart:`
+  - `container`: `binary:`, `zone:`, `restart:`
 
   Other options have documented defaults.
 
@@ -86,11 +89,12 @@ defmodule Erlkoenig.Stack do
     pod_names = Enum.map(pods, & &1.name)
 
     # Build list of all container names (pod-qualified)
-    all_container_names = Enum.flat_map(pods, fn pod ->
-      Enum.map(pod.containers, fn ct ->
-        "#{pod.name}.#{ct.name}"
+    all_container_names =
+      Enum.flat_map(pods, fn pod ->
+        Enum.map(pod.containers, fn ct ->
+          "#{pod.name}.#{ct.name}"
+        end)
       end)
-    end)
 
     # Validate host
     if host do
@@ -99,13 +103,15 @@ defmodule Erlkoenig.Stack do
 
     # Validate each container's `zone:` references a declared ipvlan zone
     zone_names = if host, do: Enum.map(host.ipvlans, & &1.name), else: []
+
     Enum.each(pods, fn pod ->
       Enum.each(pod.containers, fn ct ->
         unless ct.zone in zone_names do
           raise CompileError,
-            description: "container #{inspect(pod.name)}/#{inspect(ct.name)}: " <>
-              "zone #{inspect(ct.zone)} is not declared by any `ipvlan`. " <>
-              "Known zones: #{inspect(zone_names)}"
+            description:
+              "container #{inspect(pod.name)}/#{inspect(ct.name)}: " <>
+                "zone #{inspect(ct.zone)} is not declared by any `ipvlan`. " <>
+                "Known zones: #{inspect(zone_names)}"
         end
       end)
     end)
@@ -114,24 +120,28 @@ defmodule Erlkoenig.Stack do
     pods_term = Enum.map(pods, &Erlkoenig.Pod.Builder.to_term/1)
 
     # Each ipvlan becomes a zone. Zones no longer carry `deployments` —
-    # each container inside a pod carries its own `zone:` + `replicas:`.
-    zones_term = if host do
-      Enum.map(host.ipvlans, fn ipv ->
-        zone = %{
-          name: ipv.name,
-          subnet: ipv.subnet,
-          netmask: ipv.netmask,
-          network: %{mode: :ipvlan, parent: ipv.parent,
-                     parent_type: ipv.parent_type,
-                     ipvlan_mode: ipv.ipvlan_mode},
-          pool: %{start: put_elem(ipv.subnet, 3, 2),
-                  stop: put_elem(ipv.subnet, 3, 254)}
-        }
-        if ipv.gateway, do: put_in(zone, [:network, :gateway], ipv.gateway), else: zone
-      end)
-    else
-      []
-    end
+    # each container inside a pod carries its own `zone:`.
+    zones_term =
+      if host do
+        Enum.map(host.ipvlans, fn ipv ->
+          zone = %{
+            name: ipv.name,
+            subnet: ipv.subnet,
+            netmask: ipv.netmask,
+            network: %{
+              mode: :ipvlan,
+              parent: ipv.parent,
+              parent_type: ipv.parent_type,
+              ipvlan_mode: ipv.ipvlan_mode
+            },
+            pool: %{start: put_elem(ipv.subnet, 3, 2), stop: put_elem(ipv.subnet, 3, 254)}
+          }
+
+          if ipv.gateway, do: put_in(zone, [:network, :gateway], ipv.gateway), else: zone
+        end)
+      else
+        []
+      end
 
     # Build base term (no legacy firewall — ADR-0015)
     term = %{}
@@ -226,8 +236,12 @@ defmodule Erlkoenig.Stack do
   """
   defmacro interface(name, opts \\ []) do
     quote do
-      var!(ek_host_builder) = Erlkoenig.Host.Builder.add_interface(
-        var!(ek_host_builder), unquote(name), unquote(opts))
+      var!(ek_host_builder) =
+        Erlkoenig.Host.Builder.add_interface(
+          var!(ek_host_builder),
+          unquote(name),
+          unquote(opts)
+        )
     end
   end
 
@@ -260,8 +274,12 @@ defmodule Erlkoenig.Stack do
   """
   defmacro ipvlan(name, opts) do
     quote do
-      var!(ek_host_builder) = Erlkoenig.Host.Builder.add_ipvlan(
-        var!(ek_host_builder), unquote(name), unquote(opts))
+      var!(ek_host_builder) =
+        Erlkoenig.Host.Builder.add_ipvlan(
+          var!(ek_host_builder),
+          unquote(name),
+          unquote(opts)
+        )
     end
   end
 
@@ -328,8 +346,9 @@ defmodule Erlkoenig.Stack do
   # Helpful error when strategy: is omitted (pod "X" do ... end)
   defmacro pod(name, do: _block) do
     raise CompileError,
-      description: "pod #{inspect(name)}: strategy: is required " <>
-        "(one of :one_for_one, :one_for_all, :rest_for_one)"
+      description:
+        "pod #{inspect(name)}: strategy: is required " <>
+          "(one of :one_for_one, :one_for_all, :rest_for_one)"
   end
 
   @doc """
@@ -348,13 +367,13 @@ defmodule Erlkoenig.Stack do
   |--------|------|-------------|
   | `binary:` | `string` | Absolute path to the executable to run |
   | `zone:` | `string` | IPVLAN zone name (must match an `ipvlan` declared on `host`) |
-  | `replicas:` | `pos_integer` | How many container instances to spawn |
   | `restart:` | `:permanent` \\| `:transient` \\| `:temporary` | OTP restart policy |
 
   ## Optional Options (with sensible defaults)
 
   | Option | Type | Default | Description |
   |--------|------|---------|-------------|
+  | `replicas:` | `pos_integer` | `1` | Legacy convenience. Prefer explicit `for_each` loops with one container per instance. |
   | `args:` | `[string]` | `[]` | Command-line arguments passed to the binary |
   | `limits:` | `map` | `%{}` | Resource limits: `memory` (bytes), `cpu` (1-100%), `pids` (max processes) |
   | `seccomp:` | `:default` \\| `:none` | `:default` | Seccomp profile for syscall filtering |
@@ -385,25 +404,31 @@ defmodule Erlkoenig.Stack do
       # Minimal
       container "echo",
         binary: "/opt/echo", args: ["8080"],
-        zone: "net", replicas: 1, restart: :permanent
+        zone: "net", restart: :permanent
 
       # With cgroup metrics publishing
-      container "nginx",
-        binary: "/opt/nginx", args: ["8443"],
-        zone: "dmz", replicas: 3, restart: :permanent do
-        publish interval: 2000 do
-          metric :memory
-          metric :cpu
-          metric :pids
+      for_each i <- 0..2 do
+        container "nginx-\#{i}",
+          binary: "/opt/nginx", args: ["8443"],
+          zone: "dmz", restart: :permanent do
+          publish interval: 2000 do
+            metric :memory
+            metric :cpu
+            metric :pids
+          end
         end
       end
   """
   defmacro container(name, opts) when is_list(opts) do
     quote do
-      var!(ek_pod_builder) = Erlkoenig.Pod.Builder.begin_container(
-        var!(ek_pod_builder), unquote(to_string(name)), unquote(opts))
-      var!(ek_pod_builder) = Erlkoenig.Pod.Builder.end_container(
-        var!(ek_pod_builder))
+      var!(ek_pod_builder) =
+        Erlkoenig.Pod.Builder.begin_container(
+          var!(ek_pod_builder),
+          to_string(unquote(name)),
+          unquote(opts)
+        )
+
+      var!(ek_pod_builder) = Erlkoenig.Pod.Builder.end_container(var!(ek_pod_builder))
     end
   end
 
@@ -411,12 +436,41 @@ defmodule Erlkoenig.Stack do
     # Reset container nft context after expansion so host nft_rules
     # in nft_table blocks don't dispatch to the pod builder
     Module.put_attribute(__CALLER__.module, :ek_container_nft, false)
+
     quote do
-      var!(ek_pod_builder) = Erlkoenig.Pod.Builder.begin_container(
-        var!(ek_pod_builder), unquote(to_string(name)), unquote(opts))
+      var!(ek_pod_builder) =
+        Erlkoenig.Pod.Builder.begin_container(
+          var!(ek_pod_builder),
+          to_string(unquote(name)),
+          unquote(opts)
+        )
+
       unquote(block)
-      var!(ek_pod_builder) = Erlkoenig.Pod.Builder.end_container(
-        var!(ek_pod_builder))
+      var!(ek_pod_builder) = Erlkoenig.Pod.Builder.end_container(var!(ek_pod_builder))
+    end
+  end
+
+  @doc """
+  Explicitly repeat a pod DSL block while threading the pod builder.
+
+      for_each i <- 0..2 do
+        container "web-\#{i}",
+          binary: "/opt/web",
+          zone: "net",
+          restart: :permanent
+      end
+
+  Use this instead of `replicas:` when the stack should show every
+  instance name and per-instance option.
+  """
+  defmacro for_each({:<-, _, [var, enumerable]}, do: block) do
+    quote do
+      var!(ek_pod_builder) =
+        Enum.reduce(unquote(enumerable), var!(ek_pod_builder), fn unquote(var), ek_pod_builder ->
+          var!(ek_pod_builder) = ek_pod_builder
+          unquote(block)
+          var!(ek_pod_builder)
+        end)
     end
   end
 
@@ -450,8 +504,7 @@ defmodule Erlkoenig.Stack do
   defmacro requires(capability) do
     quote do
       var!(ek_pod_builder) =
-        Erlkoenig.Pod.Builder.add_requires(var!(ek_pod_builder),
-                                           unquote(capability), [])
+        Erlkoenig.Pod.Builder.add_requires(var!(ek_pod_builder), unquote(capability), [])
     end
   end
 
@@ -505,13 +558,19 @@ defmodule Erlkoenig.Stack do
   defmacro conn_limit(opts) do
     if Module.get_attribute(__CALLER__.module, :ek_container_nft) do
       quote do
-        var!(ek_pod_builder) = Erlkoenig.Pod.Builder.add_conn_limit(
-          var!(ek_pod_builder), unquote(opts))
+        var!(ek_pod_builder) =
+          Erlkoenig.Pod.Builder.add_conn_limit(
+            var!(ek_pod_builder),
+            unquote(opts)
+          )
       end
     else
       quote do
-        var!(ek_nft_chain) = Erlkoenig.Nft.ChainBuilder.add_conn_limit(
-          var!(ek_nft_chain), unquote(opts))
+        var!(ek_nft_chain) =
+          Erlkoenig.Nft.ChainBuilder.add_conn_limit(
+            var!(ek_nft_chain),
+            unquote(opts)
+          )
       end
     end
   end
@@ -526,9 +585,11 @@ defmodule Erlkoenig.Stack do
   defmacro requires(capability, opts) do
     quote do
       var!(ek_pod_builder) =
-        Erlkoenig.Pod.Builder.add_requires(var!(ek_pod_builder),
-                                           unquote(capability),
-                                           unquote(opts))
+        Erlkoenig.Pod.Builder.add_requires(
+          var!(ek_pod_builder),
+          unquote(capability),
+          unquote(opts)
+        )
     end
   end
 
@@ -590,42 +651,57 @@ defmodule Erlkoenig.Stack do
   defmacro volume(container_path, opts) do
     quote do
       persist_name = Keyword.fetch!(unquote(opts), :persist)
-      read_only    = Keyword.get(unquote(opts), :read_only, false)
-      mount_opts   = Keyword.get(unquote(opts), :opts)
-      ephemeral    = Keyword.get(unquote(opts), :ephemeral, false)
-      quota        = Keyword.get(unquote(opts), :quota)
+      read_only = Keyword.get(unquote(opts), :read_only, false)
+      mount_opts = Keyword.get(unquote(opts), :opts)
+      ephemeral = Keyword.get(unquote(opts), :ephemeral, false)
+      quota = Keyword.get(unquote(opts), :quota)
 
       unless is_boolean(ephemeral) do
         raise ArgumentError,
-          "volume ephemeral: expected a boolean, got #{inspect(ephemeral)}"
+              "volume ephemeral: expected a boolean, got #{inspect(ephemeral)}"
       end
 
-      entry = %{container: unquote(container_path),
-                persist: persist_name,
-                read_only: read_only,
-                ephemeral: ephemeral}
+      entry = %{
+        container: unquote(container_path),
+        persist: persist_name,
+        read_only: read_only,
+        ephemeral: ephemeral
+      }
 
       entry =
         case mount_opts do
-          nil -> entry
-          s when is_binary(s) -> Map.put(entry, :opts, s)
+          nil ->
+            entry
+
+          s when is_binary(s) ->
+            Map.put(entry, :opts, s)
+
           other ->
             raise ArgumentError,
-              "volume opts: expected a binary string, got #{inspect(other)}"
+                  "volume opts: expected a binary string, got #{inspect(other)}"
         end
 
       entry =
         case quota do
-          nil -> entry
-          q when is_binary(q) -> Map.put(entry, :quota, q)
-          q when is_integer(q) and q >= 0 -> Map.put(entry, :quota, q)
+          nil ->
+            entry
+
+          q when is_binary(q) ->
+            Map.put(entry, :quota, q)
+
+          q when is_integer(q) and q >= 0 ->
+            Map.put(entry, :quota, q)
+
           other ->
             raise ArgumentError,
-              "volume quota: expected a size string (\"1G\") or non-negative integer, got #{inspect(other)}"
+                  "volume quota: expected a size string (\"1G\") or non-negative integer, got #{inspect(other)}"
         end
 
-      var!(ek_pod_builder) = Erlkoenig.Pod.Builder.add_volume(
-        var!(ek_pod_builder), entry)
+      var!(ek_pod_builder) =
+        Erlkoenig.Pod.Builder.add_volume(
+          var!(ek_pod_builder),
+          entry
+        )
     end
   end
 
@@ -678,12 +754,16 @@ defmodule Erlkoenig.Stack do
   """
   defmacro publish(opts, do: block) do
     interval = Keyword.fetch!(opts, :interval)
+
     quote do
-      var!(ek_pod_builder) = Erlkoenig.Pod.Builder.begin_publish(
-        var!(ek_pod_builder), unquote(interval))
+      var!(ek_pod_builder) =
+        Erlkoenig.Pod.Builder.begin_publish(
+          var!(ek_pod_builder),
+          unquote(interval)
+        )
+
       unquote(block)
-      var!(ek_pod_builder) = Erlkoenig.Pod.Builder.end_publish(
-        var!(ek_pod_builder))
+      var!(ek_pod_builder) = Erlkoenig.Pod.Builder.end_publish(var!(ek_pod_builder))
     end
   end
 
@@ -707,8 +787,11 @@ defmodule Erlkoenig.Stack do
   """
   defmacro metric(name) do
     quote do
-      var!(ek_pod_builder) = Erlkoenig.Pod.Builder.add_metric(
-        var!(ek_pod_builder), unquote(name))
+      var!(ek_pod_builder) =
+        Erlkoenig.Pod.Builder.add_metric(
+          var!(ek_pod_builder),
+          unquote(name)
+        )
     end
   end
 
@@ -752,22 +835,28 @@ defmodule Erlkoenig.Stack do
   """
   defmacro stream(do: block) do
     quote do
-      var!(ek_pod_builder) = Erlkoenig.Pod.Builder.begin_stream(
-        var!(ek_pod_builder), [])
+      var!(ek_pod_builder) =
+        Erlkoenig.Pod.Builder.begin_stream(
+          var!(ek_pod_builder),
+          []
+        )
+
       unquote(block)
-      var!(ek_pod_builder) = Erlkoenig.Pod.Builder.end_stream(
-        var!(ek_pod_builder))
+      var!(ek_pod_builder) = Erlkoenig.Pod.Builder.end_stream(var!(ek_pod_builder))
     end
   end
 
   @doc "Open a log stream block with options (e.g. `retention: {30, :days}`)."
   defmacro stream(opts, do: block) do
     quote do
-      var!(ek_pod_builder) = Erlkoenig.Pod.Builder.begin_stream(
-        var!(ek_pod_builder), unquote(opts))
+      var!(ek_pod_builder) =
+        Erlkoenig.Pod.Builder.begin_stream(
+          var!(ek_pod_builder),
+          unquote(opts)
+        )
+
       unquote(block)
-      var!(ek_pod_builder) = Erlkoenig.Pod.Builder.end_stream(
-        var!(ek_pod_builder))
+      var!(ek_pod_builder) = Erlkoenig.Pod.Builder.end_stream(var!(ek_pod_builder))
     end
   end
 
@@ -778,8 +867,11 @@ defmodule Erlkoenig.Stack do
   """
   defmacro channel(name) do
     quote do
-      var!(ek_pod_builder) = Erlkoenig.Pod.Builder.add_channel(
-        var!(ek_pod_builder), unquote(name))
+      var!(ek_pod_builder) =
+        Erlkoenig.Pod.Builder.add_channel(
+          var!(ek_pod_builder),
+          unquote(name)
+        )
     end
   end
 
@@ -815,34 +907,72 @@ defmodule Erlkoenig.Stack do
   """
   defmacro nft(do: block) do
     Module.put_attribute(__CALLER__.module, :ek_container_nft, true)
+
     quote do
-      var!(ek_pod_builder) = Erlkoenig.Pod.Builder.begin_nft(
-        var!(ek_pod_builder))
+      var!(ek_pod_builder) = Erlkoenig.Pod.Builder.begin_nft(var!(ek_pod_builder))
       unquote(block)
-      var!(ek_pod_builder) = Erlkoenig.Pod.Builder.end_nft(
-        var!(ek_pod_builder))
+      var!(ek_pod_builder) = Erlkoenig.Pod.Builder.end_nft(var!(ek_pod_builder))
+    end
+  end
+
+  @doc """
+  Alias for `nft do … end` that names the owner explicitly per
+  Spec SPEC-NFT-OWNERSHIP-SPLIT §7. Both forms produce identical
+  IR (`owner: :in_container` on the block + denormalized on each
+  chain). Use whichever reads better at the call site — the alias
+  exists so an operator-facing `host { nft_host }, container {
+  nft_in_container }` reads symmetrically.
+
+  ## Example
+
+      container "api", binary: "/opt/api", restart: :permanent do
+        nft_in_container do
+          output policy: :drop do
+            nft_rule :accept, ct_state: [:established, :related]
+          end
+          input policy: :drop do
+            nft_rule :accept, tcp_dport: 4000
+          end
+        end
+      end
+  """
+  defmacro nft_in_container(do: block) do
+    Module.put_attribute(__CALLER__.module, :ek_container_nft, true)
+
+    quote do
+      var!(ek_pod_builder) = Erlkoenig.Pod.Builder.begin_nft(var!(ek_pod_builder))
+      unquote(block)
+      var!(ek_pod_builder) = Erlkoenig.Pod.Builder.end_nft(var!(ek_pod_builder))
     end
   end
 
   @doc "Define an OUTPUT chain inside an `nft` block."
   defmacro output(opts, do: block) do
     quote do
-      var!(ek_pod_builder) = Erlkoenig.Pod.Builder.begin_nft_chain(
-        var!(ek_pod_builder), :output, unquote(opts))
+      var!(ek_pod_builder) =
+        Erlkoenig.Pod.Builder.begin_nft_chain(
+          var!(ek_pod_builder),
+          :output,
+          unquote(opts)
+        )
+
       unquote(block)
-      var!(ek_pod_builder) = Erlkoenig.Pod.Builder.end_nft_chain(
-        var!(ek_pod_builder))
+      var!(ek_pod_builder) = Erlkoenig.Pod.Builder.end_nft_chain(var!(ek_pod_builder))
     end
   end
 
   @doc "Define an INPUT chain inside an `nft` block."
   defmacro input(opts, do: block) do
     quote do
-      var!(ek_pod_builder) = Erlkoenig.Pod.Builder.begin_nft_chain(
-        var!(ek_pod_builder), :input, unquote(opts))
+      var!(ek_pod_builder) =
+        Erlkoenig.Pod.Builder.begin_nft_chain(
+          var!(ek_pod_builder),
+          :input,
+          unquote(opts)
+        )
+
       unquote(block)
-      var!(ek_pod_builder) = Erlkoenig.Pod.Builder.end_nft_chain(
-        var!(ek_pod_builder))
+      var!(ek_pod_builder) = Erlkoenig.Pod.Builder.end_nft_chain(var!(ek_pod_builder))
     end
   end
 
@@ -931,9 +1061,14 @@ defmodule Erlkoenig.Stack do
   defmacro flood(opts) do
     over = Keyword.fetch!(opts, :over)
     within = Keyword.fetch!(opts, :within)
+
     quote do
-      var!(ek_guard_builder) = ErlkoenigNft.Guard.Builder.add_flood(
-        var!(ek_guard_builder), unquote(over), unquote(within))
+      var!(ek_guard_builder) =
+        ErlkoenigNft.Guard.Builder.add_flood(
+          var!(ek_guard_builder),
+          unquote(over),
+          unquote(within)
+        )
     end
   end
 
@@ -941,9 +1076,14 @@ defmodule Erlkoenig.Stack do
   defmacro port_scan(opts) do
     over = Keyword.fetch!(opts, :over)
     within = Keyword.fetch!(opts, :within)
+
     quote do
-      var!(ek_guard_builder) = ErlkoenigNft.Guard.Builder.add_port_scan(
-        var!(ek_guard_builder), unquote(over), unquote(within))
+      var!(ek_guard_builder) =
+        ErlkoenigNft.Guard.Builder.add_port_scan(
+          var!(ek_guard_builder),
+          unquote(over),
+          unquote(within)
+        )
     end
   end
 
@@ -951,17 +1091,25 @@ defmodule Erlkoenig.Stack do
   defmacro slow_scan(opts) do
     over = Keyword.fetch!(opts, :over)
     within = Keyword.fetch!(opts, :within)
+
     quote do
-      var!(ek_guard_builder) = ErlkoenigNft.Guard.Builder.add_slow_scan(
-        var!(ek_guard_builder), unquote(over), unquote(within))
+      var!(ek_guard_builder) =
+        ErlkoenigNft.Guard.Builder.add_slow_scan(
+          var!(ek_guard_builder),
+          unquote(over),
+          unquote(within)
+        )
     end
   end
 
   @doc "Honeypot ports: any connection triggers instant ban."
   defmacro honeypot(ports) do
     quote do
-      var!(ek_guard_builder) = ErlkoenigNft.Guard.Builder.set_honeypot_ports(
-        var!(ek_guard_builder), unquote(ports))
+      var!(ek_guard_builder) =
+        ErlkoenigNft.Guard.Builder.set_honeypot_ports(
+          var!(ek_guard_builder),
+          unquote(ports)
+        )
     end
   end
 
@@ -978,49 +1126,69 @@ defmodule Erlkoenig.Stack do
   defmacro suspect(opts) do
     after_count = Keyword.fetch!(opts, :after)
     by = Keyword.get(opts, :distinct, :ports)
+
     quote do
-      var!(ek_guard_builder) = ErlkoenigNft.Guard.Builder.set_suspect(
-        var!(ek_guard_builder), unquote(after_count), unquote(by))
+      var!(ek_guard_builder) =
+        ErlkoenigNft.Guard.Builder.set_suspect(
+          var!(ek_guard_builder),
+          unquote(after_count),
+          unquote(by)
+        )
     end
   end
 
   @doc "Default ban duration."
   defmacro ban_for(seconds) do
     quote do
-      var!(ek_guard_builder) = ErlkoenigNft.Guard.Builder.set_ban_duration(
-        var!(ek_guard_builder), unquote(seconds))
+      var!(ek_guard_builder) =
+        ErlkoenigNft.Guard.Builder.set_ban_duration(
+          var!(ek_guard_builder),
+          unquote(seconds)
+        )
     end
   end
 
   @doc "Ban duration for honeypot triggers."
   defmacro honeypot_ban_for(seconds) do
     quote do
-      var!(ek_guard_builder) = ErlkoenigNft.Guard.Builder.set_honeypot_ban_duration(
-        var!(ek_guard_builder), unquote(seconds))
+      var!(ek_guard_builder) =
+        ErlkoenigNft.Guard.Builder.set_honeypot_ban_duration(
+          var!(ek_guard_builder),
+          unquote(seconds)
+        )
     end
   end
 
   @doc "Escalating ban durations for repeat offenders."
   defmacro escalate(durations) do
     quote do
-      var!(ek_guard_builder) = ErlkoenigNft.Guard.Builder.set_escalation(
-        var!(ek_guard_builder), unquote(durations))
+      var!(ek_guard_builder) =
+        ErlkoenigNft.Guard.Builder.set_escalation(
+          var!(ek_guard_builder),
+          unquote(durations)
+        )
     end
   end
 
   @doc "Observation period after unban before the IP is forgotten."
   defmacro observe_after_unban(seconds) do
     quote do
-      var!(ek_guard_builder) = ErlkoenigNft.Guard.Builder.set_probation(
-        var!(ek_guard_builder), unquote(seconds))
+      var!(ek_guard_builder) =
+        ErlkoenigNft.Guard.Builder.set_probation(
+          var!(ek_guard_builder),
+          unquote(seconds)
+        )
     end
   end
 
   @doc "Forget an IP after this many seconds without events."
   defmacro forget_after(seconds) do
     quote do
-      var!(ek_guard_builder) = ErlkoenigNft.Guard.Builder.set_forget_after(
-        var!(ek_guard_builder), unquote(seconds))
+      var!(ek_guard_builder) =
+        ErlkoenigNft.Guard.Builder.set_forget_after(
+          var!(ek_guard_builder),
+          unquote(seconds)
+        )
     end
   end
 
@@ -1029,8 +1197,11 @@ defmodule Erlkoenig.Stack do
   @doc "IPs that are never banned, regardless of behavior."
   defmacro allowlist(ips) do
     quote do
-      var!(ek_guard_builder) = ErlkoenigNft.Guard.Builder.set_allowlist(
-        var!(ek_guard_builder), unquote(ips))
+      var!(ek_guard_builder) =
+        ErlkoenigNft.Guard.Builder.set_allowlist(
+          var!(ek_guard_builder),
+          unquote(ips)
+        )
     end
   end
 
@@ -1059,38 +1230,50 @@ defmodule Erlkoenig.Stack do
   # ═══════════════════════════════════════════════════════════
 
   @doc """
-  Define an nftables table — the top-level container for chains, counters, sets, and vmaps.
+  Removed raw nftables table surface.
 
-  Tables are the foundation of the nft-transparent DSL (ADR-0015). Each table
-  maps 1:1 to a real nftables table. Multiple tables per stack are allowed
-  (e.g. one for host protection, one for container firewall).
+  Phase 6i closed the unowned `nft_table family, name do ... end`
+  escape hatch. Use the owner-bound surfaces instead:
+  `nft_host`, `nft_zone`, or `nft_ct`.
+  """
+  defmacro nft_table(family, name, do: block) do
+    _ = {family, name, block}
 
-  ## Arguments
+    raise CompileError,
+      file: __CALLER__.file,
+      line: __CALLER__.line,
+      description:
+        "`nft_table` was removed by SPEC-NFT-OWNERSHIP-SPLIT phase 6i; " <>
+          "rewrite the block to nft_host / nft_zone / nft_ct. " <>
+          "There is no automatic migration or raw-table escape hatch."
+  end
 
-  | Argument | Type | Description |
-  |----------|------|-------------|
-  | `family` | `:inet` \\| `:ip` \\| `:ip6` | Address family. `:inet` handles both IPv4 and IPv6 |
-  | `name` | `string` | Table name (e.g. `"host"`, `"erlkoenig"`, `"filter"`) |
+  # ═══════════════════════════════════════════════════════════
+  # nft_host / nft_zone / nft_ct — owner-tagged table macros
+  # ═══════════════════════════════════════════════════════════
+  #
+  # Per Spec SPEC-NFT-OWNERSHIP-SPLIT §7, these macros are
+  # *layout-bound ownership surfaces*, not generic table builders.
+  # They take no name argument and emit fixed table names defined
+  # by the canonical layout contract:
+  #
+  #   nft_host → "erlkoenig_host"
+  #   nft_zone → "erlkoenig_zone"
+  #   nft_ct   → "erlkoenig_ct"
+  #
+  # A callsite override is deliberately not supported — that would
+  # re-create a second source of truth next to the owner constants.
 
-  ## Contains
+  @doc """
+  Define the host firewall table (owner = `:host`).
 
-  - `base_chain` — chain attached to a netfilter hook
-  - `nft_chain` — regular chain (jump target)
-  - `nft_counter` — named counter object
-  - `nft_set` — named set (IP blocklists, etc.)
-  - `nft_vmap` — verdict map for dispatch
+  Emits an nft table named `erlkoenig_host`. Takes no name argument
+  — the table name is fixed by the layout contract (Spec §7).
+  Contains the input/output/ban chains for host protection.
 
-  ## Validation
+  ## Example
 
-  - Table must contain at least one chain → `CompileError`
-  - Duplicate table names in one stack → `CompileError`
-  - Duplicate chain names within a table → `CompileError`
-  - Counter referenced in rules must be declared → `CompileError`
-
-  ## Examples
-
-      # Host firewall
-      nft_table :inet, "host" do
+      nft_host do
         base_chain "input", hook: :input, type: :filter,
           priority: :filter, policy: :drop do
           nft_rule :accept, ct_state: [:established, :related]
@@ -1098,31 +1281,73 @@ defmodule Erlkoenig.Stack do
           nft_rule :accept, tcp_dport: 22
         end
       end
+  """
+  defmacro nft_host(do: block) do
+    owner_block_macro(__CALLER__, :host, "erlkoenig_host", block)
+  end
 
-      # Container firewall with counters and IP-based dispatch
-      nft_table :inet, "erlkoenig" do
-        nft_counter "forward_drop"
+  @doc """
+  Define the zone-forward firewall table (owner = `:zone`).
 
+  Emits an nft table named `erlkoenig_zone`. Takes no name argument.
+  Contains the forward chain plus per-container regular chains as
+  same-table jump targets.
+
+  ## Example
+
+      nft_zone do
         base_chain "forward", hook: :forward, type: :filter,
           priority: :filter, policy: :drop do
           nft_rule :accept, ct_state: [:established, :related]
-          nft_rule :jump,
-            ip_saddr: {:replica_ips, "web", "nginx"}, to: "from-web"
-          nft_rule :drop, counter: "forward_drop"
+          nft_rule :jump, ip_daddr: {10, 0, 0, 5}, to: "container_db"
         end
 
-        nft_chain "from-web" do
-          nft_rule :accept, ct_state: [:established, :related]
+        nft_chain "container_db" do
+          nft_rule :accept, tcp_dport: 5432
           nft_rule :drop
         end
       end
   """
-  defmacro nft_table(family, name, do: block) do
-    Module.register_attribute(__CALLER__.module, :__ek_context__, accumulate: false)
-    Module.put_attribute(__CALLER__.module, :__ek_context__, :nft_table)
+  defmacro nft_zone(do: block) do
+    owner_block_macro(__CALLER__, :zone, "erlkoenig_zone", block)
+  end
+
+  @doc """
+  Define the container-NAT table (owner = `:ct`).
+
+  Emits an nft table named `erlkoenig_ct`. Takes no name argument.
+  Holds NAT base chains only (prerouting/dstnat,
+  postrouting/srcnat); filter chains and per-container policy
+  chains do **not** belong here (Spec §5.3).
+
+  ## Example
+
+      nft_ct do
+        base_chain "dnat", hook: :prerouting, type: :nat,
+          priority: :dstnat, policy: :accept do
+          nft_rule :dnat, tcp_dport: 8080, to: {{10, 0, 0, 5}, 8080}
+        end
+
+        base_chain "masquerade", hook: :postrouting, type: :nat,
+          priority: :srcnat, policy: :accept do
+          nft_rule :masquerade, ip_saddr: {10, 0, 0, 0, 24}
+        end
+      end
+  """
+  defmacro nft_ct(do: block) do
+    owner_block_macro(__CALLER__, :ct, "erlkoenig_ct", block)
+  end
+
+  # Shared macro body for nft_host / nft_zone / nft_ct. Inline this
+  # in every macro without reintroducing a raw-table path — keep it in one place.
+  defp owner_block_macro(caller, owner, table_name, block) do
+    Module.register_attribute(caller.module, :__ek_context__, accumulate: false)
+    Module.put_attribute(caller.module, :__ek_context__, :nft_table)
 
     quote do
-      var!(ek_nft_table) = Erlkoenig.Nft.TableBuilder.new(unquote(family), unquote(name))
+      var!(ek_nft_table) =
+        Erlkoenig.Nft.TableBuilder.new(:inet, unquote(table_name), owner: unquote(owner))
+
       unquote(block)
       @stack_nft_tables var!(ek_nft_table)
     end
@@ -1225,11 +1450,16 @@ defmodule Erlkoenig.Stack do
   """
   defmacro base_chain(name, opts, do: block) do
     Module.put_attribute(__CALLER__.module, :ek_container_nft, false)
+
     quote do
       var!(ek_nft_chain) = Erlkoenig.Nft.ChainBuilder.new_base(unquote(name), unquote(opts))
       unquote(block)
-      var!(ek_nft_table) = Erlkoenig.Nft.TableBuilder.add_chain(
-        var!(ek_nft_table), var!(ek_nft_chain))
+
+      var!(ek_nft_table) =
+        Erlkoenig.Nft.TableBuilder.add_chain(
+          var!(ek_nft_table),
+          var!(ek_nft_chain)
+        )
     end
   end
 
@@ -1263,11 +1493,16 @@ defmodule Erlkoenig.Stack do
   """
   defmacro nft_chain(name, do: block) do
     Module.put_attribute(__CALLER__.module, :ek_container_nft, false)
+
     quote do
       var!(ek_nft_chain) = Erlkoenig.Nft.ChainBuilder.new_regular(unquote(name))
       unquote(block)
-      var!(ek_nft_table) = Erlkoenig.Nft.TableBuilder.add_chain(
-        var!(ek_nft_table), var!(ek_nft_chain))
+
+      var!(ek_nft_table) =
+        Erlkoenig.Nft.TableBuilder.add_chain(
+          var!(ek_nft_table),
+          var!(ek_nft_chain)
+        )
     end
   end
 
@@ -1359,10 +1594,6 @@ defmodule Erlkoenig.Stack do
   With `replicas: 3`, `{:replica_ips, "web", "nginx"}` generates three
   individual nft rules — one per IP.
 
-  (The legacy `{:veth_of, ...}` symbol is still accepted by the compiler
-  for backward compatibility but produces no rules in IPVLAN mode because
-  slaves are not visible on the host — use `ip_saddr:` instead.)
-
   ## IP Tuple Format
 
   - `{a, b, c, d}` — single IP (e.g. `{10, 0, 0, 2}`)
@@ -1436,13 +1667,21 @@ defmodule Erlkoenig.Stack do
   defmacro nft_rule(action, opts \\ []) do
     if Module.get_attribute(__CALLER__.module, :ek_container_nft) do
       quote do
-        var!(ek_pod_builder) = Erlkoenig.Pod.Builder.add_nft_rule(
-          var!(ek_pod_builder), unquote(action), unquote(opts))
+        var!(ek_pod_builder) =
+          Erlkoenig.Pod.Builder.add_nft_rule(
+            var!(ek_pod_builder),
+            unquote(action),
+            unquote(opts)
+          )
       end
     else
       quote do
-        var!(ek_nft_chain) = Erlkoenig.Nft.ChainBuilder.add_rule(
-          var!(ek_nft_chain), unquote(action), unquote(opts))
+        var!(ek_nft_chain) =
+          Erlkoenig.Nft.ChainBuilder.add_rule(
+            var!(ek_nft_chain),
+            unquote(action),
+            unquote(opts)
+          )
       end
     end
   end
@@ -1462,7 +1701,7 @@ defmodule Erlkoenig.Stack do
 
   ## Examples
 
-      nft_table :inet, "erlkoenig" do
+      nft_zone do
         nft_counter "forward_drop"
         nft_counter "web_nginx_drop"
 
@@ -1474,8 +1713,11 @@ defmodule Erlkoenig.Stack do
   """
   defmacro nft_counter(name) do
     quote do
-      var!(ek_nft_table) = Erlkoenig.Nft.TableBuilder.add_counter(
-        var!(ek_nft_table), unquote(name))
+      var!(ek_nft_table) =
+        Erlkoenig.Nft.TableBuilder.add_counter(
+          var!(ek_nft_table),
+          unquote(name)
+        )
     end
   end
 
@@ -1501,7 +1743,7 @@ defmodule Erlkoenig.Stack do
 
   ## Examples
 
-      nft_table :inet, "erlkoenig" do
+      nft_zone do
         nft_set "blocklist", :ipv4_addr
 
         base_chain "input", hook: :input, type: :filter,
@@ -1512,8 +1754,13 @@ defmodule Erlkoenig.Stack do
   """
   defmacro nft_set(name, type, opts \\ []) do
     quote do
-      var!(ek_nft_table) = Erlkoenig.Nft.TableBuilder.add_set(
-        var!(ek_nft_table), unquote(name), unquote(type), unquote(opts))
+      var!(ek_nft_table) =
+        Erlkoenig.Nft.TableBuilder.add_set(
+          var!(ek_nft_table),
+          unquote(name),
+          unquote(type),
+          unquote(opts)
+        )
     end
   end
 
@@ -1548,7 +1795,7 @@ defmodule Erlkoenig.Stack do
 
   ## Examples
 
-      nft_table :inet, "erlkoenig" do
+      nft_zone do
         nft_cidr_set "trusted", [
           "10.0.0.0/8",
           "192.168.0.0/16",
@@ -1572,7 +1819,10 @@ defmodule Erlkoenig.Stack do
     quote do
       var!(ek_nft_table) =
         Erlkoenig.Nft.TableBuilder.add_cidr_set(
-          var!(ek_nft_table), unquote(name), unquote(cidrs))
+          var!(ek_nft_table),
+          unquote(name),
+          unquote(cidrs)
+        )
     end
   end
 
@@ -1600,7 +1850,7 @@ defmodule Erlkoenig.Stack do
 
   ## Example
 
-      nft_table :inet, "filter" do
+      nft_zone do
         nft_flowtable "ft0", devices: ["eth0"]
 
         base_chain "forward", hook: :forward, type: :filter,
@@ -1616,8 +1866,12 @@ defmodule Erlkoenig.Stack do
   """
   defmacro nft_flowtable(name, opts) do
     quote do
-      var!(ek_nft_table) = Erlkoenig.Nft.TableBuilder.add_flowtable(
-        var!(ek_nft_table), unquote(name), unquote(opts))
+      var!(ek_nft_table) =
+        Erlkoenig.Nft.TableBuilder.add_flowtable(
+          var!(ek_nft_table),
+          unquote(name),
+          unquote(opts)
+        )
     end
   end
 
@@ -1637,7 +1891,7 @@ defmodule Erlkoenig.Stack do
 
   ## Examples
 
-      nft_table :inet, "erlkoenig" do
+      nft_zone do
         nft_vmap "dispatch", :ipv4_addr, [
           {{10, 0, 0, 2}, {:jump, "handle-web"}},
           {{10, 0, 0, 3}, {:jump, "handle-api"}}
@@ -1651,8 +1905,13 @@ defmodule Erlkoenig.Stack do
   """
   defmacro nft_vmap(name, type, entries) do
     quote do
-      var!(ek_nft_table) = Erlkoenig.Nft.TableBuilder.add_vmap(
-        var!(ek_nft_table), unquote(name), unquote(type), unquote(entries))
+      var!(ek_nft_table) =
+        Erlkoenig.Nft.TableBuilder.add_vmap(
+          var!(ek_nft_table),
+          unquote(name),
+          unquote(type),
+          unquote(entries)
+        )
     end
   end
 
@@ -1696,10 +1955,14 @@ defmodule Erlkoenig.Stack do
     # silently dropped (emitted as entries: []), leaving operators
     # with empty maps in the kernel.
     quote do
-      var!(ek_nft_table) = Erlkoenig.Nft.TableBuilder.add_map(
-        var!(ek_nft_table), unquote(name), unquote(key_type),
-        unquote(data_type),
-        Erlkoenig.Nft.TableBuilder.normalize_map_entries(unquote(opts)))
+      var!(ek_nft_table) =
+        Erlkoenig.Nft.TableBuilder.add_map(
+          var!(ek_nft_table),
+          unquote(name),
+          unquote(key_type),
+          unquote(data_type),
+          Erlkoenig.Nft.TableBuilder.normalize_map_entries(unquote(opts))
+        )
     end
   end
 
@@ -1732,9 +1995,15 @@ defmodule Erlkoenig.Stack do
   defmacro nft_vmap(name, opts) when is_list(opts) do
     fields = Keyword.fetch!(opts, :fields)
     entries = Keyword.get(opts, :entries, [])
+
     quote do
-      var!(ek_nft_table) = Erlkoenig.Nft.TableBuilder.add_concat_vmap(
-        var!(ek_nft_table), unquote(name), unquote(fields), unquote(entries))
+      var!(ek_nft_table) =
+        Erlkoenig.Nft.TableBuilder.add_concat_vmap(
+          var!(ek_nft_table),
+          unquote(name),
+          unquote(fields),
+          unquote(entries)
+        )
     end
   end
 end

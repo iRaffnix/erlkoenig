@@ -57,11 +57,11 @@ main(_) ->
         end
     end),
 
-    test_helper:step("host nft table 'host' exists with input_drop counter",
+    test_helper:step("host nft table 'erlkoenig_host' exists with input_drop counter",
       fun() ->
         Out = tutorial_helper:host_ruleset(),
         Checks = [
-            {"table inet host",      "table inet host"},
+            {"table inet erlkoenig_host", "table inet erlkoenig_host"},
             {"counter input_drop",   "counter input_drop"},
             {"policy drop",          "policy drop"}
         ],

@@ -21,7 +21,7 @@ main(_) ->
     application:set_env(erlkoenig, quarantine_enabled, false),
 
     Root     = test_helper:project_root(),
-    Example  = filename:join(Root, "examples/pod_strategies.exs"),
+    Example  = filename:join(Root, "examples/stacks/pod_strategies.exs"),
     TermFile = "/tmp/erlkoenig_test52.term",
     DemoBin  = test_helper:demo("echo_server"),
 

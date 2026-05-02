@@ -112,7 +112,7 @@ run_two_tier_scenario(Ek, Root) ->
     %% --- core assertion: exact rule count after expansion ---------
     step("nft has exactly 6 rules for tcp dport 4000",
       fun() ->
-        Lines = nft_table_lines("inet host"),
+        Lines = nft_table_lines("inet erlkoenig_host"),
         Matching = [L || L <- Lines, contains(L, "tcp dport 4000")],
         case length(Matching) of
             6 -> ok;
@@ -122,7 +122,7 @@ run_two_tier_scenario(Ek, Root) ->
 
     %% --- assertion: no `__unresolved__' placeholders --------------
     step("no __unresolved__ in expanded rules", fun() ->
-        Lines = nft_table_lines("inet host"),
+        Lines = nft_table_lines("inet erlkoenig_host"),
         Bad = [L || L <- Lines, contains(L, "__unresolved__")],
         case Bad of
             [] -> ok;
@@ -134,7 +134,7 @@ run_two_tier_scenario(Ek, Root) ->
     %% cross-product, and collectively they form the FULL set ------
     step("expanded rules cover the full frontend×backend cross-product",
       fun() ->
-        Lines = nft_table_lines("inet host"),
+        Lines = nft_table_lines("inet erlkoenig_host"),
         Rules = [parse_saddr_daddr(L)
                  || L <- Lines, contains(L, "tcp dport 4000")],
         Got = sort_pairs([P || {ok, P} <- Rules]),

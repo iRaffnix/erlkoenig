@@ -79,7 +79,8 @@ for entry in "${TESTS[@]}"; do
         FAILED_NAMES="${FAILED_NAMES}  - ${SCRIPT}: ${DESC}\n"
     fi
 
-    # Clean up any leftover nft table between tests
+    # Clean up any leftover legacy nft table between tests
+    nft delete table inet host 2>/dev/null || true
     nft delete table inet erlkoenig 2>/dev/null || true
     sleep 1
 done

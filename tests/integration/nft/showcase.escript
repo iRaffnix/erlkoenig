@@ -3,7 +3,7 @@
 
 main(_) ->
     Config = #{
-        table => <<"erlkoenig">>,
+        table => <<"erlkoenig_host">>,
         sets => [
             {<<"blocklist">>, ipv4_addr}
         ],

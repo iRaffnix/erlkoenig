@@ -15,7 +15,7 @@ defmodule IpvlanEcho do
   #
   # Starten:
   #   mix run -e '
-  #     [{mod, _}] = Code.compile_file("examples/ipvlan_echo.exs")
+  #     [{mod, _}] = Code.compile_file("examples/dev/ipvlan_echo.exs")
   #     mod.write!("/tmp/ipvlan_echo.term")
   #   '
 

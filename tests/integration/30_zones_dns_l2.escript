@@ -32,7 +32,7 @@ main(_) ->
     logger:set_primary_config(level, warning),
 
     Root     = test_helper:project_root(),
-    Example  = filename:join(Root, "examples/tutorial.exs"),
+    Example  = filename:join(Root, "examples/stacks/tutorial.exs"),
     TermFile = "/tmp/erlkoenig_integration_30.term",
     DemoBin  = binary_to_list(test_helper:demo("echo_server")),
 
@@ -334,8 +334,6 @@ compile_dsl(Root, Example, TermFile) ->
 
 %% Retarget the dummy parent and subnet, drop per-container nft so
 %% DNS / ICMP can flow inside the test, AND patch the host nft table:
-%%  - SSH from tcp_dport 22222 (tutorial default) to 22 so the test
-%%    runner's session isn't dropped when the new firewall lands;
 %%  - Replace the runtime-services UDP/53 rule's source CIDR to match
 %%    the test zone's actual subnet (10.99.30.0/24 instead of the
 %%    tutorial's 10.99.0.0/24).
@@ -354,7 +352,7 @@ patch_term(TermFile, BinPath) ->
     file:write_file(TermFile, io_lib:format("~tp.~n", [Final])),
     ok.
 
-patch_host_nft(#{name := <<"host">>, chains := Chains} = Table) ->
+patch_host_nft(#{name := <<"erlkoenig_host">>, chains := Chains} = Table) ->
     NewChains = [patch_input_chain(C) || C <- Chains],
     Table#{chains => NewChains};
 patch_host_nft(Table) -> Table.
@@ -364,9 +362,6 @@ patch_input_chain(#{name := <<"input">>, rules := Rules} = Chain) ->
     Chain#{rules => Patched};
 patch_input_chain(Chain) -> Chain.
 
-%% SSH port 22222 → 22 (test runner's port).
-patch_rule({accept, #{tcp_dport := 22222}}) ->
-    {accept, #{tcp_dport => 22}};
 %% Runtime-services rule: tutorial uses 10.99.0.0/24, test uses 10.99.30.0/24.
 patch_rule({accept, #{ip_saddr := {10, 99, 0, 0, 24}, udp_dport := 53}}) ->
     {accept, #{ip_saddr => {10, 99, 30, 0, 24}, udp_dport => 53}};

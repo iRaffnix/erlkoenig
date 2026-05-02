@@ -20,8 +20,8 @@ defmodule PodStrategies do
   #     .3  ofo-0-b      .6  ofa-0-b      .9  rfo-0-b
   #     .4  ofo-0-c      .7  ofa-0-c     .10  rfo-0-c
   #
-  # Start:   ek up  examples/pod_strategies.exs
-  # Stop:    ek down examples/pod_strategies.exs
+  # Start:   ek up  examples/stacks/pod_strategies.exs
+  # Stop:    ek down examples/stacks/pod_strategies.exs
   # ═══════════════════════════════════════════════════════════════
 
   pod "ofo", strategy: :one_for_one do

@@ -26,7 +26,7 @@ main(_) ->
     logger:set_primary_config(level, warning),
 
     Root     = test_helper:project_root(),
-    Example  = filename:join(Root, "examples/pod_strategies.exs"),
+    Example  = filename:join(Root, "examples/stacks/pod_strategies.exs"),
     TermFile = "/tmp/erlkoenig_integration_32.term",
     DemoBin  = binary_to_list(test_helper:demo("echo_server")),
 

@@ -2,7 +2,7 @@
 %% -*- erlang -*-
 %% Test 29: Pod strategies -- :one_for_one (isolated).
 %%
-%% Spawns the three pods from examples/pod_strategies.exs, but asserts
+%% Spawns the three pods from examples/stacks/pod_strategies.exs, but asserts
 %% the coupling pattern only for the :one_for_one pod. The
 %% :one_for_all and :rest_for_one pods are declared (so the example
 %% still compiles and spawns as published) but their SIGKILL
@@ -39,7 +39,7 @@ main(_) ->
     timer:sleep(200),
 
     Root     = test_helper:project_root(),
-    Example  = filename:join(Root, "examples/pod_strategies.exs"),
+    Example  = filename:join(Root, "examples/stacks/pod_strategies.exs"),
     TermFile = "/tmp/erlkoenig_integration_29.term",
     DemoBin  = binary_to_list(test_helper:demo("echo_server")),
 

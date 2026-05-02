@@ -74,10 +74,10 @@ main(_) ->
     %% Each .term was pre-compiled by `ek dsl compile`.
     TermDir = "/tmp",
     DslExamples = [
-        {"fw_web_server",  <<"host">>},
-        {"fw_database",    <<"host">>},
-        {"fw_bastion",     <<"host">>},
-        {"fw_nat_gateway", <<"host">>}
+        {"fw_web_server",  <<"erlkoenig_host">>},
+        {"fw_database",    <<"erlkoenig_host">>},
+        {"fw_bastion",     <<"erlkoenig_host">>},
+        {"fw_nat_gateway", <<"erlkoenig_host">>}
     ],
     lists:foreach(fun({Name, TableName}) ->
         test_helper:step("DSL end-to-end: " ++ Name, fun() ->

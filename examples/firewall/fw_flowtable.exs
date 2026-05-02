@@ -13,7 +13,7 @@ defmodule FwFlowtable do
   New connections still traverse the full chain for policy evaluation.
 
   Starten:
-    ek dsl compile examples/fw_flowtable.exs -o /tmp/fw_flowtable.term
+    ek dsl compile examples/firewall/fw_flowtable.exs -o /tmp/fw_flowtable.term
     ek config_load /tmp/fw_flowtable.term
 
   Verify:
@@ -27,13 +27,7 @@ defmodule FwFlowtable do
   host do
     interface "eth0", zone: :wan
 
-    nft_table :inet, "filter" do
-      nft_counter "offloaded"
-      nft_counter "forward_drop"
-
-      # ── Flowtable: fast-path for established connections ──
-      nft_flowtable "ft0", devices: ["eth0"]
-
+    nft_host do
       # ── Input: standard hardened host ─────────────────────
       base_chain "input", hook: :input, type: :filter,
                  priority: :filter, policy: :drop do
@@ -44,6 +38,14 @@ defmodule FwFlowtable do
         nft_rule :accept, tcp_dport: 22
         nft_rule :drop, log_prefix: "INPUT: "
       end
+    end
+
+    nft_zone do
+      nft_counter "offloaded"
+      nft_counter "forward_drop"
+
+      # ── Flowtable: fast-path for established connections ──
+      nft_flowtable "ft0", devices: ["eth0"]
 
       # ── Forward: offload established, filter new ──────────
       base_chain "forward", hook: :forward, type: :filter,

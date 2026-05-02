@@ -22,19 +22,17 @@ defmodule Tutorial do
   #
   # WARNUNG: Dieses Beispiel übernimmt die Host-Firewall.
   # Die Host-input-chain hat policy :drop und erlaubt SSH nur auf
-  # tcp/22222. Port 22 ist zusätzlich als Honeypot konfiguriert:
-  # ein Reconnect auf tcp/22 kann die Operator-IP für 1h bannen.
-  # Nur ausführen, wenn sshd auf 22222 erreichbar ist oder ein
-  # Out-of-Band-Recovery-Pfad existiert (Serial/KVM/Cloud-Console).
+  # tcp/22. Port 22 is deliberately not a honeypot; operator access
+  # must stay recoverable on a real host.
   #
   # Starten:
-  #   ek up examples/tutorial.exs
+  #   ek up examples/stacks/tutorial.exs
   # Inspizieren:
   #   ek ps
   #   ek pod list
   #   ek ct inspect web-0-echo
   # Runterfahren:
-  #   ek down examples/tutorial.exs
+  #   ek down examples/stacks/tutorial.exs
   # ═══════════════════════════════════════════════════════════════
 
   pod "app", strategy: :one_for_one do
@@ -122,7 +120,7 @@ defmodule Tutorial do
       parent: {:dummy, "ek_tut"},
       subnet: {10, 99, 0, 0, 24}
 
-    nft_table :inet, "host" do
+    nft_host do
       nft_set "ban", :ipv4_addr
 
       nft_counter "input_drop"
@@ -140,7 +138,7 @@ defmodule Tutorial do
         nft_rule :accept, ct_state: [:established, :related]
         nft_rule :accept, iifname: "lo"
         nft_rule :accept, ip_protocol: :icmp
-        nft_rule :accept, tcp_dport: 22222          # SSH — sonst Lockout
+        nft_rule :accept, tcp_dport: 22          # SSH — sonst Lockout
 
         # ── Runtime-Services ──────────────────────────────
         # erlkoenig betreibt einen DNS-Resolver pro Zone auf der
@@ -160,7 +158,7 @@ defmodule Tutorial do
     detect do
       flood over: 50, within: s(10)
       port_scan over: 20, within: m(1)
-      honeypot [21, 22, 23, 445, 1433, 3306, 3389, 5900, 6379]
+      honeypot [21, 23, 445, 1433, 3306, 3389, 5900, 6379]
     end
 
     respond do

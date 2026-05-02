@@ -28,7 +28,7 @@ main(_) ->
     test_helper:boot(),
 
     Root     = test_helper:project_root(),
-    Example  = filename:join(Root, "examples/hardened_volumes.exs"),
+    Example  = filename:join(Root, "examples/stacks/hardened_volumes.exs"),
     TermFile = "/tmp/erlkoenig_integration_26.term",
     DemoBin  = binary_to_list(test_helper:demo("sleeper")),
 
@@ -145,8 +145,9 @@ main(_) ->
                 %% safety net, regardless of what we request, so
                 %% flagging them here would reject any well-behaved
                 %% distro-default mount.
+                Flags = mount_flags(Line),
                 case [F || F <- ["ro", "noexec"],
-                           string:find(Line, F) =/= nomatch] of
+                           lists:member(F, Flags)] of
                     []       -> ok;
                     Unwanted -> {error, {unexpected_flags_on_rw, Unwanted}}
                 end;
@@ -202,6 +203,14 @@ assert_flags(Line, Wanted) ->
     case [W || W <- Wanted, string:find(Line, W) =:= nomatch] of
         []      -> ok;
         Missing -> {error, {missing_flags, Missing, Line}}
+    end.
+
+mount_flags(Line) ->
+    [BeforeSep | _] = string:split(Line, " - ", leading),
+    Fields = string:tokens(BeforeSep, " "),
+    case length(Fields) >= 6 of
+        true -> string:tokens(lists:nth(6, Fields), ",");
+        false -> []
     end.
 
 shell_quote(S) ->

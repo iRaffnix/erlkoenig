@@ -1,8 +1,8 @@
 #!/usr/bin/env escript
 %% -*- erlang -*-
-%% examples/journal_demo_release.escript
+%% examples/dev/journal_demo_release.escript
 %%
-%% Production-side companion to examples/journal_demo.exs:
+%% Production-side companion to examples/dev/journal_demo.exs:
 %% the same end-to-end walkthrough (start audit + journal,
 %% connect, send entries, verify the chain) but against an
 %% INSTALLED release tarball instead of a dev checkout.
@@ -10,7 +10,7 @@
 %% Usage on a node where /opt/erlkoenig (or $ERLKOENIG_LIB)
 %% holds the extracted release:
 %%
-%%   escript examples/journal_demo_release.escript
+%%   escript examples/dev/journal_demo_release.escript
 %%
 %% Exits 0 if the chain validated, 1 otherwise. Tutorial-friendly
 %% output (no logger spam, prints headings + results).

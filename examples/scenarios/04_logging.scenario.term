@@ -1,5 +1,5 @@
 #{
-    config => "examples/04_logging.term",
+    config => "examples/scenarios/04_logging.term",
     chain => <<"inbound">>,
     policy => drop,
     packets => [

@@ -14,7 +14,7 @@
 %% move) could silently break the compile path without failing the
 %% earlier tests. This test exercises the full chain end-to-end:
 %%
-%%   1. Compile examples/dsl_e2e_edge.exs via `mix run` (same
+%%   1. Compile examples/dev/dsl_e2e_edge.exs via `mix run` (same
 %%      pattern as test 15) — catches DSL macro regressions.
 %%   2. Patch the placeholder binary path to the real echo_server.
 %%   3. Load via erlkoenig_config:load/1 — catches term-shape
@@ -42,7 +42,7 @@ main(_) ->
     logger:set_primary_config(level, error),
 
     Root     = test_helper:project_root(),
-    Example  = filename:join(Root, "examples/dsl_e2e_edge.exs"),
+    Example  = filename:join(Root, "examples/dev/dsl_e2e_edge.exs"),
     TermFile = "/tmp/erlkoenig_integration_32.term",
     DemoBin  = binary_to_list(test_helper:demo("echo_server")),
 

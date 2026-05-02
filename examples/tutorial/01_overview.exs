@@ -29,12 +29,12 @@ defmodule Tutorial.Overview do
     ipvlan "demo", parent: {:dummy, "ek_demo"},
                    subnet: {10, 10, 0, 0, 24}
 
-    # ── Was:   nft-Table "host"
+    # ── Was:   nft-Table "erlkoenig_host"
     # ── Wann:  jede erlkoenig-Node hat genau eine Host-Tabelle
     # ── Wieso: Hier lebt die Firewall die den Host selbst schützt.
     #           Container haben ihre EIGENEN Tabellen (in ihrer
     #           eigenen netns) — siehe Datei 3.
-    nft_table :inet, "host" do
+    nft_host do
 
       # Named counter — wird alle 2s automatisch gepollt und als
       # AMQP-Event emittiert wenn rate > 0. Einer pro Drop-Chain

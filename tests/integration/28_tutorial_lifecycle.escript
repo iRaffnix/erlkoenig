@@ -2,7 +2,7 @@
 %% -*- erlang -*-
 %% Test 28: Tutorial lifecycle — SIGKILL restart + config drift.
 %%
-%% Loads examples/tutorial.exs and drives it through the lifecycle the
+%% Loads examples/stacks/tutorial.exs and drives it through the lifecycle the
 %% book's chapter 3 promises:
 %%
 %%   1. up -> 3 containers running (2 web replicas + 1 api)
@@ -34,7 +34,7 @@ main(_) ->
     logger:set_primary_config(level, warning),
 
     Root     = test_helper:project_root(),
-    Example  = filename:join(Root, "examples/tutorial.exs"),
+    Example  = filename:join(Root, "examples/stacks/tutorial.exs"),
     TermFile = "/tmp/erlkoenig_integration_25.term",
     DemoBin  = binary_to_list(test_helper:demo("echo_server")),
 
@@ -44,10 +44,9 @@ main(_) ->
         compile_dsl(Root, Example, TermFile)
     end),
 
-    %% The tutorial's host firewall whitelists only SSH 22222; applying
-    %% it to a test runner would drop us. Strip host-wide bits and
-    %% patch the dummy parent name + binary path. Container-level nft
-    %% is preserved — that is what we want to exercise.
+    %% Strip host-wide bits and patch the dummy parent name + binary
+    %% path. Container-level nft is preserved — that is what we want
+    %% to exercise.
     test_helper:step("patch term for test (strip host fw, retarget parent)",
                      fun() -> patch_term(TermFile, list_to_binary(DemoBin)) end),
 

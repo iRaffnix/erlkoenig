@@ -1,5 +1,6 @@
 #{
     table => <<"webserver">>,
+    ban_set => #{ipv4 => <<"blocklist">>, ipv6 => <<"blocklist6">>},
     counters => [<<"ssh">>,<<"http">>,<<"https">>,<<"banned">>,<<"dropped">>],
     sets => [
         {<<"blocklist">>,ipv4_addr,#{flags => [timeout],timeout => 3600000}},

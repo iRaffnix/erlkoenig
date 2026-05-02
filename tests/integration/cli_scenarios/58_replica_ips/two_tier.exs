@@ -20,7 +20,7 @@ defmodule CliReplicaIpsTwoTier do
     ipvlan "demo", parent: {:dummy, "ek_demo"},
                    subnet: {10, 10, 0, 0, 24}
 
-    nft_table :inet, "host" do
+    nft_host do
       nft_counter "input_drop"
       nft_counter "ricochet_drop"
 

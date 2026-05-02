@@ -2,7 +2,7 @@
 %% -*- erlang -*-
 %% Test 24: Tier-Isolation via per-container nft in netns.
 %%
-%% Nimmt examples/three_tier_ipvlan.exs, patched die binary-Pfade,
+%% Nimmt examples/stacks/three_tier_ipvlan.exs, patched die binary-Pfade,
 %% lädt den Stack und prüft die Konnektivitätsmatrix:
 %%
 %%   ALLOWED            BLOCKED
@@ -33,7 +33,7 @@ main(_) ->
     logger:set_primary_config(level, warning),
 
     Root     = test_helper:project_root(),
-    Example  = filename:join(Root, "examples/three_tier_ipvlan.exs"),
+    Example  = filename:join(Root, "examples/stacks/three_tier_ipvlan.exs"),
     TermFile = "/tmp/erlkoenig_integration_24.term",
     DemoBin  = binary_to_list(test_helper:demo("echo_server")),
 

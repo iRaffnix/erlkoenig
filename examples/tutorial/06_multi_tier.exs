@@ -55,9 +55,9 @@ defmodule Tutorial.MultiTier do
     * Host forward     → wer-darf-zu-wem (IP-level)
     * Host input/output → externer Traffic (CDN / egress)
 
-  This tutorial includes production-style signature-required deploys.
-  Without installed trust roots and signed demo binaries, those
-  containers fail closed until an operator completes PKI setup.
+  This runnable tutorial keeps PKI out of the live config because the
+  installed demo binaries are unsigned. The fail-closed signed deployment
+  shape lives in `examples/stacks/signed_deployment.exs` and Chapter 10.
   """
   use Erlkoenig.Stack
 
@@ -73,7 +73,7 @@ defmodule Tutorial.MultiTier do
     ipvlan "internal", parent: {:dummy, "ek_internal"},
                        subnet: {10, 61, 0, 0, 24}
 
-    nft_table :inet, "host" do
+    nft_host do
       nft_set "ban", :ipv4_addr
       nft_counter "input_drop"
       nft_counter "forward_drop"
@@ -96,11 +96,12 @@ defmodule Tutorial.MultiTier do
         nft_rule :accept, ip_protocol: :icmp
         nft_rule :accept, tcp_dport: 22
 
-        # Public: HTTP + HTTPS direkt auf Host (würde in
+        # Public: HTTP + HTTPS-style demo direkt auf Host (würde in
         # Production zu einer LB-VIP routen; im Beispiel zum
-        # Frontend-Pod).
+        # Frontend-Pod). 8443 avoids privileged-port friction for the
+        # demo echo_server.
         nft_rule :accept, tcp_dport: 80
-        nft_rule :accept, tcp_dport: 443
+        nft_rule :accept, tcp_dport: 8443
 
         nft_rule :drop, counter: "input_drop", log_prefix: "HOST: "
       end
@@ -144,7 +145,7 @@ defmodule Tutorial.MultiTier do
       end
 
       # ── Prerouting DNAT für jhash-LB ──
-      # Jeder external Connect auf Port 443 wird per src-hash
+      # Jeder external Connect auf Port 8443 wird per src-hash
       # auf eine der frontend-Replicas DNAT'd. Der nft_map
       # wird von erlkoenig automatisch mit den frontend-IPs
       # populated (replica-Adressen sind zur Laufzeit bekannt).
@@ -152,7 +153,7 @@ defmodule Tutorial.MultiTier do
                  priority: :dstnat, policy: :accept do
         nft_rule :dnat_jhash,
           map: "api_backends",
-          dport: 443,
+          dport: 8443,
           mod: 3         # mod = anzahl der backends im pool
       end
     end
@@ -168,7 +169,7 @@ defmodule Tutorial.MultiTier do
 
     container "nginx",
       binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
-      args: ["443"],
+      args: ["8443"],
       zone: "edge",
       replicas: 3,
       restart: :permanent,
@@ -195,7 +196,7 @@ defmodule Tutorial.MultiTier do
         input policy: :drop do
           nft_rule :accept, ct_state: [:established, :related]
           nft_rule :accept, ip_protocol: :icmp
-          nft_rule :accept, tcp_dport: 443
+          nft_rule :accept, tcp_dport: 8443
           conn_limit per_ip: 200
         end
 
@@ -304,11 +305,8 @@ defmodule Tutorial.MultiTier do
       args: ["5432"],
       zone: "internal",
       replicas: 1,                # DB einzeln (kein cluster hier)
-      # Missing PKI setup is an operator-action failure, not a runtime
-      # crash. Avoid restart loops that mask the root cause.
       restart: :temporary,
-      limits: %{memory: 2_000_000_000, pids: 512, disk: 10_000_000_000},
-      signature: :required do    # Prod-DB-Binary immer signiert
+      limits: %{memory: 2_000_000_000, pids: 512, disk: 10_000_000_000} do
 
       volume "/var/lib/postgresql/data", persist: "pgdata"
       volume "/etc/postgresql", persist: "pgetc", read_only: true
@@ -323,7 +321,7 @@ defmodule Tutorial.MultiTier do
 
     container "backup",
       binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
-      args: ["backup"],
+      args: ["15432"],
       zone: "internal",
       replicas: 1,
       restart: :permanent,

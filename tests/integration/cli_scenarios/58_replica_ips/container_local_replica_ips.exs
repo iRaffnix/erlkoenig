@@ -16,7 +16,7 @@ defmodule CliReplicaIpsContainerLocalReject do
     ipvlan "demo", parent: {:dummy, "ek_demo"},
                    subnet: {10, 10, 0, 0, 24}
 
-    nft_table :inet, "host" do
+    nft_host do
       nft_counter "input_drop"
       base_chain "input", hook: :input, type: :filter,
                  priority: :filter, policy: :drop do

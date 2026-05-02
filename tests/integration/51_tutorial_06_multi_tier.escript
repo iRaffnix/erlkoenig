@@ -102,7 +102,7 @@ main(_) ->
                      "(resolved to real 10.61.0.x or 10.60.0.x IPs, "
                      "not literal tuples)",
       fun() ->
-        Out = os:cmd("nft list chain inet host forward 2>&1"),
+        Out = os:cmd("nft list chain inet erlkoenig_host forward 2>&1"),
         case re:run(Out, "10\\.(60|61)\\.0\\.", [{capture, none}]) of
             match -> ok;
             _ -> {error, {replica_ips_not_resolved_in_forward, Out}}

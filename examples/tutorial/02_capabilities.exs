@@ -33,7 +33,7 @@ defmodule Tutorial.Capabilities do
     # Zone-GW-IP auf UDP/53 erreichen. Die nft-Regel dafür schreibt
     # der Operator EXPLIZIT hin (kein Auto-Inject). Analog für
     # andere capabilities mit Netzwerk-Komponente.
-    nft_table :inet, "host" do
+    nft_host do
       nft_counter "host_drop"
 
       base_chain "input", hook: :input, type: :filter,

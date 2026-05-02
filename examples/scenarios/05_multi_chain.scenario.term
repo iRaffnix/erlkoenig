@@ -1,5 +1,5 @@
 #{
-    config => "examples/05_multi_chain.term",
+    config => "examples/scenarios/05_multi_chain.term",
     chain => <<"inbound">>,
     policy => drop,
     packets => [

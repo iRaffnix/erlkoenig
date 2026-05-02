@@ -5,7 +5,7 @@ defmodule SignedDeployment do
   #
   # PREREQUISITE: this example requires an operator-supplied
   # signed binary at /opt/api/server (+ /opt/api/server.sig).
-  # Running `ek up examples/signed_deployment.exs` without
+  # Running `ek up examples/stacks/signed_deployment.exs` without
   # completing steps 1-2 below will fail the container with
   # `EK_RUNTIME_BINARY_MISSING` or `signature_rejected` — the
   # example documents the *workflow*, not a self-contained
@@ -59,7 +59,7 @@ defmodule SignedDeployment do
     interface "eth0", zone: :wan
     ipvlan "secure", parent: {:device, "eth0"}, subnet: {10, 0, 0, 0, 24}
 
-    nft_table :inet, "host" do
+    nft_host do
       nft_set "ban", :ipv4_addr
       nft_counter "input_drop"
       nft_counter "input_ban"
@@ -91,7 +91,7 @@ defmodule SignedDeployment do
       end
     end
 
-    nft_table :inet, "erlkoenig" do
+    nft_zone do
       nft_counter "forward_drop"
 
       # ── 1. Forward: priority 0 ──────────────────────
@@ -110,7 +110,9 @@ defmodule SignedDeployment do
 
         nft_rule :drop, log_prefix: "FWD: ", counter: "forward_drop"
       end
+    end
 
+    nft_ct do
       # ── 2. Masquerade: priority +100 ────────────────
       base_chain "postrouting", hook: :postrouting, type: :nat,
         priority: :srcnat, policy: :accept do

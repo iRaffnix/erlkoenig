@@ -21,7 +21,7 @@ defmodule DslE2eEdge do
     ipvlan "e2e_edge", parent: {:dummy, "ek_e2e_edge"},
                       subnet: {10, 80, 0, 0, 24}
 
-    nft_table :inet, "host" do
+    nft_host do
       nft_counter "input_drop"
 
       base_chain "input", hook: :input, type: :filter,
@@ -29,6 +29,7 @@ defmodule DslE2eEdge do
         nft_rule :accept, ct_state: [:established, :related]
         nft_rule :accept, iifname: "lo"
         nft_rule :accept, ip_protocol: :icmp
+        nft_rule :accept, tcp_dport: 22
         # Zone gateway DNS — container must reach the resolver.
         nft_rule :accept, ip_saddr: {10, 80, 0, 0, 24}, udp_dport: 53
         nft_rule :drop,   counter: "input_drop"

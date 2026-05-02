@@ -7,7 +7,7 @@ defmodule FwDatabase do
   host firewall, no containers needed.
 
   Starten:
-    ek dsl compile examples/fw_database.exs -o /tmp/fw_database.term
+    ek dsl compile examples/firewall/fw_database.exs -o /tmp/fw_database.term
     ek config_load /tmp/fw_database.term
   """
 
@@ -16,7 +16,7 @@ defmodule FwDatabase do
   host do
     interface "eth0", zone: :wan
 
-    nft_table :inet, "host" do
+    nft_host do
       nft_set "app_servers", :ipv4_addr
       nft_counter "pg_accepted"
       nft_counter "input_drop"

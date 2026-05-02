@@ -13,7 +13,7 @@ defmodule MinimalVolumeOpts do
   #
   # Starten:
   #   mix run -e '
-  #     [{mod, _}] = Code.compile_file("examples/minimal_volume_opts.exs")
+  #     [{mod, _}] = Code.compile_file("examples/stacks/minimal_volume_opts.exs")
   #     mod.write!("/tmp/minimal_volume_opts.term")
   #   '
   #   erlkoenig eval 'erlkoenig_config:load(<<"/tmp/minimal_volume_opts.term">>).'

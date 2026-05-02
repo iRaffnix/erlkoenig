@@ -40,7 +40,7 @@ defmodule LoggedEcho do
   host do
     ipvlan "net", parent: {:dummy, "ek_net"}, subnet: {10, 0, 0, 0, 24}
 
-    nft_table :inet, "host" do
+    nft_host do
       nft_set "ban", :ipv4_addr
       nft_counter "input_drop"
       nft_counter "input_ban"

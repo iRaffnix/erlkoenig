@@ -1,10 +1,10 @@
-# examples/journal_demo.exs
+# examples/dev/journal_demo.exs
 #
 # Runnable end-to-end demo for the `requires :"journal.local"`
 # capability. Designed to be invoked from `dsl/` as:
 #
 #     cd dsl
-#     mix run ../examples/journal_demo.exs
+#     mix run ../examples/dev/journal_demo.exs
 #
 # What it does, in order:
 #   1. Wires the Erlang BEAM ebin paths into the VM so we can talk
@@ -29,7 +29,7 @@
 # --- 1. Code path: pull in the Erlang ebins ---
 
 erlang_ebins =
-  [Path.expand("../_build/default/lib/*/ebin", __DIR__)]
+  [Path.expand("../../_build/default/lib/*/ebin", __DIR__)]
   |> Enum.flat_map(&Path.wildcard/1)
   |> Enum.map(&String.to_charlist/1)
 

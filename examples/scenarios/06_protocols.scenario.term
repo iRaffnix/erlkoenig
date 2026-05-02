@@ -1,5 +1,5 @@
 #{
-    config => "examples/06_protocols.term",
+    config => "examples/scenarios/06_protocols.term",
     chain => <<"inbound">>,
     policy => drop,
     packets => [

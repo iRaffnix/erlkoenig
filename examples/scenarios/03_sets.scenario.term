@@ -1,5 +1,5 @@
 #{
-    config => "examples/03_sets.term",
+    config => "examples/scenarios/03_sets.term",
     chain => <<"inbound">>,
     policy => accept,
     sets => #{

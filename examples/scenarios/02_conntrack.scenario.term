@@ -1,5 +1,5 @@
 #{
-    config => "examples/02_conntrack.term",
+    config => "examples/scenarios/02_conntrack.term",
     chain => <<"inbound">>,
     policy => drop,
     packets => [

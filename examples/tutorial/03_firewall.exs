@@ -25,7 +25,7 @@ defmodule Tutorial.Firewall do
     ipvlan "fw", parent: {:dummy, "ek_fw"},
                  subnet: {10, 30, 0, 0, 24}
 
-    nft_table :inet, "host" do
+    nft_host do
 
       # ══════════════════════════════════════════════════════════
       # SETS — Runtime-mutable Listen von Werten

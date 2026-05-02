@@ -17,7 +17,7 @@
 %%   5. Optional: tamper the chain → verify_chain reports the
 %%      break at the right line.
 %%
-%% Mirrors the DSL term emitted by examples/case_mgmt_stack.exs
+%% Mirrors the DSL term emitted by examples/showcase/case_mgmt_stack.exs
 %% but spawns directly so this can run as a single sudo escript
 %% without the full ek-up flow. Operators in production use the
 %% .exs via ek up.

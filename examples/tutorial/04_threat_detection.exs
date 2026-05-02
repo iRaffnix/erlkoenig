@@ -32,7 +32,7 @@ defmodule Tutorial.ThreatDetection do
     ipvlan "edge", parent: {:dummy, "ek_edge"},
                    subnet: {10, 40, 0, 0, 24}
 
-    nft_table :inet, "host" do
+    nft_host do
       nft_set "ban", :ipv4_addr
       nft_counter "input_drop"
       nft_counter "input_ban"

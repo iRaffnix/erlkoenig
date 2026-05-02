@@ -57,7 +57,7 @@ defmodule SupervisionSemantics do
       parent: {:dummy, "ek_app"},
       subnet: {10, 0, 0, 0, 24}
 
-    nft_table :inet, "host" do
+    nft_host do
       base_chain "input", hook: :input, type: :filter,
                  priority: :filter, policy: :drop do
         # ── Standard-Härtung ──────────────────────────────

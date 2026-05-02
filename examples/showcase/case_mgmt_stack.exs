@@ -36,7 +36,7 @@ defmodule CaseMgmtStack do
     # Unix socket. The socket needs no nft rule (it's not network).
     # The DNS one does — we write it here explicitly. No magic
     # injection: operator owns the host firewall.
-    nft_table :inet, "host" do
+    nft_host do
       nft_set "ban", :ipv4_addr
       nft_counter "input_drop"
       nft_counter "input_ban"
@@ -146,7 +146,9 @@ defmodule CaseMgmtStack do
       flood over: 50, within: s(10)
       port_scan over: 20, within: m(1)
       slow_scan over: 5, within: h(1)
-      honeypot [21, 22, 23, 445, 1433, 1521, 3306, 3389, 5900, 6379]
+      # SSH is explicitly allowed by the host firewall above, so keep
+      # tcp/22 out of the honeypot set to avoid operator lockout.
+      honeypot [21, 23, 445, 1433, 1521, 3306, 3389, 5900, 6379]
     end
 
     respond do

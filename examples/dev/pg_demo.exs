@@ -14,11 +14,11 @@ defmodule PgDemo do
     * erlkoenig daemon running.
 
   Usage:
-    ek up       examples/pg_demo.exs
+    ek up       examples/dev/pg_demo.exs
     ek ps
     ek vol list
     ek vol set-quota <uuid> 20M      # raise cap live, no restart
-    ek down     examples/pg_demo.exs   # persistent volumes survive,
+    ek down     examples/dev/pg_demo.exs   # persistent volumes survive,
                                        # ephemeral scratch is cleaned
     ek vol destroy <uuid>              # only removes data explicitly
   """

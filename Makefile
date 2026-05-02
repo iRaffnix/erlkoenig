@@ -33,6 +33,7 @@
 .PHONY: all check erl test dialyzer integration release \
         dsl dsl-bundle dsl-escript test-dsl docs docs-erlang docs-error-codes go-demos \
         fmt fmt-check xref lint error-catalog-check \
+        verifier verifier-xcheck agents-build showcase showcase-verify \
         install uninstall fetch-artifacts install-smoke \
         tag clean clean-erl clean-dsl
 
@@ -205,7 +206,7 @@ verifier:
 # 3 tamper exercises. Either side drifting on canonical-JSON, hash,
 # signature, or seal format breaks this loud and fast.
 verifier-xcheck: erl verifier
-	cd dsl && mix run ../examples/audit_verifier_demo.exs
+	cd dsl && mix run ../examples/dev/audit_verifier_demo.exs
 
 # ── case_mgmt showcase (book ch21) ─────────────────────────────
 # End-to-end demo: build the two Go agents, deploy to a remote
@@ -215,17 +216,19 @@ verifier-xcheck: erl verifier
 
 SHOWCASE_HOST ?= erlkoenig-2__root
 SHOWCASE_RT_DEMO ?= /opt/erlkoenig/rt/demo
+SHOWCASE_BIN_DIR ?= examples/showcase/bin
 
 agents-build:
+	mkdir -p $(SHOWCASE_BIN_DIR)
 	cd examples/agents/case_mgmt && \
-	  CGO_ENABLED=0 go build -ldflags="-s -w" -o case_mgmt .
+	  CGO_ENABLED=0 go build -ldflags="-s -w" -o ../../showcase/bin/case_mgmt .
 	cd examples/agents/deadline_worker && \
-	  CGO_ENABLED=0 go build -ldflags="-s -w" -o deadline_worker .
+	  CGO_ENABLED=0 go build -ldflags="-s -w" -o ../../showcase/bin/deadline_worker .
 
 showcase: agents-build
 	@echo "==> deploying agents + schema to $(SHOWCASE_HOST)"
-	scp examples/agents/case_mgmt/case_mgmt          $(SHOWCASE_HOST):$(SHOWCASE_RT_DEMO)/
-	scp examples/agents/deadline_worker/deadline_worker $(SHOWCASE_HOST):$(SHOWCASE_RT_DEMO)/
+	scp $(SHOWCASE_BIN_DIR)/case_mgmt          $(SHOWCASE_HOST):$(SHOWCASE_RT_DEMO)/
+	scp $(SHOWCASE_BIN_DIR)/deadline_worker    $(SHOWCASE_HOST):$(SHOWCASE_RT_DEMO)/
 	scp examples/agents/case_mgmt/schema.sql         $(SHOWCASE_HOST):/tmp/
 	scp examples/agents/case_mgmt/seed.sql           $(SHOWCASE_HOST):/tmp/
 	@echo "==> resetting cases db (DROP + CREATE + seed)"

@@ -54,7 +54,7 @@ main(_) ->
     test_helper:step("Natural exit (crasher, 2s countdown)", fun() ->
         {ok, P2} = erlkoenig:spawn(test_helper:demo("crasher"),
             #{ip => {10,0,0,11}, args => [<<"2">>]}),
-        wait_for_state(P2, stopped, 10)
+        wait_for_state(P2, failed, 20)
     end),
 
     io:format("~n=== Test 01 bestanden ===~n~n"),

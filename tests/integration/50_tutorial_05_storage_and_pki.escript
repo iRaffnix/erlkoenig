@@ -10,10 +10,9 @@
 %%   - The api container starts with its declared cgroup limits
 %%     (disk/cpu/memory/pids).
 %%
-%% NOTE: `signature: :required` + `files: %{...}` are currently
-%% dropped by the DSL (Pod.Builder.begin_container does not accept
-%% these opts).  Tracked as a separate DSL gap; this test does not
-%% exercise signature verification.
+%% NOTE: the runnable tutorial intentionally does not require signatures:
+%% the installed echo_server demo binary is unsigned. Signature enforcement
+%% is covered by the dedicated PKI examples/tests.
 -mode(compile).
 
 -define(PARENT, <<"ek_t50">>).
@@ -41,16 +40,12 @@ main(_) ->
         tutorial_helper:compile_dsl(Root, Example, TermFile)
     end),
 
-    test_helper:step("patch term (strip signature — unsigned echo_server)",
+    test_helper:step("patch term (unsigned echo_server)",
       fun() ->
         ok = tutorial_helper:patch_term(TermFile,
                #{binary => DemoBin, parents => #{<<"ek_data">> => ?PARENT}}),
-        %% signature: :required gates spawn on PKI verification against
-        %% installed trust roots. The echo_server demo binary is not
-        %% signed, so strip `signature_required` and `sig_path` from
-        %% every container before loading — the tutorial's TEACHING of
-        %% signature stays in the shape test, the integration test
-        %% validates the rest.
+        %% Keep this scrubber as a compatibility guard for older generated
+        %% terms; current tutorial config no longer emits signature fields.
         {ok, Config0} = erlkoenig_config:parse(TermFile),
         Pods = [strip_sig_opts(P) || P <- maps:get(pods, Config0, [])],
         Config1 = Config0#{pods => Pods},

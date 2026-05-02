@@ -77,10 +77,12 @@ main([]) ->
     NftConfig = #{chains => [
         #{name => <<"output">>, hook => output, type => filter,
           priority => 0, policy => drop,
-          rules => [{accept, #{ct => established}}, {accept, #{tcp => 4000}}]},
+          rules => [{accept, #{ct_state => [established, related]}},
+                    {accept, #{tcp_dport => 4000}}]},
         #{name => <<"input">>, hook => input, type => filter,
           priority => 0, policy => drop,
-          rules => [{accept, #{ct => established}}, {accept, #{tcp => 7777}}]}
+          rules => [{accept, #{ct_state => [established, related]}},
+                    {accept, #{tcp_dport => 7777}}]}
     ]},
     Batch = erlkoenig_nft_container:build_batch(NftConfig, <<"ct_nfttest">>),
     io:format("   batch: ~b bytes~n", [byte_size(Batch)]),
@@ -135,4 +137,3 @@ cleanup(Port) ->
     receive {Port, {data, _}} -> ok after 5000 -> ok end,
     receive {Port, {data, _}} -> ok after 5000 -> ok end,
     port_close(Port).
-

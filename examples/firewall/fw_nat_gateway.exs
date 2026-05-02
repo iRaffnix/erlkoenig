@@ -7,7 +7,7 @@ defmodule FwNatGateway do
   host firewall, no containers needed.
 
   Starten:
-    ek dsl compile examples/fw_nat_gateway.exs -o /tmp/fw_nat_gateway.term
+    ek dsl compile examples/firewall/fw_nat_gateway.exs -o /tmp/fw_nat_gateway.term
     ek config_load /tmp/fw_nat_gateway.term
   """
 
@@ -16,7 +16,7 @@ defmodule FwNatGateway do
   host do
     interface "eth0", zone: :wan
 
-    nft_table :inet, "host" do
+    nft_host do
       nft_counter "forward_drop"
 
       # -- Input: standard hardened host --

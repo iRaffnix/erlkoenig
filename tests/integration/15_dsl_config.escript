@@ -14,7 +14,7 @@ main(_) ->
     test_helper:boot(),
 
     Root     = test_helper:project_root(),
-    Example  = filename:join(Root, "examples/simple_echo.exs"),
+    Example  = filename:join(Root, "examples/stacks/simple_echo.exs"),
     TermFile = "/tmp/erlkoenig_integration_15.term",
     DemoBin  = binary_to_list(test_helper:demo("echo_server")),
 

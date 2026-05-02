@@ -33,9 +33,9 @@ defmodule Tutorial.StorageAndPki do
   `rootfs:` (composefs manifest) gibt's attestable container
   provenance — lohnt für regulated workloads.
 
-  This tutorial uses production-style `signature: :required`
-  declarations. Without installed trust roots and signed demo binaries,
-  those containers fail closed and require operator action.
+  This runnable tutorial keeps PKI as an operator note only: the installed
+  demo binaries are intentionally unsigned. The fail-closed deployment
+  shape lives in `examples/stacks/signed_deployment.exs` and Chapter 10.
   """
   use Erlkoenig.Stack
 
@@ -43,7 +43,7 @@ defmodule Tutorial.StorageAndPki do
     ipvlan "data", parent: {:dummy, "ek_data"},
                    subnet: {10, 50, 0, 0, 24}
 
-    nft_table :inet, "host" do
+    nft_host do
       nft_counter "input_drop"
       base_chain "input", hook: :input, type: :filter,
                  priority: :filter, policy: :drop do
@@ -59,24 +59,20 @@ defmodule Tutorial.StorageAndPki do
   pod "stateful", strategy: :one_for_one do
 
     # ══════════════════════════════════════════════════════════════
-    # Container 1: signed postgres mit persistenten Volumes
+    # Container 1: postgres mit persistenten Volumes
     # ══════════════════════════════════════════════════════════════
     container "db",
       binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
       args: ["5432"],
       zone: "data",
       replicas: 1,
-      # Missing PKI setup is an operator-action failure, not a runtime
-      # crash. Avoid restart loops that mask the root cause.
       restart: :temporary,
       limits: %{memory: 512_000_000, pids: 256},
       # ── Signed Binary ──
-      # `:required`  → Binary muss eine gültige Signature gegen
-      #                 die installierten Trust-Roots haben.
-      # `"/path.sig"` → expliziter Pfad zur Detached-Signature.
-      # Bei Mismatch: Container spawnt nicht, audit-event landet
-      # in der Chain.
-      signature: :required,
+      # In production this DB binary would use:
+      #   signature: :required
+      # The runnable tutorial omits it because the shipped echo_server
+      # demo binary is unsigned.
       # ── Injected Files ──
       # Kleine Konfigs die der Container lesen soll, werden
       # inline injiziert statt in einem Volume zu leben. Kernel
@@ -140,7 +136,7 @@ defmodule Tutorial.StorageAndPki do
     end
 
     # ══════════════════════════════════════════════════════════════
-    # Container 2: API — explizite Signature-Datei, cgroup-heavy
+    # Container 2: API — cgroup-heavy
     # ══════════════════════════════════════════════════════════════
     container "api",
       binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
@@ -154,9 +150,12 @@ defmodule Tutorial.StorageAndPki do
         pids:   128,
         cpu:    50_000,                      # 50% einer CPU-unit
         disk:   1_000_000_000                # 1 GB volume budget
-      },
-      # Mit expliziter Signature-Pfad:
-      signature: "/etc/erlkoenig/artifacts/api.sig" do
+      }
+      # In production this API binary could use an explicit detached
+      # signature path, for example:
+      #   signature: "/etc/erlkoenig/artifacts/api.sig"
+      # The runnable tutorial omits it for the unsigned demo binary.
+      do
 
       requires :"postgres.local"
       requires :"journal.local"

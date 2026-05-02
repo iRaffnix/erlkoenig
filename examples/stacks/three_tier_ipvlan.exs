@@ -29,12 +29,9 @@ defmodule ThreeTierIpvlan do
     ip link set ek_ct0 up
 
   WARNING: this example takes over the host firewall.
-  The host input chain has default policy :drop and allows SSH only on
-  tcp/22222, not tcp/22. Existing SSH sessions usually survive via
-  ct_state established/related, but reconnects on port 22 are dropped
-  and port 22 is listed as a honeypot in the guard block. Run this only
-  on a host where sshd listens on 22222 or where serial/KVM/cloud
-  console recovery is available.
+  The host input chain has default policy :drop and allows SSH on
+  tcp/22. Port 22 is deliberately not a honeypot; operator access
+  must stay recoverable on a real host.
   """
 
   use Erlkoenig.Stack
@@ -166,7 +163,7 @@ defmodule ThreeTierIpvlan do
       flood over: 50, within: s(10)
       port_scan over: 20, within: m(1)
       slow_scan over: 5, within: h(1)
-      honeypot [21, 22, 23, 445, 1433, 1521, 3306,
+      honeypot [21, 23, 445, 1433, 1521, 3306,
                 3389, 5900, 6379, 8080, 8888, 9200, 27017]
     end
 
@@ -199,7 +196,7 @@ defmodule ThreeTierIpvlan do
 
     # ── Host-Firewall ────────────────────────────────
 
-    nft_table :inet, "host" do
+    nft_host do
       nft_set "ban", :ipv4_addr
       nft_counter "input_drop"
       nft_counter "input_ban"
@@ -217,7 +214,7 @@ defmodule ThreeTierIpvlan do
         nft_rule :accept, ct_state: [:established, :related]
         nft_rule :accept, iifname: "lo"
         nft_rule :accept, ip_protocol: :icmp
-        nft_rule :accept, tcp_dport: 22222          # SSH
+        nft_rule :accept, tcp_dport: 22          # SSH
         nft_rule :accept, tcp_dport: 9100           # Prometheus
 
         # ── Runtime-Services ──────────────────────────────

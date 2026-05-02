@@ -10,8 +10,8 @@ defmodule SimpleEcho do
   # Keine PKI, keine Multi-Tier-Topologie, keine Volumes.
   #
   # Starten (alles auf der Box):
-  #   ek dsl compile examples/simple_echo.exs
-  #   ek config load examples/simple_echo.term
+  #   ek dsl compile examples/stacks/simple_echo.exs
+  #   ek config load examples/stacks/simple_echo.term
   #
   # Beobachten:
   #   ek ct list
@@ -42,7 +42,7 @@ defmodule SimpleEcho do
     #
     # nft evaluiert top-to-bottom; die erste matchende Regel gewinnt.
 
-    nft_table :inet, "host" do
+    nft_host do
 
       # ── Sets ─────────────────────────────────────────────
       # Ban-Set: wird vom Guard automatisch gefüllt.

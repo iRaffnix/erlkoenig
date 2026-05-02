@@ -81,7 +81,7 @@ main(_) ->
         ok = file:write_file(TermFile, io_lib:format("~tp.~n", [Mutated])),
 
         Outcome = try_load(TermFile),
-        HostTable = os:cmd("nft list table inet host 2>&1"),
+        HostTable = os:cmd("nft list table inet erlkoenig_host 2>&1"),
         KernelOk =
             re:run(HostTable, "error:", [{capture, none}]) =/= match andalso
             not is_table_empty(HostTable),
@@ -174,7 +174,8 @@ flush_ruleset() ->
     ok.
 
 is_table_empty(Out) ->
-    case re:run(Out, "table inet host \\{\\s*\\}", [{capture, none}]) of
+    case re:run(Out, "table inet erlkoenig_host \\{\\s*\\}",
+                [{capture, none}]) of
         match -> true;
         _ -> false
     end.

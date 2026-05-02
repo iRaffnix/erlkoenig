@@ -24,7 +24,7 @@ defmodule HardenedVolumes do
   #
   # Starten:
   #   mix run -e '
-  #     [{mod, _}] = Code.compile_file("examples/hardened_volumes.exs")
+  #     [{mod, _}] = Code.compile_file("examples/stacks/hardened_volumes.exs")
   #     mod.write!("/tmp/hardened_volumes.term")
   #   '
   #   erlkoenig eval 'erlkoenig_config:load(<<"/tmp/hardened_volumes.term">>).'
@@ -39,7 +39,7 @@ defmodule HardenedVolumes do
   host do
     ipvlan "web-net", parent: {:dummy, "ek_web"}, subnet: {10, 0, 0, 0, 24}
 
-    nft_table :inet, "host" do
+    nft_host do
       base_chain "input", hook: :input, type: :filter,
         priority: :filter, policy: :drop do
         # ── Standard-Härtung ──────────────────────────────

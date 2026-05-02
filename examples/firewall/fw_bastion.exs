@@ -7,7 +7,7 @@ defmodule FwBastion do
   Standalone host firewall, no containers needed.
 
   Starten:
-    ek dsl compile examples/fw_bastion.exs -o /tmp/fw_bastion.term
+    ek dsl compile examples/firewall/fw_bastion.exs -o /tmp/fw_bastion.term
     ek config_load /tmp/fw_bastion.term
   """
 
@@ -16,7 +16,7 @@ defmodule FwBastion do
   host do
     interface "eth0", zone: :wan
 
-    nft_table :inet, "host" do
+    nft_host do
       nft_counter "ssh_office"
       nft_counter "ssh_rejected"
       nft_counter "forward_drop"

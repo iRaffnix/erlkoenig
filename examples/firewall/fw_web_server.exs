@@ -7,7 +7,7 @@ defmodule FwWebServer do
   no containers needed.
 
   Starten:
-    ek dsl compile examples/fw_web_server.exs -o /tmp/fw_web_server.term
+    ek dsl compile examples/firewall/fw_web_server.exs -o /tmp/fw_web_server.term
     ek config_load /tmp/fw_web_server.term
   """
 
@@ -16,7 +16,7 @@ defmodule FwWebServer do
   host do
     interface "eth0", zone: :wan
 
-    nft_table :inet, "host" do
+    nft_host do
       nft_counter "ssh_accepted"
       nft_counter "http_accepted"
       nft_counter "input_drop"

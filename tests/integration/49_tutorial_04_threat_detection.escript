@@ -6,10 +6,11 @@
 %%   - ct_guard block in the tutorial reaches the runtime — the
 %%     `erlkoenig_nft_ct_guard` and `erlkoenig_threat_mesh` gen_servers
 %%     are alive and respond to calls once the DSL is loaded.
-%%   - The kernel `ban` set exists in the raw-prerouting path as the
-%%     tutorial declared.
+%%   - The tutorial-declared kernel `ban` set exists in the
+%%     raw-prerouting path.
 %%   - The ban pipeline works end-to-end: `local_ban` from the mesh
-%%     lands an IP in the kernel set; `local_unban` removes it.
+%%     lands an IP in the runtime-managed host blocklist;
+%%     `local_unban` removes it.
 %%   - Whitelisted IPs are immune (local_ban is a no-op for them).
 %%
 %% Full TCP honeypot simulation would require a second host acting
@@ -75,7 +76,7 @@ main(_) ->
 
     test_helper:step("host nft 'ban' set exists in raw-prerouting",
       fun() ->
-        Out = os:cmd("nft list set inet host ban 2>&1"),
+        Out = os:cmd("nft list set inet erlkoenig_host ban 2>&1"),
         case re:run(Out, "set ban", [{capture, none}]) of
             match -> ok;
             _ -> {error, {no_ban_set, Out}}
@@ -114,7 +115,7 @@ main(_) ->
         BanUntil = os:system_time(millisecond) + 60_000,
         ok = erlkoenig_threat_mesh:local_ban(Gw, BanUntil, honeypot),
         timer:sleep(300),
-        Out = os:cmd("nft list set inet host ban 2>&1"),
+        Out = os:cmd("nft list set inet erlkoenig_host ban 2>&1"),
         %% Whitelisted IP MUST NOT appear in ban set
         case re:run(Out, "10\\.40\\.0\\.1\\b", [{capture, none}]) of
             match -> {error, {whitelisted_ip_got_banned, Out}};
@@ -174,9 +175,9 @@ wait_for_ip_not_in_ban_set_loop(Ip, Dl) ->
     end.
 
 ip_in_ban_set(<<A, B, C, D>>) ->
-    %% threat_mesh bans go into the runtime's managed set
-    %% `inet erlkoenig blocklist` (created at boot by the nft
-    %% subsystem, lives alongside the user's DSL-declared sets).
-    Out = os:cmd("nft list set inet erlkoenig blocklist 2>&1"),
+    %% local_ban uses the runtime-managed host blocklist. The tutorial
+    %% DSL `ban` set is checked separately above as a declared firewall
+    %% object.
+    Out = os:cmd("nft list set inet erlkoenig_host blocklist 2>&1"),
     Needle = lists:flatten(io_lib:format("~B.~B.~B.~B", [A, B, C, D])),
     re:run(Out, Needle, [{capture, none}]) =:= match.

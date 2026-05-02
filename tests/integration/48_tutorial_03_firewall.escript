@@ -80,7 +80,7 @@ main(_) ->
 
     test_helper:step("trusted_cidrs set contains 4 interval elements",
       fun() ->
-        Out = os:cmd("nft list set inet host trusted_cidrs 2>&1"),
+        Out = os:cmd("nft list set inet erlkoenig_host trusted_cidrs 2>&1"),
         Checks = ["10.0.0.0/8", "192.168.0.0/16",
                   "203.0.113.0/24", "198.51.100.42"],
         case [C || C <- Checks,

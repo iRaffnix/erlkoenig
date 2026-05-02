@@ -1,4 +1,4 @@
-# examples/audit_verifier_demo.exs
+# examples/dev/audit_verifier_demo.exs
 #
 # Runnable end-to-end demo for SPEC-AS-005 stage 4 — the offline
 # Go audit verifier. Mirrors Chapter 20 of the book in a single
@@ -21,13 +21,13 @@
 # Usage (from the dsl/ directory):
 #
 #     cd dsl
-#     mix run ../examples/audit_verifier_demo.exs
+#     mix run ../examples/dev/audit_verifier_demo.exs
 #
 # Prerequisite once: `make erl && make verifier` from the repo root.
 
 # --- 1. Locate the verifier binary ---
 
-repo_root = Path.expand("..", __DIR__)
+repo_root = Path.expand("../..", __DIR__)
 verifier  = Path.join(repo_root, "dist/audit-verifier")
 
 unless File.exists?(verifier) do

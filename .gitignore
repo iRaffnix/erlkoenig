@@ -54,6 +54,7 @@ dsl/deps/
 dist/audit-verifier
 tools/audit-verifier/audit-verifier
 
-# Go agent binaries — compiled output, source lives alongside
+# Showcase binaries — local build output; sources live under examples/agents/
+examples/showcase/bin/
 examples/agents/case_mgmt/case_mgmt
 examples/agents/deadline_worker/deadline_worker

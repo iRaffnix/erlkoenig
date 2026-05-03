@@ -14,7 +14,7 @@ defmodule ThreeTier do
     ipvlan "dmz", parent: {:device, "eth0"}, subnet: {10, 0, 0, 0, 24}
     ipvlan "app", parent: {:dummy,  "ek_app"}, subnet: {10, 0, 1, 0, 24}
 
-    nft_table :inet, "erlkoenig" do
+    nft_host do
       nft_counter "forward_drop"
 
       base_chain "forward", hook: :forward, type: :filter,
@@ -35,47 +35,54 @@ defmodule ThreeTier do
   end
 
   pod "web", strategy: :one_for_one do
-    container "nginx",
-      binary: "/opt/nginx",
-      args: ["8443"],
-      limits: %{memory: 268_435_456, pids: 100},
-      restart: :permanent do
+    for_each i <- 0..2 do
+      container "nginx-#{i}",
+        binary: "/opt/nginx",
+        args: ["8443"],
+        zone: "dmz",
+        limits: %{memory: 268_435_456, pids: 100},
+        restart: :permanent do
 
-      # Declare what the workload needs from the platform.
-      # No magic inject — operator wires the bind-mounts explicitly.
-      requires :"dns.local"
-      requires :"journal.local"
+        # Declare what the workload needs from the platform.
+        # No magic inject — operator wires the bind-mounts explicitly.
+        requires :"dns.local"
+        requires :"journal.local"
 
-      nft do
-        output do
-          nft_rule :accept, ct_state: [:established, :related]
-          nft_rule :accept, ip_daddr: {10, 0, 1, 0, 24}, tcp_dport: 4000
-          nft_rule :drop
+        nft do
+          output policy: :drop do
+            nft_rule :accept, ct_state: [:established, :related]
+            nft_rule :accept, ip_daddr: {10, 0, 1, 0, 24}, tcp_dport: 4000
+            nft_rule :drop
+          end
+
+          # Rate-limit incoming SYN per source IP.
+          input policy: :drop do
+            conn_limit per_ip: 50
+            nft_rule :accept, ct_state: [:established, :related]
+            nft_rule :accept, ip_saddr: {1, 2, 3, 0, 24}
+            nft_rule :accept, ip_saddr: {10, 0, 0, 0, 8}
+            nft_rule :drop
+          end
         end
 
-        # Rate-limit incoming SYN per source IP + cap concurrent conns.
-        input do
-          conn_limit per_ip: 50, global: 500
-          nft_rule :accept, ct_state: [:established, :related]
-          ip_allow [{1, 2, 3, 0, 24}, {10, 0, 0, 0, 8}]
-          nft_rule :drop
+        publish interval: 2000 do
+          metric :memory
+          metric :cpu
+          metric :pids
         end
-      end
-
-      publish interval: 2000 do
-        metric :memory
-        metric :cpu
-        metric :pids
       end
     end
   end
 
   pod "app", strategy: :one_for_all do
-    container "api", binary: "/opt/api", args: ["4000"], restart: :permanent
+    for_each i <- 0..1 do
+      container "api-#{i}",
+        binary: "/opt/api",
+        args: ["4000"],
+        zone: "app",
+        restart: :permanent
+    end
   end
-
-  attach "web", to: "dmz", replicas: 3
-  attach "app", to: "app", replicas: 2
 end
 ```
 
@@ -87,7 +94,7 @@ ek config load /opt/stack.term
 ## What It Does
 
 - **Containers** — Linux namespaces (PID, NET, MNT, UTS, IPC, CGROUP), 50ms spawn, OTP supervision per pod, three strategies (`:one_for_one`, `:one_for_all`, `:rest_for_one`)
-- **Firewall** — nftables via pure Erlang Netlink, kein `nft`-CLI-Fork. Egress- und Ingress-Chains, Counters, NFLOG, NAT, Conntrack, `conn_limit`, `ip_allow`, `rate_limit`, JHash-basiertes DNAT-Loadbalancing
+- **Firewall** — nftables via pure Erlang Netlink, kein `nft`-CLI-Fork. Egress- und Ingress-Chains, Counters, NFLOG, NAT, Conntrack, `conn_limit`, CIDR-Matches, `rate_limit`, JHash-basiertes DNAT-Loadbalancing
 - **cgroups v2** — Memory, CPU, PIDs Limits + PSI-Pressure-Metriken + OOM-Detection + Cgroup-Devices-Filter
 - **Observability** — 40+ Event-Typen über AMQP (Container-Lifecycle, Stats, Firewall, Conntrack, Guard, Security, Audit, Capabilities)
 - **Audit Chain** — SHA-256 Hash-Chain über alle Security-relevanten Events, Ed25519-Signatur pro Eintrag, täglicher HMAC-Seal. Offline-Verifier in Go (`tools/audit-verifier`) rekonstruiert den ganzen Chain unabhängig vom Producer

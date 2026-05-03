@@ -216,7 +216,7 @@ breaking customer verification binaries.
 
 ## Full worked example
 
-The showcase pod from Chapter 21 (`examples/case_mgmt_stack.exs`)
+The showcase pod from Chapter 21 (`examples/showcase/case_mgmt_stack.exs`)
 already declares the capability. Run the showcase end-to-end:
 
 ```bash

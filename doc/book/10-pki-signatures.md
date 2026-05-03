@@ -212,7 +212,7 @@ defmodule SignedStack do
   pod "p", strategy: :one_for_one do
     container "app", binary: "/tmp/pki/demo", args: ["9000"],
       signature: :required,
-      zone: "s", replicas: 1, restart: :permanent
+      zone: "s", restart: :permanent
   end
 end
 EOF

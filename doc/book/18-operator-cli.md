@@ -206,7 +206,7 @@ ek admission snapshot
 
 This transcript walks through what an operator typically runs during
 incident response. The setup assumes a stack already loaded; if nothing
-is running, start with `ek up examples/pg_demo.exs` first.
+is running, start with `ek up examples/dev/pg_demo.exs` first.
 
 **1. Quick liveness check.**
 

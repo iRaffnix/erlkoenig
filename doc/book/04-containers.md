@@ -23,22 +23,27 @@ A pod block takes a name (binary) and exactly one required option,
 
 ```elixir
 pod "web", strategy: :one_for_one do
-  container "api",  binary: "...", zone: "dmz", replicas: 3, restart: :permanent
-  container "auth", binary: "...", zone: "dmz", replicas: 1, restart: :permanent
+  for_each i <- 0..2 do
+    container "api-#{i}", binary: "...", zone: "dmz", restart: :permanent
+  end
+
+  container "auth", binary: "...", zone: "dmz", restart: :permanent
 end
 ```
 
 ## Container options
 
-Four options are required on every container: `binary:`, `zone:`,
-`replicas:`, `restart:`. Everything else has a documented default.
+Three options are required on every container: `binary:`, `zone:`,
+`restart:`. Everything else has a documented default. Multiple
+instances are written explicitly with `for_each`, not hidden behind
+a container option.
 
 | Option        | Type                    | Default    | Meaning                                           |
 |---------------|-------------------------|------------|---------------------------------------------------|
 | `binary:`     | string                  | required   | Absolute path to the static binary                |
 | `zone:`       | string                  | required   | IPVLAN zone name (→ Chapter 5)                    |
-| `replicas:`   | positive integer        | required   | How many copies of this container to run          |
 | `restart:`    | atom                    | required   | See *restart policies* below                      |
+| `replicas:`   | positive integer        | `1`        | Legacy compatibility; prefer explicit `for_each`  |
 | `args:`       | list of strings         | `[]`       | Arguments passed to `execve()`                    |
 | `env:`        | map of string → string  | `%{}`      | Environment variables for the binary              |
 | `files:`      | map of path → content   | `%{}`      | Files written into the rootfs before `execve()`   |
@@ -76,12 +81,13 @@ keyed by container name; it survives pod-supervisor respawns and
 drift-driven reconcile-restarts, and only resets when the name leaves
 the declared stack entirely.
 
-## Replicas and zones
+## Instances and zones
 
-Each replica of a container is a separate state machine with its own name
-(`<pod>-<N>-<container>`), its own IP from the zone's pool, its own
-persistent volumes. Replicas are not load-balanced by erlkoenig — that's
-the service layer's job; erlkoenig just runs N independent copies.
+Each declared container instance is a separate state machine with its
+own name (`<pod>-<N>-<container>`), its own IP from the zone's pool,
+and its own persistent volumes. erlkoenig does not load-balance these
+instances — that's the service layer's job; erlkoenig just runs the
+independent processes you wrote in the stack file.
 
 `zone:` is a string that must match an `ipvlan` zone declared inside
 `host do ... end`. The container gets placed in that zone's IP pool.
@@ -93,7 +99,7 @@ collision-free.
 The `limits:` map is passed straight through to the cgroup controller:
 
 ```elixir
-container "api", binary: "...", zone: "dmz", replicas: 1, restart: :permanent,
+container "api", binary: "...", zone: "dmz", restart: :permanent,
   limits: %{memory: 256 * 1024 * 1024,    # 256 MB hard ceiling
             pids: 256,                      # fork bomb limit
             cpu: 50}                        # 50% of one core (weight-based)
@@ -116,7 +122,7 @@ runtime services a workload depends on. Add them inside the container
 block with the `requires` macro:
 
 ```elixir
-container "api", binary: "...", zone: "dmz", replicas: 1, restart: :permanent do
+container "api", binary: "...", zone: "dmz", restart: :permanent do
   requires :"dns.local"        # network kind — declarative, runtime always-on
   requires :"journal.local"    # socket kind — auto-mount + env injection
 end
@@ -178,7 +184,7 @@ shows up when a container actually dies. This section puts three
 minimal pods next to each other, kills the middle container in each,
 and observes how the siblings react.
 
-The stack file `examples/pod_strategies.exs` defines three pods:
+The stack file `examples/stacks/pod_strategies.exs` defines three pods:
 
 ```
 pod "ofo", strategy: :one_for_one   → containers a, b, c
@@ -190,7 +196,7 @@ Each container is a tiny echo server on a distinct IP in zone
 `strategies` (10.99.200.0/24). Nine containers, one zone, one file.
 
 ```bash
-cp /opt/erlkoenig/examples/pod_strategies.exs ~/strategies.exs
+cp /opt/erlkoenig/examples/stacks/pod_strategies.exs ~/strategies.exs
 ek up ~/strategies.exs
 ek ps
 ```

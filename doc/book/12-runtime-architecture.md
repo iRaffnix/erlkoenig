@@ -177,7 +177,7 @@ Start a container and observe the side effects at each layer.
 wc -l /proc/mounts                  # e.g. 27
 
 # Terminal 2: start something
-ek up examples/simple_echo.exs
+ek up examples/stacks/simple_echo.exs
 
 # Terminal 1: after spawn
 wc -l /proc/mounts                  # 30 (+3: rootfs tmpfs, dev, proc)
@@ -216,7 +216,7 @@ volumes at the declared paths.
 **5. Clean shutdown.**
 
 ```bash
-ek down examples/simple_echo.exs
+ek down examples/stacks/simple_echo.exs
 wc -l /proc/mounts    # back to 27
 ```
 

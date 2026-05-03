@@ -157,7 +157,7 @@ defmodule GuardDemo do
     end
 
     # Minimal host firewall so the honeypot port is actually reachable
-    nft_table :inet, "host" do
+    nft_host do
       nft_set "ban", :ipv4_addr
       nft_counter "banned"
 
@@ -210,7 +210,7 @@ Within seconds, the event consumer prints:
 Confirm the kernel got the ban:
 
 ```bash
-nft list set inet host ban
+nft list set inet erlkoenig_host blocklist
 # elements = { 203.0.113.17 timeout 1d }
 ```
 
@@ -218,7 +218,7 @@ Any further packets from that IP hit the raw-priority drop rule
 (→ Chapter 6); the counter grows:
 
 ```bash
-watch -n1 'nft list counter inet host banned'
+watch -n1 'nft list counter inet erlkoenig_host banned'
 ```
 
 **4. Observe the actor's process.** Every banned IP has its own

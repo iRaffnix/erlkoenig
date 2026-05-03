@@ -306,6 +306,7 @@ Routing:
 | `guard.threat.slow_scan` | `ip`, `ports`, `window`, `reason` |
 | `guard.threat.suspect` | `ip`, `ports`, `reason` |
 | `guard.threat.ban_failed` | `ip`, `reason` |
+| `guard.threat.unban_failed` | `ip`, `code` |
 | `guard.stats.summary` | `actors`, `bans`, `events_seen`, `tracked_events` |
 
 ### System

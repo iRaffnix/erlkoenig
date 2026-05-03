@@ -162,7 +162,7 @@ were invisible at 100 iterations.
 ## What PropEr doesn't replace
 
 Example-based tests remain important. They name scenarios the team
-cares about ("the hardened-uploads example with five replicas
+cares about ("the hardened-uploads example with five explicit instances
 works end-to-end"), they document intent, and they're cheaper to
 read than a property plus a model. PropEr is additive: it finds
 what examples don't.

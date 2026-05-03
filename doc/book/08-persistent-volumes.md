@@ -110,35 +110,37 @@ Both lifecycles coexist within one container. A typical hardened
 setup mixes them:
 
 ```elixir
-container "app", binary: "...", zone: "dmz",
-  replicas: 2, restart: :permanent do
+for_each i <- 0..1 do
+  container "app-#{i}", binary: "...", zone: "dmz",
+    restart: :permanent do
 
-  # persistent: rw application state
-  volume "/data",    persist: "app-data"
+    # persistent: rw application state
+    volume "/data",    persist: "app-data"
 
-  # persistent, read-only config
-  volume "/etc/app", persist: "app-config", read_only: true
+    # persistent, read-only config
+    volume "/etc/app", persist: "app-config", read_only: true
 
-  # persistent upload area, no executable files
-  volume "/uploads", persist: "app-uploads",
-                     opts: "rw,nosuid,nodev,noexec,relatime"
+    # persistent upload area, no executable files
+    volume "/uploads", persist: "app-uploads",
+                       opts: "rw,nosuid,nodev,noexec,relatime"
 
-  # ephemeral scratch — gone when the container dies
-  volume "/scratch", persist: "scratch",
-                     opts: "rw,nosuid,nodev,noexec",
-                     ephemeral: true
+    # ephemeral scratch — gone when the container dies
+    volume "/scratch", persist: "scratch",
+                       opts: "rw,nosuid,nodev,noexec",
+                       ephemeral: true
+  end
 end
 ```
 
-Two replicas of this container produce two independent sets of
-volume UUIDs; each replica has its own `/data`, `/uploads`,
+Two explicit instances of this workload produce two independent sets
+of volume UUIDs; each instance has its own `/data`, `/uploads`,
 `/etc/app`, and `/scratch`. The volume key is
 `(container-name, persist)` where container-name includes the
-replica index (`web-0-app`, `web-1-app`), so every replica resolves
+instance identity (`web-0-app-0`, `web-0-app-1`), so every instance resolves
 to its own UUID for every volume — including read-only ones.
-Sharing configuration across replicas requires an external step:
+Sharing configuration across instances requires an external step:
 populate the volume content before the containers start, or use a
-host-side config directory that each replica's volume points to.
+host-side config directory that each instance's volume points to.
 
 ## Quota
 
@@ -205,7 +207,6 @@ defmodule PgStack do
       args: ["-D", "/data"],
       uid: 70, gid: 70,
       zone: "db",
-      replicas: 1,
       restart: :permanent do
 
       # rw persistent data — 10 GB hard cap

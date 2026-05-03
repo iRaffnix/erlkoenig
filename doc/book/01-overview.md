@@ -19,7 +19,7 @@ Every container travels the same path from source to kernel:
 │  Elixir DSL (.exs)                                   │
 │  defmodule MyStack do                                │
 │    use Erlkoenig.Stack                               │
-│    host / ipvlan / pod / container / nft_table / ... │
+│    host / ipvlan / pod / container / nft_host / ...  │
 │  end                                                 │
 └──────────────┬───────────────────────────────────────┘
                │ mix compile → Code.compile_file/1

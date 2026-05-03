@@ -1666,7 +1666,11 @@ transpose(M) ->
 
 row_to_list(Map, Keys) -> [maps:get(K, Map) || K <- Keys].
 
-to_string(V) when is_list(V)    -> V;
+to_string(V) when is_list(V) ->
+    case io_lib:char_list(V) of
+        true  -> V;
+        false -> lists:flatten(io_lib:format("~p", [V]))
+    end;
 to_string(V) when is_binary(V)  -> binary_to_list(V);
 to_string(V) when is_atom(V)    -> atom_to_list(V);
 to_string(V) when is_integer(V) -> integer_to_list(V);

@@ -401,6 +401,26 @@ json_ct_inspect_full_shape_test() ->
     [?assert(maps:is_key(<<"step">>, Step) andalso
              maps:is_key(<<"status">>, Step)) || Step <- Timeline].
 
+plain_ct_inspect_prints_complex_fields_test() ->
+    Info = #{
+        id      => <<"id-43">>,
+        name    => <<"db-0-postgres">>,
+        binary  => <<"/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server">>,
+        zone    => <<"data">>,
+        state   => failed,
+        volumes => [#{host => <<"/var/lib/erlkoenig/volumes/v1">>,
+                      container => <<"/var/lib/postgresql/data">>,
+                      read_only => false}],
+        error   => #{code => <<"EK_CT_SIGNATURE_REJECTED">>,
+                     reason => signature_rejected}
+    },
+    Path = write_operator_api_mock(#{container_inspect => {ok, Info}}),
+    {0, Output} = run_ek_escript(
+        ["ct", "inspect", "db-0-postgres"],
+        [{"ERLKOENIG_EK_MOCK_OPERATOR_API", Path}]),
+    ?assertMatch({match, _}, re:run(Output, "volumes")),
+    ?assertMatch({match, _}, re:run(Output, "EK_CT_SIGNATURE_REJECTED")).
+
 json_pod_list_pid_as_string_test() ->
     Path = write_operator_api_mock(#{
         pod_list => {ok, [#{name => <<"web">>,

@@ -45,7 +45,8 @@ Every path under `$PREFIX` falls into exactly one category:
 | `required-runtime`    | C runtime binary `rt/erlkoenig_rt` (capability-bearing).   |
 | `optional-dsl`        | Bundled Elixir runtime + dsl libs needed only when operator runs `ek dsl compile`. Currently default-on. |
 | `optional-examples`   | DSL examples + tutorials. **Should not live under `$PREFIX`** — they belong under `/usr/share/doc/erlkoenig/` (FHS) and are currently mis-placed. |
-| `optional-showcase`   | Showcase / demo container binaries (`rt/demo/`). Built by `make agents-build` / `make showcase`, not part of erlkoenig core. **Currently default-on; should be opt-in via `--with-demo`.** |
+| `optional-showcase`   | Non-destructive showcase workload binaries (`rt/demo/case_mgmt`, `rt/demo/deadline_worker`). Built by `make agents-build` / `make showcase`, not part of erlkoenig core. |
+| `test-runtime-binaries` | Runtime test binaries (`rt/demo/test-erlkoenig-*`). Some are intentionally destructive or resource-heavy. **Never present as examples; install only on test hosts.** |
 | `installer-generated` | Files the installer creates **outside** the OTP release tarball — symlinks (cookie, systemd unit), config skeletons. May live under `$PREFIX` (e.g. cookie symlink) or in standard system locations (`/etc/systemd/system/`). |
 | `runtime-generated`   | Files the running daemon/operator creates at execution time — sockets, logs, volume backings, cookie file itself. Live exclusively under `/etc/erlkoenig/`, `/run/erlkoenig/`, `/var/log/erlkoenig/`, `/var/lib/erlkoenig/` — never under `$PREFIX` in a clean install. |
 | `stale`               | Anything else found under `$PREFIX` is a bug — either drift, manual hot-patch, or operator-generated content that should not be here. |
@@ -75,7 +76,7 @@ Each entry is `path` `category` `expected owner` `notes`.
 | `releases/start_erl.data` `releases/RELEASES` `releases/erlkoenig.rel` | required-release | `root:erlkoenig` | Boot manifest. |
 | `releases/X.Y.Z/{start.boot,start_clean.boot,sys.config,vm.args,vm.args.src,no_dot_erlang.boot,erlkoenig.rel}` | required-release | `root:erlkoenig` | Per-version boot artefacts. |
 | `rt/erlkoenig_rt` | required-runtime | `root:root` | musl-static C runtime. Bears file caps (`cap_sys_admin,cap_net_admin,cap_sys_chroot,cap_sys_ptrace,cap_setpcap,cap_setuid,cap_setgid,cap_dac_override,cap_bpf,cap_sys_resource=ep`). Owner deliberately `root:root` (not `root:erlkoenig`). |
-| `rt/demo/test-erlkoenig-*` | optional-showcase | `root:root` | 12 test binaries from `erlkoenig_rt` build. Default-installed today. **Should become opt-in via `install.sh --with-demo`.** Mode `700`. |
+| `rt/demo/test-erlkoenig-*` | test-runtime-binaries | `root:root` | Runtime test binaries from `erlkoenig_rt` build. Some intentionally crash, burn CPU, allocate memory, write disks, or attempt blocked syscalls. **Test hosts only; not examples.** Mode `700`. |
 | `rt/demo/case_mgmt` `rt/demo/deadline_worker` | optional-showcase | `root:root` | Showcase workloads (~16 MB combined). Built by `make agents-build` / `make showcase`, not by erlkoenig core. **Out of default install** — only present when operator opts in via `--with-demo`. |
 | `share/ek.escript` | required-operator | `root:erlkoenig` | Operator CLI escript. Read by `bin/ek`. |
 | `share/error_catalog.term` | required-operator | `root:erlkoenig` | Structured error code catalog (consumed by `ek explain`, AMQP events, etc.). |
@@ -195,7 +196,9 @@ Each item directly addresses a category of drift documented above.
   `$PREFIX` contains files **not** in the installer's manifest.
   Catches phantom copies and operator-deposited artefacts before they
   accumulate.
-- **(I-4)** `--with-demo` flag (default off) for `rt/demo/`.
+- **(I-4)** Split `rt/demo/` installation flags: one opt-in flag for
+  non-destructive showcase workloads and a separate, test-host-only flag
+  for `test-erlkoenig-*` runtime test binaries.
 - **(I-5)** Move `examples/`, `doc/`, `tools/` out of `$PREFIX` to
   FHS-compliant `/usr/share/doc/erlkoenig/` paths, default off. Gate
   via `--with-examples`.
@@ -271,9 +274,12 @@ with grouped drift report at the end):
 - No `$PREFIX/release/` subdirectory (phantom).
 - No backup files (`*.bak`, `*~`, `*.tmp`, `*.orig`) under `$PREFIX`.
 - No compiled DSL artefacts (`*.term`) under `$PREFIX/examples/`.
-- `rt/demo/` either empty or contains only allowlisted filenames
-  (`test-erlkoenig-*`, `case_mgmt`, `deadline_worker`, `echo-server`,
-  `reverse-proxy`, `api-server`).
+- `rt/demo/` either empty or contains only allowlisted filenames for the
+  selected install profile. Showcase profile allows `case_mgmt` and
+  `deadline_worker`; test-host profile additionally allows
+  `test-erlkoenig-*`. Generic Go demo names (`echo-server`,
+  `reverse-proxy`, `api-server`) are legacy drift candidates unless the
+  installer grows an explicit profile for them.
 
 Optional `--against-tarball PATH`: cross-checks the installed file
 list against a release tarball. Reports both files on host that are

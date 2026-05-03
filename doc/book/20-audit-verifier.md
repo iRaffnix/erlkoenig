@@ -71,7 +71,7 @@ scenarios fly past in one shot:
 ```bash
 make verifier            # build the binary once
 cd dsl
-mix run ../examples/audit_verifier_demo.exs
+mix run ../examples/dev/audit_verifier_demo.exs
 ```
 
 The script generates a fresh sandbox, signs and seals an audit

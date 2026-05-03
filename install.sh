@@ -430,6 +430,47 @@ fi
 
 mkdir -p "$PREFIX" "$RT_DIR" "$RT_DIR/demo" /etc/erlkoenig /var/lib/erlkoenig/volumes /var/log/erlkoenig /run/erlkoenig/containers
 
+if [ ! -f /etc/erlkoenig/firewall.term ]; then
+    cat > /etc/erlkoenig/firewall.term <<'EOF'
+% Minimal Erlkoenig host firewall configuration.
+%
+% This file is intentionally conservative: it lets the daemon boot with
+% an explicit firewall contract and keeps input/forward/output policy at
+% accept. Operators should replace it with site policy before relying on
+% the host firewall for protection.
+#{
+    table => <<"erlkoenig_host">>,
+    ban_set => #{ipv4 => <<"blocklist">>, ipv6 => <<"blocklist6">>},
+    sets => [
+        {<<"blocklist">>, ipv4_addr, #{flags => [timeout]}},
+        {<<"blocklist6">>, ipv6_addr, #{flags => [timeout]}}
+    ],
+    counters => [<<"input">>, <<"forward">>, <<"output">>, <<"dropped">>, <<"banned">>],
+    chains => [
+        #{
+            name => <<"prerouting_ban">>,
+            hook => prerouting,
+            type => filter,
+            priority => -300,
+            policy => accept,
+            rules => [
+                {set_lookup_drop, <<"blocklist">>, <<"banned">>},
+                {set_lookup_drop, <<"blocklist6">>, <<"banned">>}
+            ]
+        },
+        #{name => <<"input">>, hook => input, type => filter, priority => 0, policy => accept, rules => []},
+        #{name => <<"forward">>, hook => forward, type => filter, priority => 0, policy => accept, rules => []},
+        #{name => <<"output">>, hook => output, type => filter, priority => 0, policy => accept, rules => []}
+    ]
+}.
+EOF
+    chmod 640 /etc/erlkoenig/firewall.term
+    chown root:"$SERVICE_USER" /etc/erlkoenig/firewall.term 2>/dev/null || chown root:root /etc/erlkoenig/firewall.term
+    ok "Default firewall config: /etc/erlkoenig/firewall.term"
+else
+    info "Keeping existing firewall config: /etc/erlkoenig/firewall.term"
+fi
+
 # ── Extract OTP release ──────────────────────────────────
 
 info "Extracting release to ${PREFIX} ..."

@@ -162,7 +162,7 @@ defmodule CrashStack do
   end
   pod "cp", strategy: :one_for_one do
     container "crasher", binary: "/tmp/crash", args: [],
-      zone: "c", replicas: 1, restart: :permanent
+      zone: "c", restart: :permanent
   end
 end
 EOF
@@ -193,10 +193,12 @@ concurrent spawns than the host's admission limit allows:
 
 ```elixir
 pod "bp", strategy: :one_for_one do
-  container "w",
-    binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
-    args: ["9000"],
-    zone: "b", replicas: 30, restart: :permanent
+  for_each i <- 0..29 do
+    container "w-#{i}",
+      binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
+      args: ["9000"],
+      zone: "b", restart: :permanent
+  end
 end
 ```
 

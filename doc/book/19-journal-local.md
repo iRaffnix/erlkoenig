@@ -343,13 +343,13 @@ JSON lines.
 > support to the C runtime is a planned refinement; the DSL surface
 > stays the same when it lands.
 
-The repository ships `examples/journal_demo.exs` which ties the
+The repository ships `examples/dev/journal_demo.exs` which ties the
 whole flow together in one file — DSL stack, daemon startup,
 simulated workload, chain verification. Run it:
 
 ```bash
 cd dsl
-mix run ../examples/journal_demo.exs
+mix run ../examples/dev/journal_demo.exs
 ```
 
 Expected output:
@@ -418,7 +418,7 @@ make release           # produces dist/erlkoenig-X.Y.Z.tar.gz
 
 # 2. Push to the target.
 scp dist/erlkoenig-*.tar.gz \
-    examples/journal_demo_release.escript \
+    examples/dev/journal_demo_release.escript \
     root@my-node:/opt/erlkoenig/
 
 # 3. On the node — extract once, run.

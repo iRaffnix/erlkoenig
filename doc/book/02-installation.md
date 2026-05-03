@@ -230,7 +230,7 @@ sudo mount -o loop,nosuid,nodev,prjquota \
     /var/lib/erlkoenig-volumes.img /var/lib/erlkoenig/volumes
 
 # 5. Run the tutorial
-cp /opt/erlkoenig/examples/tutorial.exs ~/tutorial.exs
+cp /opt/erlkoenig/examples/stacks/tutorial.exs ~/tutorial.exs
 ek up ~/tutorial.exs
 ek ps
 ```

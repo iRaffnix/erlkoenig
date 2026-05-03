@@ -44,7 +44,7 @@ cd examples/agents/case_mgmt && \
 Three artefacts:
 - `_build/default/...`    — erlkoenig BEAMs
 - `dist/audit-verifier`   — 2.4 MB customer-side binary (chapter 20)
-- `examples/agents/case_mgmt/case_mgmt` — 10 MB workload binary (this chapter)
+- `examples/showcase/bin/case_mgmt` — 10 MB workload binary (this chapter)
 
 ## Step 1 — Postgres on the host
 
@@ -118,7 +118,7 @@ Before wrapping in a container, sanity-check the binary against the
 running Postgres:
 
 ```bash
-PGHOST=/run/erlkoenig ./examples/agents/case_mgmt/case_mgmt &
+PGHOST=/run/erlkoenig ./examples/showcase/bin/case_mgmt &
 sleep 1
 
 curl -s localhost:8080/healthz
@@ -142,14 +142,13 @@ discovers `.s.PGSQL.5432` inside.
 
 ## Step 3 — The DSL stack file
 
-`examples/case_mgmt_stack.exs` declares a one-container pod
+`examples/showcase/case_mgmt_stack.exs` declares a one-container pod
 with the three capabilities the workload depends on:
 
 ```elixir
 container "agent",
   binary: "/opt/erlkoenig/rt/demo/case_mgmt",
   zone: "ops",
-  replicas: 1,
   restart: :permanent,
   limits: %{memory: 256_000_000, pids: 128} do
 
@@ -263,5 +262,5 @@ is the cred. The capability declaration is the contract.
   surface when it lands.
 - **Per-container role isolation** — today: one role for the
   whole container. Production needs per-uid mapping.
-- **Multi-replica scaling** — `replicas: 1` for now; safe scale-out
-  needs the per-container role isolation above.
+- **Multi-instance scaling** — one `agent` instance for now; safe
+  scale-out needs the per-container role isolation above.

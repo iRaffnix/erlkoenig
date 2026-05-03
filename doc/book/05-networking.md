@@ -98,7 +98,7 @@ gets through.
 ## IP pool and DNS
 
 `erlkoenig_ip_pool` hands out IPs sequentially within each zone. Every
-replica of every container gets its own address; when a container
+declared container instance gets its own address; when a container
 stops, its IP returns to the pool.
 
 DNS inside the container is handled by `erlkoenig_dns`. At spawn time
@@ -134,8 +134,10 @@ covered in → Chapter 6. Every example DSL in `examples/` carries
 both pieces today; the strict-mode runtime hook will eventually
 drive both off the same `requires` declaration.
 
-Names follow the replica scheme: container `auth` in pod `web` is
-registered as `web-0-auth`, `web-1-auth`, and so on.
+Names follow the pod-instance scheme: container `auth` in pod `web`
+is registered as `web-0-auth`. If you declare explicit containers
+`auth-0` and `auth-1`, they register as `web-0-auth-0` and
+`web-0-auth-1`.
 
 ## The host-side slave
 

@@ -27,7 +27,7 @@ A container opts in by declaring:
 
 ```elixir
 container "api", binary: "...", zone: "dmz",
-  replicas: 1, restart: :permanent do
+  restart: :permanent do
 
   stream retention: {30, :days}, max_bytes: {5, :gb} do
     channel :stdout
@@ -69,10 +69,10 @@ is exactly what standard tooling expects.
 ## Routing key format
 
 The AMQP routing key follows `erlkoenig.log.<pod>-<replica>-<container>`.
-For a pod `web` with two replicas of container `api`, the two
-streams are `erlkoenig.log.web-0-api` and `erlkoenig.log.web-1-api`.
-Different replicas, different streams — a replica-specific view is a
-straightforward subscription.
+For a pod `web` with explicit containers `api-0` and `api-1`, the
+two streams are `erlkoenig.log.web-0-api-0` and
+`erlkoenig.log.web-0-api-1`. Different instances, different streams
+— an instance-specific view is a straightforward subscription.
 
 To separate stdout from stderr, a consumer filters on the `fd`
 header. Server-side Bloom filtering exists via
@@ -133,7 +133,6 @@ defmodule LogDemo do
       binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
       args: ["9000"],
       zone: "l",
-      replicas: 1,
       restart: :permanent do
 
       stream retention: {1, :days}, max_bytes: {100, :mb} do
@@ -214,11 +213,12 @@ Container I/O never blocks — `write()` on the container's stdout
 fd proceeds at full speed. Drops are accounted for but the
 application doesn't know; this is deliberate.
 
-**6. Multi-replica separation.** With `replicas: 3`, the streams
-are `erlkoenig.log.lg-0-chatty`, `erlkoenig.log.lg-1-chatty`,
-`erlkoenig.log.lg-2-chatty`. A consumer interested in a single
-replica subscribes to one stream name; a consumer interested in all
-replicas opens three subscriptions or uses a broker-side topic
+**6. Multi-instance separation.** With three explicit containers
+`chatty-0`, `chatty-1`, and `chatty-2`, the streams are
+`erlkoenig.log.lg-0-chatty-0`, `erlkoenig.log.lg-0-chatty-1`, and
+`erlkoenig.log.lg-0-chatty-2`. A consumer interested in a single
+instance subscribes to one stream name; a consumer interested in all
+instances opens three subscriptions or uses a broker-side topic
 binding.
 
 **7. Tear down.**

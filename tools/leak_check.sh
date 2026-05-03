@@ -154,9 +154,9 @@ audit_parent_dummies() {
     done < <(ip -o link show 2>/dev/null)
 }
 
-# 3. Test-specific nft tables. Note: `inet erlkoenig' is daemon-managed
-# and recreated on every daemon start — it is intentionally excluded
-# from this audit. Only tables declared by scenario DSL are flagged.
+# 3. Legacy test-specific nft tables. The daemon-managed tables are
+# `inet erlkoenig_host`, `inet erlkoenig_zone`, and `inet erlkoenig_ct`;
+# old `inet host` / `inet erlkoenig` tables are stale migration drift.
 audit_nft_tables() {
     local line family name
     while read -r line; do
@@ -165,7 +165,7 @@ audit_nft_tables() {
         family="$2"
         name="$3"
         case "$family $name" in
-            "inet host")
+            "inet host"|"inet erlkoenig")
                 emit nft "$family/$name"
                 ;;
         esac

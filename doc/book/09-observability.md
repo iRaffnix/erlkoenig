@@ -54,7 +54,7 @@ busy hosts. A container subscribes by declaring one or more
 
 ```elixir
 container "api", binary: "...", zone: "dmz",
-  replicas: 3, restart: :permanent do
+  restart: :permanent do
 
   publish interval: 2_000 do
     metric :memory
@@ -146,7 +146,6 @@ defmodule ObsDemo do
       binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
       args: ["9000"],
       zone: "obs",
-      replicas: 1,
       restart: :permanent do
 
       publish interval: 2_000 do
@@ -241,7 +240,7 @@ defmodule Bad do
   use Erlkoenig.Stack
   pod "p", strategy: :bogus do
     container "x", binary: "/no/such/file", zone: "none",
-      replicas: 1, restart: :permanent
+      restart: :permanent
   end
 end
 EOF

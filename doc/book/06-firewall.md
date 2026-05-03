@@ -32,7 +32,7 @@ A base chain attaches to a kernel hook. The DSL is explicit about
 hook, type, priority, and default policy:
 
 ```elixir
-nft_table :inet, "host" do
+nft_host do
   base_chain "input", hook: :input, type: :filter,
              priority: :filter, policy: :drop do
     nft_rule :accept, ct_state: [:established, :related]
@@ -68,7 +68,7 @@ Sets carry runtime-mutable state — IPs to ban, known peers, allowed
 services. A set is declared in the table and referenced from rules:
 
 ```elixir
-nft_table :inet, "host" do
+nft_host do
   nft_set "ban", :ipv4_addr
   nft_counter "input_ban"
 
@@ -83,11 +83,52 @@ Counters are polled every two seconds. Non-zero rates produce AMQP
 events under `firewall.<chain>.drop` (→ Chapter 9). The poll is
 cheap: one Netlink request per counter.
 
-A special case: the `"ban"` set is the handle the threat detector
-uses to push IPs in and out at runtime (→ Chapter 7). Rules that
-drop on `set: "ban"` in a `priority: :raw` chain run before
-connection tracking, which is the cheapest possible way to kill a
-hostile packet.
+A special case: the runtime ban set is the handle the threat detector
+uses to push IPs in and out at runtime (→ Chapter 7). It must be named
+explicitly with `ban_set`; erlkoenig no longer guesses from set names.
+Rules that drop on the configured ban set in a `priority: :raw` chain
+run before connection tracking, which is the cheapest possible way to
+kill a hostile packet.
+
+```elixir
+firewall "host" do
+  set "blocklist", :ipv4_addr, flags: [:timeout]
+  set "blocklist6", :ipv6_addr, flags: [:timeout]
+  ban_set ipv4: "blocklist", ipv6: "blocklist6"
+end
+```
+
+For IPv4-only sites, `ban_set "blocklist"` is accepted as a legacy
+shortcut. IPv6 ban operations require a family map.
+
+## Installed host firewall config
+
+The daemon starts only with an explicit firewall configuration. On an
+installed host the file lives at:
+
+```bash
+/etc/erlkoenig/firewall.term
+```
+
+The systemd unit sets:
+
+```ini
+Environment=ERLKOENIG_CONFIG_DIR=/etc/erlkoenig
+```
+
+If no `firewall.term` can be found, startup refuses with
+`{error, no_config}` and systemd reports a failed service. This is
+intentional: running with an implicit empty host firewall would hide a
+missing operator contract.
+
+The installer creates a minimal `/etc/erlkoenig/firewall.term` only
+when the file does not already exist. That default is boot-safe and
+contains `ban_set`, but its base-chain policies are `accept`; replace
+it with site policy before treating the host firewall as protection.
+
+`ERLKOENIG_NFT_DEV_DEFAULT=1` is only for local development and
+integration harnesses where a real host firewall config is deliberately
+absent. Do not set it in production units.
 
 ## Priorities and hot reload
 
@@ -112,7 +153,7 @@ server that talks to a specific database:
 
 ```elixir
 container "api", binary: "...", zone: "dmz",
-  replicas: 2, restart: :permanent do
+  restart: :permanent do
 
   nft do
     output do
@@ -146,8 +187,8 @@ the dependency in the container term so an operator can grep their
 stack and see at a glance which workloads consume which capability.
 
 The runtime does **not** silently inject allow rules for its own
-services. The operator's `nft_table :inet, "host"` block is the
-single source of truth for what reaches the host's input chain. If
+services. The operator's `nft_host` block is the single source of
+truth for what reaches the host's input chain. If
 that table has `policy: :drop` (the recommended hardening default)
 and the operator does not explicitly allow the runtime service's
 port, that service is unreachable from inside the container — the
@@ -161,7 +202,7 @@ should carry a clearly-labelled section that mirrors the runtime's
 service catalogue:
 
 ```elixir
-nft_table :inet, "host" do
+nft_host do
   base_chain "input", hook: :input, type: :filter,
              priority: :filter, policy: :drop do
 
@@ -204,7 +245,7 @@ host table; the workload writes one `requires :"<cap>"` line.
 ## erlkoenig as a standalone host firewall
 
 You do not need to run containers to benefit from erlkoenig's firewall.
-A stack file that only declares `host do ... end` with an `nft_table`
+A stack file that only declares `host do ... end` with an `nft_host`
 block is a complete, atomic, hot-reloadable nftables policy managed
 from a single Elixir file. Every rule compiles to raw Netlink — no
 `nft` binary on the system, no shell escaping, no iptables-nft
@@ -227,7 +268,7 @@ defmodule WebServer do
   host do
     interface "eth0", zone: :wan
 
-    nft_table :inet, "host" do
+    nft_host do
       nft_counter "ssh_accepted"
       nft_counter "http_accepted"
       nft_counter "input_drop"
@@ -275,7 +316,7 @@ defmodule DatabaseServer do
   host do
     interface "eth0", zone: :wan
 
-    nft_table :inet, "host" do
+    nft_host do
       nft_set "app_servers", :ipv4_addr
       nft_counter "pg_accepted"
       nft_counter "input_drop"
@@ -340,7 +381,7 @@ defmodule Bastion do
   host do
     interface "eth0", zone: :wan
 
-    nft_table :inet, "host" do
+    nft_host do
       nft_counter "ssh_office"
       nft_counter "ssh_rejected"
       nft_counter "forward_drop"
@@ -395,7 +436,7 @@ defmodule NatGateway do
   host do
     interface "eth0", zone: :wan
 
-    nft_table :inet, "host" do
+    nft_host do
       nft_counter "nat_masq"
       nft_counter "forward_drop"
 
@@ -456,7 +497,7 @@ works under the hood (→ Chapter 7), but the pattern is useful
 standalone for manual IP blocking.
 
 ```elixir
-nft_table :inet, "host" do
+nft_host do
   nft_set "ban", :ipv4_addr
   nft_counter "ban_drop"
 
@@ -515,21 +556,23 @@ host forward chain mirrors the same policy.
 ```elixir
 pod "app", strategy: :one_for_one do
   # ── Worker: may only talk to the cache on port 6379 ─────
-  container "worker",
-    binary: "/opt/app/worker",
-    zone: "app-net",
-    replicas: 4, restart: :permanent do
+  for_each i <- 0..3 do
+    container "worker-#{i}",
+      binary: "/opt/app/worker",
+      zone: "app-net",
+      restart: :permanent do
 
-    nft do
-      output policy: :drop do
-        nft_rule :accept, iifname: "lo"
-        nft_rule :accept, ct_state: [:established, :related]
-        nft_rule :accept, ip_daddr: {10, 0, 0, 10},
-                          tcp_dport: 6379
-      end
-      input policy: :drop do
-        nft_rule :accept, iifname: "lo"
-        nft_rule :accept, ct_state: [:established, :related]
+      nft do
+        output policy: :drop do
+          nft_rule :accept, iifname: "lo"
+          nft_rule :accept, ct_state: [:established, :related]
+          nft_rule :accept, ip_daddr: {10, 0, 0, 10},
+                            tcp_dport: 6379
+        end
+        input policy: :drop do
+          nft_rule :accept, iifname: "lo"
+          nft_rule :accept, ct_state: [:established, :related]
+        end
       end
     end
   end
@@ -538,7 +581,7 @@ pod "app", strategy: :one_for_one do
   container "cache",
     binary: "/opt/app/redis-server",
     zone: "app-net",
-    replicas: 1, restart: :permanent do
+    restart: :permanent do
 
     nft do
       output policy: :drop do
@@ -567,26 +610,28 @@ namespace.
 
 The real enforcement for same-zone traffic happens inside each
 container's namespace. This is the model from
-`examples/three_tier_ipvlan_fw.exs`: three tiers of containers
+`examples/stacks/three_tier_ipvlan_fw.exs`: three tiers of containers
 (web, app, data), each with their own output and input chains that
 declare exactly what they may send and receive.
 
 The web containers may only reach the app server on port 4000:
 
 ```elixir
-container "nginx", binary: "...", zone: "containers",
-  replicas: 3, restart: :permanent do
+for_each i <- 0..2 do
+  container "nginx-#{i}", binary: "...", zone: "containers",
+    restart: :permanent do
 
-  nft do
-    output policy: :drop do
-      nft_rule :accept, iifname: "lo"
-      nft_rule :accept, ct_state: [:established, :related]
-      nft_rule :accept, ip_daddr: {10, 50, 100, 5}, tcp_dport: 4000
-    end
-    input policy: :drop do
-      nft_rule :accept, iifname: "lo"
-      nft_rule :accept, ct_state: [:established, :related]
-      nft_rule :accept, tcp_dport: 8443
+    nft do
+      output policy: :drop do
+        nft_rule :accept, iifname: "lo"
+        nft_rule :accept, ct_state: [:established, :related]
+        nft_rule :accept, ip_daddr: {10, 50, 100, 5}, tcp_dport: 4000
+      end
+      input policy: :drop do
+        nft_rule :accept, iifname: "lo"
+        nft_rule :accept, ct_state: [:established, :related]
+        nft_rule :accept, tcp_dport: 8443
+      end
     end
   end
 end
@@ -596,7 +641,7 @@ The postgres container may not initiate any connections at all:
 
 ```elixir
 container "postgres", binary: "...", zone: "containers",
-  replicas: 1, restart: :permanent do
+  restart: :permanent do
 
   nft do
     output policy: :drop do
@@ -626,7 +671,7 @@ boundaries (different parents) or leaves the host entirely. For
 same-zone enforcement, the container's own nft table is the only
 layer that works.
 
-The `examples/three_tier_ipvlan_fw.exs` file includes both per-
+The `examples/stacks/three_tier_ipvlan_fw.exs` file includes both per-
 container rules and a host-level forward chain as defense-in-depth.
 The host forward chain catches cross-zone paths; the container
 rules handle same-zone paths. The full example is in the
@@ -651,7 +696,7 @@ nftables primitives the operator already knows.
 
 ### Declaring a flowtable
 
-A flowtable is declared inside an `nft_table` block and attached
+A flowtable is declared inside an `nft_zone` block and attached
 to one or more network devices. Rules then opt specific flows
 into offloading:
 
@@ -659,7 +704,7 @@ into offloading:
 host do
   interface "eth0", zone: :wan
 
-  nft_table :inet, "filter" do
+  nft_zone do
     nft_flowtable "ft0", devices: ["eth0"]
 
     base_chain "forward", hook: :forward, type: :filter,
@@ -740,7 +785,7 @@ during connection setup; the flowtable carries the bulk. A
 `counter` on the `:flow_offload` rule shows how many flows ever
 entered the fast-path — a useful diagnostic.
 
-The full working example is in `examples/fw_flowtable.exs`.
+The full working example is in `examples/firewall/fw_flowtable.exs`.
 
 ### Reading the counters
 

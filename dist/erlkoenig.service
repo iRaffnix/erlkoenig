@@ -8,6 +8,7 @@ User=root
 Group=erlkoenig
 
 Environment=ERL_EPMD_ADDRESS=127.0.0.1
+Environment=ERLKOENIG_CONFIG_DIR=/etc/erlkoenig
 
 # Wrapper loads cookie from /opt/erlkoenig/cookie, then delegates to relx.
 # No RELX_COOKIE env var needed.

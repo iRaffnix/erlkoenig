@@ -29,12 +29,12 @@ or the cookie file is in a non-default location. Back to → Chapter 2.
 A two-tier stack:
 
 ```
-          ┌─── 10.99.0.2 app-0-web ─┐
+          ┌─── 10.99.0.2 app-0-web-0 ─┐
   host ───┤                         ├─── 10.99.0.4 app-0-api
-          └─── 10.99.0.3 app-1-web ─┘
+          └─── 10.99.0.3 app-0-web-1 ─┘
 ```
 
-Two web replicas on port 8080, one api on port 4000, both sitting in
+Two explicit web containers on port 8080, one api on port 4000, all sitting in
 an IPVLAN-L3S zone on a dummy parent `ek_tut`. Web may call api; api
 may not call web back; peer web-to-web is denied. The host firewall
 drops everything on `input` except SSH, loopback, ICMP, and return
@@ -45,7 +45,7 @@ traffic.
 The release ships the file ready to go:
 
 ```bash
-cp /opt/erlkoenig/examples/tutorial.exs ~/tutorial.exs
+cp /opt/erlkoenig/examples/stacks/tutorial.exs ~/tutorial.exs
 ```
 
 The file is reproduced below without comments so you can read the
@@ -58,44 +58,45 @@ defmodule Tutorial do
 
   pod "app", strategy: :one_for_one do
 
-    container "web",
-      binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
-      args: ["8080"],
-      zone: "tutorial",
-      replicas: 2,
-      restart: :permanent,
-      limits: %{memory: 128_000_000, pids: 64} do
+    for_each i <- 0..1 do
+      container "web-#{i}",
+        binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
+        args: ["8080"],
+        zone: "tutorial",
+        restart: :permanent,
+        limits: %{memory: 128_000_000, pids: 64} do
 
-      # The container resolves names → declare its DNS dependency
-      # via the capability framework (→ Chapter 19). The host-side
-      # nft allow for udp/53 below mirrors this declaration; the
-      # strict-mode runtime hook will eventually drive both off the
-      # same line.
-      requires :"dns.local"
+        # The container resolves names → declare its DNS dependency
+        # via the capability framework (→ Chapter 19). The host-side
+        # nft allow for udp/53 below mirrors this declaration; the
+        # strict-mode runtime hook will eventually drive both off the
+        # same line.
+        requires :"dns.local"
 
-      publish interval: 2000 do
-        metric :memory
-        metric :cpu
-        metric :pids
-      end
-
-      stream retention: {7, :days} do
-        channel :stdout
-        channel :stderr
-      end
-
-      nft do
-        input policy: :drop do
-          nft_rule :accept, ct_state: [:established, :related]
-          nft_rule :accept, ip_protocol: :icmp
-          nft_rule :accept, tcp_dport: 8080
+        publish interval: 2000 do
+          metric :memory
+          metric :cpu
+          metric :pids
         end
 
-        output policy: :drop do
-          nft_rule :accept, ct_state: [:established, :related]
-          nft_rule :accept, ip_protocol: :icmp
-          nft_rule :accept, ip_daddr: {10, 99, 0, 4}, tcp_dport: 4000
-          nft_rule :accept, ip_daddr: {10, 99, 0, 1}
+        stream retention: {7, :days} do
+          channel :stdout
+          channel :stderr
+        end
+
+        nft do
+          input policy: :drop do
+            nft_rule :accept, ct_state: [:established, :related]
+            nft_rule :accept, ip_protocol: :icmp
+            nft_rule :accept, tcp_dport: 8080
+          end
+
+          output policy: :drop do
+            nft_rule :accept, ct_state: [:established, :related]
+            nft_rule :accept, ip_protocol: :icmp
+            nft_rule :accept, ip_daddr: {10, 99, 0, 4}, tcp_dport: 4000
+            nft_rule :accept, ip_daddr: {10, 99, 0, 1}
+          end
         end
       end
     end
@@ -104,7 +105,6 @@ defmodule Tutorial do
       binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
       args: ["4000"],
       zone: "tutorial",
-      replicas: 1,
       restart: :transient,
       limits: %{memory: 256_000_000, pids: 128} do
 
@@ -137,7 +137,7 @@ defmodule Tutorial do
       parent: {:dummy, "ek_tut"},
       subnet: {10, 99, 0, 0, 24}
 
-    nft_table :inet, "host" do
+    nft_host do
       nft_set "ban", :ipv4_addr
       nft_counter "input_drop"
       nft_counter "input_ban"
@@ -154,7 +154,7 @@ defmodule Tutorial do
         nft_rule :accept, ct_state: [:established, :related]
         nft_rule :accept, iifname: "lo"
         nft_rule :accept, ip_protocol: :icmp
-        nft_rule :accept, tcp_dport: 22222          # SSH
+        nft_rule :accept, tcp_dport: 22          # SSH
 
         # ── Runtime services ────────────────────────────────
         # Mirrors the `requires :"dns.local"` declarations in the
@@ -193,8 +193,8 @@ end
 
 Three blocks, three distinct concepts:
 
-- **`pod "app"`** — OTP supervisor group. Two container specs: `web`
-  (replicas 2, `:permanent`) and `api` (replicas 1, `:transient`).
+- **`pod "app"`** — OTP supervisor group. Three explicit container
+  specs: `web-0`, `web-1` (`:permanent`) and `api` (`:transient`).
   Each container carries its own `nft do ... end` — the firewall that
   erlkoenig installs inside that container's network namespace.
 - **`host do ... end`** — the zone (IPVLAN-L3S on dummy parent
@@ -207,7 +207,7 @@ zone decides who can address whom, per-container netns + nft drives
 who actually gets through. → Chapter 5 has the full model.
 
 **SSH port.** The host-firewall `input` chain above accepts
-`tcp_dport: 22222`. If your sshd listens on a different port, change
+`tcp_dport: 22`. If your sshd listens on a different port, change
 that number in the stack file **before** `ek up` — otherwise the
 reload will drop your session.
 
@@ -222,7 +222,7 @@ Expected output (order of names may vary):
 ```
 compiled /root/tutorial.exs -> /root/tutorial.term
 up: 3 container(s) running
-  app-0-web, app-0-api, app-1-web
+  app-0-web-0, app-0-web-1, app-0-api
 ```
 
 `ek up` may also print one or two `=NOTICE REPORT===` lines from the
@@ -239,7 +239,7 @@ are idempotent — only drifted containers restart (→ Step 6).
 To confirm the firewall landed:
 
 ```bash
-nft list table inet host
+nft list table inet erlkoenig_host
 ```
 
 — shows the `input` chain with the rules from the stack file.
@@ -255,9 +255,9 @@ ek ps
 ```
 name       state    ip         zone      restart_count
 ---------  -------  ---------  --------  -------------
-app-0-web  running  10.99.0.2  tutorial  0
-app-1-web  running  10.99.0.3  tutorial  0
-app-0-api  running  10.99.0.4  tutorial  0
+app-0-web-0  running  10.99.0.2  tutorial  0
+app-0-web-1  running  10.99.0.3  tutorial  0
+app-0-api    running  10.99.0.4  tutorial  0
 ```
 
 ```bash
@@ -267,19 +267,20 @@ ek pod list
 ```
 name   pid             children
 -----  --------------  --------
-app-0  <0.987.0>       2
-app-1  <0.990.0>       1
+app-0  <0.987.0>       3
 ```
 
-Two pod supervisors, because the web container's `replicas: 2` expands
-into two pod instances — `app-0` carries the replica-0 web *and* the
-api, `app-1` carries only the replica-1 web.
+One pod supervisor, because the two web processes are declared as two
+explicit container specs. The DSL does not hide scale-out behind a
+`replicas:` number; the names `web-0` and `web-1` are visible in the
+stack file.
 
-Naming rule: `<pod>-<replica-idx>-<container>`. The api has `replicas:
-1`, so `app-0-api` is the only api process.
+Naming rule: `<pod>-<instance-idx>-<container>`. With explicit
+single-instance containers, the instance index is `0`, so `app-0-api`
+is the only api process.
 
 ```bash
-ek ct inspect app-0-web
+ek ct inspect app-0-web-0
 ```
 
 ...shows the full gen_statem map: `state`, `os_pid`, `netns_path`,
@@ -461,8 +462,8 @@ host-slave together.
 
 ## Common pitfalls
 
-**SSH port mismatch.** The host `nft_table` in `tutorial.exs`
-whitelists port 22222. Applying the stack on a box whose sshd listens
+**SSH port mismatch.** The host `nft_host` block in `tutorial.exs`
+whitelists port 22. Applying the stack on a box whose sshd listens
 elsewhere drops your session the moment `ek up` reloads the firewall.
 Always confirm the `tcp_dport:` values match your sshd configuration
 before loading.

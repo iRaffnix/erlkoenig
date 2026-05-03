@@ -50,10 +50,10 @@ roadmap.
 
 ## `nft_cidr_set` — CIDR ranges as a first-class thing
 
-Inside an `nft_table` block, declare the range set once:
+Inside an owner-bound nft block, declare the range set once:
 
 ```elixir
-nft_table :inet, "host" do
+nft_host do
   nft_cidr_set "trusted", [
     "10.0.0.0/8",
     "192.168.0.0/16",
@@ -206,7 +206,7 @@ defmodule AcmeApi do
   host do
     ipvlan "api", parent: {:dummy, "ek_api"}, subnet: {10, 70, 0, 0, 24}
 
-    nft_table :inet, "host" do
+    nft_host do
       nft_cidr_set "trusted", ["10.0.0.0/8", "192.168.0.0/16"]
 
       base_chain "input", hook: :input, type: :filter,
@@ -222,7 +222,6 @@ defmodule AcmeApi do
     container "web",
       binary: "/opt/bin/web",
       zone: "api",
-      replicas: 1,
       restart: :permanent do
 
       requires :"dns.local"

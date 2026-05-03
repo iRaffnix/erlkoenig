@@ -44,7 +44,7 @@ setup outside the DSL itself):
   enforcement.
 - `binary: "/operator/path"` references that are not part of the
   bundled `rt/demo/` set (e.g. `/opt/api/server` in
-  `examples/signed_deployment.exs`).
+  `examples/stacks/signed_deployment.exs`).
 - Any future admission / attestation gate that fails closed before exec
   unless the operator completed setup (TPM-bound keys, hardware
   attestation tokens, externally-issued capability tickets, etc.).
@@ -78,11 +78,11 @@ flip it to `:permanent` once the prerequisite is in place.
 ## Host Firewall Lockout Preflight
 
 Observed during example start testing on 2026-04-29:
-`examples/tutorial.exs`, `examples/three_tier_ipvlan.exs`, and
-`examples/three_tier_ipvlan_fw.exs` all declare a full host firewall
+`examples/stacks/tutorial.exs`, `examples/stacks/three_tier_ipvlan.exs`, and
+`examples/stacks/three_tier_ipvlan_fw.exs` all declare a full host firewall
 takeover:
 
-- `nft_table :inet, "host"`
+- `nft_host`
 - `base_chain "input", hook: :input, type: :filter,
   priority: :filter, policy: :drop`
 - explicit accepts for `ct_state: [:established, :related]`, loopback,

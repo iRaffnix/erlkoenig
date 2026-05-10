@@ -70,7 +70,9 @@ und über `ek explain <CODE>` greifbar.
 
 ## 4. Container starten — Lifecycle
 
-DSL-Beispiel kompilieren:
+DSL-Beispiel kompilieren. Das Repository enthält die lesbare
+`examples/tutorial/01_overview.exs`; die `.term`-Datei ist ein lokal
+generiertes Artefakt des Compile-Schritts und muss nicht vorher existieren:
 
 ```sh
 ek dsl compile examples/tutorial/01_overview.exs
@@ -82,7 +84,7 @@ Erwartet:
 compiled examples/tutorial/01_overview.exs -> examples/tutorial/01_overview.term
 ```
 
-Vor Deploy validieren:
+Vor dem Deploy genau dieses generierte `.term` validieren:
 
 ```sh
 ek config validate examples/tutorial/01_overview.term
@@ -221,7 +223,7 @@ Vollständige Catalog-Reference: [ERROR_CODES.md](ERROR_CODES.md).
 
 ## 9. Stoppen
 
-Deklarativ — alles aus einem .term-File:
+Deklarativ — alles aus dem zuvor generierten `.term`-File:
 
 ```sh
 ek down examples/tutorial/01_overview.term
@@ -252,6 +254,6 @@ ek ct stop hello-0-web
 - **Deeper architecture**: [README](../README.md) → Architektur-Sektion
 - **CLI reference**: [CLI.md](CLI.md)
 - **Error codes komplett**: [ERROR_CODES.md](ERROR_CODES.md)
-- **Hardening**: `docs/HARDENING_TEST_PLAN.md` (separates Workflow für sanitizer + fault + fuzz)
-- **Threat model**: `docs/THREAT_MODEL_CONTAINER_BOUNDARY.md`
+- **Install layout**: [INSTALL_LAYOUT.md](INSTALL_LAYOUT.md)
+- **AMQP events**: [AMQP_EVENTS.md](AMQP_EVENTS.md)
 - **Contributor pattern**: [CONTRIBUTING](../CONTRIBUTING.md) — speziell die "Error Handling Contract" Sektion bei Modifikationen

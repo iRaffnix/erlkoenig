@@ -40,13 +40,13 @@ and HAProxy settled on one-line primitives twenty years ago
 (`limit_conn`, `allow 10.0.0.0/8`). We can match that ergonomics
 over nft without giving up the Glasbox promise.
 
-The reference memo `specs/erlkoenig/edge-primitives.md` in the
-`erlkoenigin` architecture repository scanned nginx 1.27 and
-HAProxy 3.x for primitives worth copying; the follow-up
-`SPEC-EK-028-tracker.md` in the same repo names the data model
-they all sit on top of ("stick-table" in HAProxy parlance).
-This chapter ships the first two concrete primitives from that
-roadmap.
+Two external architecture notes in the separate `erlkoenigin`
+repository informed this chapter: one scanned nginx 1.27 and
+HAProxy 3.x for primitives worth copying, and the other named
+the Tracker data model they all sit on top of ("stick-table" in
+HAProxy parlance). They are not part of this book repository;
+this chapter is the reader-facing implementation note for the
+two concrete primitives shipped from that roadmap.
 
 ## `nft_cidr_set` — CIDR ranges as a first-class thing
 
@@ -178,9 +178,9 @@ Rule existence remains fully auditable: the stack file IS the
 contract, `ek inspect nft <container>` verifies the rule is
 live, and `nft list counter` inside the container netns gives
 rejection counts for ad-hoc checks. What phase 1 does *not* do
-is produce signed chain entries per rejection — that needs
-cross-netns NFLOG dispatch (SPEC-EK-028 §8bis) and is explicitly
-deferred to phase 1-bis.
+is produce signed chain entries per rejection; the external
+Tracker architecture note defers that to a later NFLOG-based
+phase.
 
 If you need enforcement evidence **today**, poll the kernel
 counter from your own harness:
@@ -263,8 +263,8 @@ Both are in `tests/integration/run_all.sh` and run as root.
 ## Reference: the Tracker frame
 
 `conn_limit` is the first concrete column of the Tracker
-abstraction described in `SPEC-EK-028-tracker.md`. The spec's
-phase roadmap:
+abstraction described in an external architecture note in the
+separate `erlkoenigin` repository. That note's phase roadmap:
 
 | Phase | Column | Status |
 |-------|--------|--------|
@@ -286,7 +286,8 @@ expose the shared structure without breaking the flat sugar.
 
 ## What this chapter does NOT cover
 
-- **Per-packet audit** — phase 1-bis; see SPEC-EK-028 §8bis.
+- **Per-packet audit** — deferred to a later NFLOG-based phase
+  in the external Tracker architecture note.
 - **`rate_limit per_ip: "50/s"`** — Tracker column #2, specced,
   not yet shipped. Will slot next to `conn_limit` with the same
   ergonomics.
@@ -302,13 +303,13 @@ expose the shared structure without breaking the flat sugar.
 
 ## Reference
 
-- **SPEC-EK-028 (Tracker)** — the full data-model rationale,
-  phase roadmap, and audit contract. Lives in the `erlkoenigin`
-  architecture repository at
-  `specs/erlkoenig/SPEC-EK-028-tracker.md`.
-- **`specs/erlkoenig/edge-primitives.md`** (same repo) — the
-  nginx/HAProxy scan that seeded this work; §10 names the
-  Tracker frame that ties the primitives together.
+- **External Tracker architecture note** — the full data-model
+  rationale, phase roadmap, and audit contract. It lives in the
+  separate `erlkoenigin` architecture repository, not in this
+  book tree.
+- **External edge-primitives note** — the nginx/HAProxy scan
+  that seeded this work. It also lives in the separate
+  `erlkoenigin` architecture repository.
 - **`Erlkoenig.Nft.ChainBuilder.add_conn_limit/2`** + the
   shared `compile_conn_limit!/1` validator — where the DSL sugar
   is wired.

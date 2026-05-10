@@ -12,6 +12,12 @@ becomes a tamper-evident audit event that the external Go verifier
 can re-check offline. ~25 minutes from scratch to "I just proved
 end-to-end integrity of a real workload with cryptography".
 
+The showcase path also ships a second Go binary,
+`deadline_worker`, which polls the case API and writes its own
+journal events. The one-shot integration test focuses on the
+`case_mgmt` API path; the long-running showcase pod starts both
+containers.
+
 > **Scope honesty.** The full reference deployment also imagines
 > per-tenant SQLCipher under a `:tenant.local` capability, and a
 > `:keystore.local` key broker that audit-logs every release.
@@ -35,16 +41,19 @@ end-to-end integrity of a real workload with cryptography".
 ## Step 0 — Build
 
 ```bash
-make erl                                 # erlang side
+make agents-build                        # both Go agents
 make verifier                            # the offline Go verifier
-cd examples/agents/case_mgmt && \
-  CGO_ENABLED=0 go build -ldflags="-s -w" -o case_mgmt .
 ```
 
 Three artefacts:
 - `_build/default/...`    — erlkoenig BEAMs
 - `dist/audit-verifier`   — 2.4 MB customer-side binary (chapter 20)
-- `examples/showcase/bin/case_mgmt` — 10 MB workload binary (this chapter)
+- `examples/showcase/bin/case_mgmt` — HTTP task-tracker workload
+- `examples/showcase/bin/deadline_worker` — deadline polling worker
+
+`make agents-build` is the source of truth for the Go build. It
+compiles `examples/agents/case_mgmt` and
+`examples/agents/deadline_worker` into `examples/showcase/bin/`.
 
 ## Step 1 — Postgres on the host
 
@@ -142,8 +151,10 @@ discovers `.s.PGSQL.5432` inside.
 
 ## Step 3 — The DSL stack file
 
-`examples/showcase/case_mgmt_stack.exs` declares a one-container pod
-with the three capabilities the workload depends on:
+`examples/showcase/case_mgmt_stack.exs` is the declarative showcase
+stack file. It declares the host firewall, the `ops` zone, and the
+`case_mgmt` pod with the service capabilities the API container
+depends on:
 
 ```elixir
 container "agent",
@@ -155,6 +166,11 @@ container "agent",
   requires :"postgres.local"
   requires :"journal.local"
   requires :"dns.local"
+  requires :"dns.allowlist",
+    hosts: [
+      "*.postgres.internal",
+      "audit.erlkoenig.internal"
+    ]
 
   publish interval: 2000 do
     metric :memory
@@ -182,25 +198,61 @@ container "agent",
 end
 ```
 
-The three `requires` lines are the whole grant surface:
+Those `requires` lines are the whole grant surface:
 
 | Declaration              | What gets injected                                                                 |
 |--------------------------|------------------------------------------------------------------------------------|
 | `requires :"postgres.local"` | bind-mount `/run/erlkoenig/`, env `PGHOST=/run/erlkoenig`                       |
 | `requires :"journal.local"`  | bind-mount (same dir, dedup), env `JOURNAL_LOCAL_SOCK=/run/erlkoenig/journal.sock` |
 | `requires :"dns.local"`      | (informational; runtime configures `/etc/resolv.conf` already)                  |
+| `requires :"dns.allowlist"`  | per-source DNS allowlist; denied names become audited NXDOMAINs                |
 
 The host firewall block in the file mirrors the runtime services
 explicitly — operator owns it (no magic injection, → Chapter 19).
 
-## Step 4 — Live spawn + curl + verify
+The long-running showcase runner,
+`tests/integration/showcase_case_mgmt.escript`, uses the deployed
+runtime paths directly and starts two containers:
 
-The repo ships `tests/integration/45_case_mgmt.escript` which
-boots erlkoenig, spawns the container, hits the API, and verifies
-the chain. From the project root **as root**:
+| Container | Runtime binary | Purpose |
+|-----------|----------------|---------|
+| `case_mgmt-0-agent` | `/opt/erlkoenig/rt/demo/case_mgmt` | HTTP API on `10.0.0.210:8080` |
+| `case_mgmt-0-worker` | `/opt/erlkoenig/rt/demo/deadline_worker` | polls upcoming deadlines and writes journal events |
+
+## Step 4 — Deploy the showcase files
+
+`make showcase` is the repo-supported deployment path. By default it
+targets `erlkoenig-2__root` and copies both built agents to
+`/opt/erlkoenig/rt/demo/` on that host:
 
 ```bash
-sudo ./tests/integration/45_case_mgmt.escript
+make showcase
+```
+
+The target:
+
+- runs `make agents-build`
+- copies `case_mgmt` and `deadline_worker` to
+  `/opt/erlkoenig/rt/demo/`
+- copies `schema.sql` and `seed.sql` to the host
+- resets and seeds the `cases` database
+- copies `tests/integration/showcase_case_mgmt.escript` to the host
+
+At the end it prints the two operator entry points:
+
+```bash
+ssh erlkoenig-2__root /root/erlkoenig/tests/integration/showcase_case_mgmt.escript
+ssh erlkoenig-2__root /root/erlkoenig/tests/integration/45_case_mgmt.escript
+```
+
+## Step 5 — One-shot live spawn + curl + verify
+
+The repo ships `tests/integration/45_case_mgmt.escript` which
+boots erlkoenig, spawns the `case_mgmt` container, hits the API,
+and verifies the chain. On a prepared host **as root**:
+
+```bash
+ssh erlkoenig-2__root /root/erlkoenig/tests/integration/45_case_mgmt.escript
 ```
 
 Expected output (~10 s):
@@ -222,7 +274,38 @@ Expected output (~10 s):
 === Test 45 passed ===
 ```
 
-## Step 5 — Re-verify the chain offline
+For local development on the target host, the same test can also be
+run directly from the project root:
+
+```bash
+sudo ./tests/integration/45_case_mgmt.escript
+```
+
+## Step 6 — Run the long-lived showcase pod
+
+For an operator-facing demo, start the long-running runner that
+`make showcase` deployed:
+
+```bash
+ssh erlkoenig-2__root /root/erlkoenig/tests/integration/showcase_case_mgmt.escript
+```
+
+It starts both deployed binaries:
+
+```text
+case_mgmt:        http://10.0.0.210:8080
+deadline_worker:  polls case_mgmt every 30s
+audit log:        /var/log/erlkoenig/case_mgmt_audit.jsonl
+```
+
+Try the API while the runner is active:
+
+```bash
+ssh erlkoenig-2__root 'curl -s http://10.0.0.210:8080/tasks | jq .'
+ssh erlkoenig-2__root 'curl -s http://10.0.0.210:8080/deadlines/upcoming?days=30 | jq .'
+```
+
+## Step 7 — Re-verify the chain offline
 
 Take the audit-log path printed at the end and feed it to the Go
 verifier:
@@ -232,6 +315,15 @@ dist/audit-verifier verify-chain /tmp/erlkoenig_audit_test_45_<TAG>.jsonl
 # → ok: 2 event(s), chain head <hex>
 # → exit=0
 ```
+
+For the long-running showcase log, the Makefile has a wrapper:
+
+```bash
+make showcase-verify
+```
+
+That target pulls `/var/log/erlkoenig/case_mgmt_audit.jsonl` from
+the showcase host and verifies it with `dist/audit-verifier`.
 
 That single command is the **compliance proof loop**: an external
 binary that knows nothing about the runtime can re-prove every
@@ -262,5 +354,6 @@ is the cred. The capability declaration is the contract.
   surface when it lands.
 - **Per-container role isolation** — today: one role for the
   whole container. Production needs per-uid mapping.
-- **Multi-instance scaling** — one `agent` instance for now; safe
-  scale-out needs the per-container role isolation above.
+- **Multi-instance scaling** — one API container and one worker
+  container for now; safe scale-out needs the per-container role
+  isolation above.

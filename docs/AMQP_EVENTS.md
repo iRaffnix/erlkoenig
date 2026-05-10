@@ -288,11 +288,22 @@ Routing:
 
 | Key | Payload |
 |-----|---------|
-| `firewall.<chain>.packet` | encoded NFLOG event map |
-| `firewall.<chain>.drop` | `chain`, `packets`, `pps`, `bytes`, `bps` |
+| `firewall.<chain>.packet` | canonical `firewall_packet` envelope |
+| `firewall.<chain>.drop` | canonical `counter_rate` envelope |
 | `firewall.<name>.threshold` | `id`, `name`, `metric`, `current`, `threshold` |
+| `guard.threat.suspect` | canonical `scan_suspect` envelope |
 
-Counter events with `packets = 0` are skipped.
+The interactive firewall path normalizes NFLOG packets, nft counter rates, and
+guard/correlation decisions through `erlkoenig_firewall_event` before AMQP
+encoding. Counter events with `packets = 0` are skipped, so consumers only see
+active rate samples.
+
+Common canonical envelope fields include `id`, `source`, `severity`, `kind`,
+`table`, `table_owner`, `chain`, `counter`, `src_ip`, `dst_ip`, `proto`,
+`src_port`, `dst_port`, `verdict`, `reason`, `evidence`, and `labels`.
+`table` and `table_owner` are populated when the nft event source can map the
+packet or counter back to an explicit owner table; consumers must still tolerate
+`unknown` for older or unscoped producers. Payload fields remain additive.
 
 ### Guard
 
@@ -425,9 +436,10 @@ in the CLI's `--format json` error output.
 The AMQP event schema is a **separate contract** from the CLI `--format json`
 schema documented in [docs/CLI.md](CLI.md#json-output-contract). They share
 encoding conventions (atoms→strings, IPv4 tuples→dotted strings, snake_case
-keys), but the two surfaces evolve independently. A consumer reading
-`stats.web-0.memory` from AMQP cannot assume the same field shapes as
-`ek --format json ct inspect web-0`.
+keys), but the two surfaces evolve independently. The firewall CLI reads from
+the node-local `erlkoenig_firewall_events` buffer, while AMQP receives encoded
+events from the publisher path. A consumer reading `stats.web-0.memory` from
+AMQP cannot assume the same field shapes as `ek --format json ct inspect web-0`.
 
 ## Source of Truth
 

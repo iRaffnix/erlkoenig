@@ -25,6 +25,7 @@ ek [global-options] <area> <command> [args...]
 | `--format table` | Human table output. Default |
 | `--format json` | JSON output for tools |
 | `--format plain` | Tab-separated output for shell pipelines |
+| `--limit <n>` | Limit rows for commands backed by event/history buffers |
 
 The `--key=value` form is also accepted for global options.
 
@@ -246,6 +247,47 @@ Prints the spawn-admission gate state: host in-flight count, queued count, and
 per-zone in-flight counts. Use this when container starts appear delayed but
 not failing.
 
+### NFT Counters
+
+```sh
+ek nft counters
+ek --format json nft counters
+```
+
+`nft counters` prints live nft counter rates. Each row is scoped to the nft
+table that produced the counter.
+
+### Interactive Firewall
+
+```sh
+ek firewall status
+ek firewall events
+ek firewall events --limit 20
+ek firewall watch
+ek --format json firewall status
+ek --format json firewall events
+ek --format json firewall watch
+```
+
+`firewall status` shows the read-side health of the interactive firewall:
+event-buffer cursor, buffered event count, waiting watch clients, subscribed
+native groups, and conntrack guard statistics when the guard is running.
+
+`firewall events` prints the newest canonical firewall events from the
+node-local event buffer, oldest first. The buffer is fed from Erlkoenig's
+native nft/guard event groups and normalized by the daemon; it is not parsed
+from `journalctl` or shell output.
+
+`firewall watch` follows the same stream live. In JSON mode, `watch` emits one
+JSON object per line so dashboards and shell consumers can process the stream
+incrementally. The snapshot command emits a JSON array.
+
+Typical event kinds include `firewall_packet`, `counter_rate`,
+`scan_suspect`, `slow_scan`, `honeypot`, `threat_ban`, and
+`threat_unban`. Canonical events include the nft `table` and authoritative
+`table_owner` (`host`, `zone`, `ct`, or `unknown`) when the event is tied to an
+nft table. Fields are additive; consumers should ignore unknown keys.
+
 ## Common Workflows
 
 ### Preflight A Host
@@ -275,7 +317,7 @@ Validate before `up` when editing a stack manually. For routine deploys,
 ```sh
 ek ps
 ek ct inspect hello-0-web
-journalctl -u erlkoenig --since -10m
+journalctl -u erlkoenig -n 200
 ek explain EK_CT_SPAWN_TIMEOUT
 ```
 
@@ -438,6 +480,51 @@ for known tuples (currently only `crashloop`).
 ```json
 {"host_in_flight": 1, "queued": 0, "zone_in_flight": {"dmz": 1}}
 ```
+
+`ek nft counters` — array of live counter rates:
+```json
+{"table": "erlkoenig_host",
+ "name": "egress",
+ "packets": 12,
+ "bytes": 960,
+ "total_packets": 1200,
+ "total_bytes": 96000,
+ "pps": 6.0,
+ "bps": 480.0,
+ "interval": 2000}
+```
+
+`ek firewall status`:
+```json
+{"events": {"running": true, "cursor": 12, "buffered": 3,
+            "max_events": 1024, "waiting_clients": 0,
+            "groups": ["nflog_events", "counter_events", "ct_guard_events"]},
+ "guard": {"active_actors": 1, "active_bans": 0}}
+```
+
+`ek firewall events` — array of canonical firewall event envelopes:
+```json
+{"seq": 8,
+ "id": "fw-1778147168000-1",
+ "ts_mono": 123456,
+ "ts_wall": 1778147168000,
+ "source": "nflog",
+ "severity": "notice",
+ "kind": "firewall_packet",
+ "table": "erlkoenig_host",
+ "table_owner": "host",
+ "chain": "input",
+ "src_ip": "203.0.113.44",
+ "dst_ip": "10.0.0.1",
+ "proto": "tcp",
+ "dst_port": 22,
+ "reason": "packet_observed",
+ "evidence": {},
+ "labels": ["firewall", "packet"]}
+```
+
+`ek --format json firewall watch` emits the same envelope shape as newline
+delimited JSON, one event object per line.
 
 ### Out of scope for `--format json`
 

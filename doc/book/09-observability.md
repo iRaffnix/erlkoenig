@@ -1,25 +1,38 @@
 # Chapter 9 — Observability
 
-Every interesting event in erlkoenig is an AMQP message. Container
-lifecycle, cgroup metrics, firewall drops, threat detections, log
-streams, configuration loads — all published onto a single topic
-exchange `erlkoenig.events` with hierarchical routing keys. Consumers
-subscribe to the slices they care about.
+Erlkoenig has two observability surfaces. Operators use `ek` for local,
+node-backed snapshots and live streams. External consumers use AMQP for
+remote event delivery. The same runtime signals feed both paths, but the
+contracts are separate: CLI JSON is documented in `docs/CLI.md`, AMQP
+payloads in `docs/AMQP_EVENTS.md`.
+
+Container lifecycle, cgroup metrics, firewall packets, counter rates,
+threat detections, log streams, and configuration loads all originate
+inside the BEAM. Some stay in node-local read-side buffers for operator
+commands; some are encoded and published onto the `erlkoenig.events`
+topic exchange.
 
 ## The event bus
 
 Inside the BEAM, events flow through `erlkoenig_events` — a gen_event
 manager. Any module calls `erlkoenig_events:notify(Event)` and the
-event is handed to every registered handler. One handler is always present: `erlkoenig_event_log` (writes to the
-Erlang logger). When the AMQP publisher starts and connects to
-RabbitMQ, it dynamically registers `erlkoenig_amqp_forwarder` which
-encodes events and publishes them to the exchange.
+event is handed to every registered handler. One handler is always
+present: `erlkoenig_event_log` writes to the Erlang logger. When the
+AMQP publisher starts and connects to RabbitMQ, it dynamically
+registers `erlkoenig_amqp_forwarder`, which encodes events and
+publishes them to the exchange.
 
 The forwarder runs `erlkoenig_amqp_codec:encode/1` on every event.
-That function pattern-matches the event tuple and produces a tuple
-of routing key plus JSON payload. An unmatched event is dropped
-silently — unknown tuples don't reach the wire. Consumers see
-exactly the events the codec knows how to name.
+That function pattern-matches the event tuple and produces a routing key
+plus JSON payload. An unmatched event is dropped silently; unknown tuples
+do not reach the wire. Consumers see exactly the events the codec knows
+how to name.
+
+Firewall observability has an additional node-local read side:
+`erlkoenig_firewall_events` subscribes to native nft/guard groups,
+normalizes low-level messages through `erlkoenig_firewall_event`, and
+serves the `ek firewall status`, `ek firewall events`, and
+`ek firewall watch` commands.
 
 ## Routing key schema
 
@@ -44,6 +57,54 @@ hierarchies. The top-level categories:
 Every key is derived from the event tuple — not configurable, not
 hand-assigned. The event code is the source of truth; the codec
 maps patterns to prefixes.
+
+## Firewall operator view
+
+For firewall work, start with the packaged CLI before reaching for AMQP.
+It reads the runtime's native event buffer and live nft counters directly:
+
+```bash
+ek nft counters
+ek firewall status
+ek firewall events --limit 20
+ek firewall watch --limit 20
+```
+
+`ek nft counters` prints live nft counter deltas and cumulative totals.
+Rows are scoped by nft table, for example `erlkoenig_host` or
+`erlkoenig_zone`.
+
+`ek firewall status` reports whether the event buffer is running, the
+current cursor, buffered event count, waiting watch clients, subscribed
+native groups, and guard statistics when the conntrack guard is active.
+
+`ek firewall events` returns the newest canonical firewall events from
+the node-local buffer, oldest first. `ek firewall watch` follows the same
+stream live. In JSON mode, `events` emits a JSON array and `watch` emits
+one JSON object per line.
+
+Canonical firewall events include:
+
+| Field | Meaning |
+|-------|---------|
+| `kind` | `firewall_packet`, `counter_rate`, `scan_suspect`, `honeypot`, `threat_ban`, ... |
+| `source` | producer family, for example `nflog`, `counter`, `threat`, `correlator` |
+| `table` | nft table when known, for example `erlkoenig_host` |
+| `table_owner` | explicit owner, one of `host`, `zone`, `ct`, or `unknown` |
+| `chain` / `counter` | nft location or counter name |
+| `src_ip`, `dst_ip`, `dst_port` | packet context when the event came from NFLOG |
+| `evidence` | event-specific details such as rates, totals, raw addresses, or scan ports |
+
+`table_owner` is not guessed from chain names or log prefixes. NFLOG
+groups are registered from explicit DSL/IR metadata, and counter events
+carry table ownership from the counter source. Older or unscoped
+producers may still report `unknown`; consumers must treat fields as
+additive.
+
+The AMQP route for the same canonical packet event is
+`firewall.<chain>.packet`; counter-rate events route to
+`firewall.<chain>.drop`. Guard/correlation decisions use
+`guard.threat.*`.
 
 ## The `publish` block
 
@@ -191,7 +252,7 @@ tools/event_consumer.py amqp://... 'container.*.*'
 # Only stats
 tools/event_consumer.py amqp://... 'stats.#'
 
-# Everything the firewall produces
+# Everything the firewall publishes to AMQP
 tools/event_consumer.py amqp://... 'firewall.#'
 
 # Threat detection
@@ -204,7 +265,21 @@ tools/event_consumer.py amqp://... 'error.*.*'
 Routing-key patterns are the topic exchange's standard syntax: `*`
 matches one word, `#` matches zero or more.
 
-**4. Trigger a drop event.** Kill the container to see a non-clean
+**4. Check the firewall read side.** The local CLI does not require an
+AMQP broker:
+
+```bash
+ek nft counters
+ek firewall status
+ek firewall events --limit 10
+ek --format json firewall watch --limit 20
+```
+
+The table output includes the nft `table` and `owner` columns when the
+event can be scoped to an owner table. JSON output uses `table` and
+`table_owner`.
+
+**5. Trigger a lifecycle event.** Kill the container to see a non-clean
 exit:
 
 ```bash
@@ -220,7 +295,7 @@ The bus emits:
 
 Use `ek ct inspect` to confirm the `restart_count` bumped.
 
-**5. Dashboard view.** The richer TUI consumer:
+**6. Dashboard view.** The richer TUI consumer:
 
 ```bash
 tools/dashboard.py amqp://erlkoenig@localhost
@@ -230,7 +305,7 @@ Five panels update in place: overview (counts + rates), threats
 (active bans), containers (running/failed/restarting), network
 (drop counters), raw events (last 50 messages). Ctrl-C to exit.
 
-**6. Structured errors in practice.** Force a configuration error to
+**7. Structured errors in practice.** Force a configuration error to
 see the error channel:
 
 ```bash
@@ -255,7 +330,7 @@ The subscriber sees:
                                                "one_for_all",
                                                "rest_for_one"] }
 
-**7. Tear down.**
+**8. Tear down.**
 
 ```bash
 ek down /tmp/obs.term

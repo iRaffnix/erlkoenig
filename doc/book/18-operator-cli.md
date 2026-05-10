@@ -55,6 +55,10 @@ structured rows or key/value data:
 Pure status commands such as `node ping`, `dsl compile`, and
 `admission snapshot` print plain status text.
 
+`--limit <n>` is a global option for commands backed by event or history
+buffers. Today that means `firewall events` and `firewall watch`; both
+default to the newest 50 events when no limit is supplied.
+
 ## Subcommand catalogue
 
 ### Node
@@ -87,7 +91,7 @@ emit an `EK_*` code that can be fed directly into `ek explain`.
 |----------------|-------------------------------------------------------|
 | `up <file>`    | Start a stack; accepts `.exs` or `.term`              |
 | `down <file>`  | Stop containers declared in the stack file            |
-| `down`         | Stop every running container on the target node       |
+| `down --all`   | Stop every running container on the target node       |
 
 `up` is the operator-facing path. For `.exs` input it compiles the DSL
 to a sibling `.term` using the bundled Elixir runtime, then loads the
@@ -167,6 +171,46 @@ The hash is the SHA-256 hex string of the binary, as printed in the
 |------------------------|---------------------------------------------------|
 | `admission snapshot`   | In-flight, queued, and per-zone counts            |
 
+### nft Counters
+
+| Command          | Effect                  |
+|------------------|-------------------------|
+| `nft counters`   | Live nft counter rates  |
+
+The default table view prints `table`, `name`, packet/byte deltas,
+total packet/byte counts, rates (`pps`, `bps`), and the sample
+`interval`. JSON output is an array with the same normalized fields:
+`table`, `name`, `packets`, `bytes`, `total_packets`, `total_bytes`,
+`pps`, `bps`, and `interval`.
+
+### Interactive Firewall
+
+| Command                    | Effect                                      |
+|----------------------------|---------------------------------------------|
+| `firewall status`          | Event-buffer and guard status               |
+| `firewall events`          | Recent canonical firewall events            |
+| `firewall events --limit N` | Limit the event-buffer snapshot            |
+| `firewall watch`           | Follow canonical firewall events live       |
+| `firewall watch --limit N` | Limit each watch poll from the event buffer |
+
+`firewall status` reports the read-side health of the interactive
+firewall: event-buffer cursor, buffered event count, waiting watch
+clients, subscribed native groups, and conntrack guard statistics when
+the guard is running.
+
+`firewall events` prints the newest canonical firewall events from the
+node-local event buffer, oldest first. The events are normalized by the
+daemon from Erlkoenig's native nft/guard event groups; they are not
+parsed from `journalctl` or shell output.
+
+`firewall watch` follows the same stream live. In table mode, it prints
+the event header once and then appends new rows. In JSON mode, `events`
+prints one JSON array snapshot, while `watch` emits newline-delimited
+JSON, one event object per line. Typical event kinds include
+`firewall_packet`, `counter_rate`, `scan_suspect`, `slow_scan`,
+`honeypot`, `threat_ban`, and `threat_unban`. Event fields are
+additive; JSON consumers should ignore unknown keys.
+
 ## Command Groups At A Glance
 
 ```
@@ -200,6 +244,11 @@ ek quarantine add <sha256-hex> --reason operator_ban
 ek quarantine remove <sha256-hex>
 
 ek admission snapshot
+
+ek nft counters
+ek firewall status
+ek firewall events --limit 20
+ek firewall watch --limit 20
 ```
 
 ## Hands-on: a live operator session
@@ -341,7 +390,47 @@ If `queue` creeps up and `in_flight` stays at `max_host`, the host is
 saturated — new spawns are queueing, not failing. Tune via sys.config
 keys `admission_max_host` / `admission_max_per_zone` (→ Chapter 16).
 
-**9. Graceful shutdown of the stack.**
+**9. Firewall counters and event stream.**
+
+```
+$ ek nft counters
+table                 name        packets  bytes  total_packets  total_bytes  pps  bps  interval
+--------------------  ----------  -------  -----  -------------  -----------  ---  ---  --------
+erlkoenig_host        ssh_input   4        240    121            7260         0    0    1000
+
+$ ek firewall status
+component  key              value
+---------  ---------------  ---------------------------------------------
+events     buffered         3
+events     cursor           12
+events     groups           [nflog_events,counter_events,ct_guard_events]
+events     max_events       1024
+events     running          true
+events     waiting_clients  0
+guard      active_actors    1
+guard      active_bans      0
+
+$ ek firewall events --limit 5
+seq  ts                    severity  kind             source  table           owner  src_ip        dst_ip    chain  dst_port  reason
+---  --------------------  --------  ---------------  ------  --------------  -----  ------------  --------  -----  --------  ---------------
+8    2026-05-06T12:26:08Z  notice    firewall_packet  nflog   erlkoenig_host  host   203.0.113.44  10.0.0.1 input  22        packet_observed
+```
+
+For dashboards or scripts, prefer JSON:
+
+```
+$ ek --format json firewall events --limit 1
+[{"seq":8,"id":"fw-1778147168000-1","source":"nflog","severity":"notice","kind":"firewall_packet"}]
+
+$ ek --format json firewall watch --limit 20
+{"seq":9,"id":"fw-1778147169000-1","source":"counter","severity":"info","kind":"counter_rate"}
+```
+
+`firewall events` returns a JSON array because it is a bounded snapshot.
+`firewall watch` keeps running and emits one JSON object per line so
+shell consumers can process the stream incrementally.
+
+**10. Graceful shutdown of the stack.**
 
 ```
 $ ek down ~/my_stack.exs
@@ -375,6 +464,15 @@ ek --format json ct list | jq '.[] | select(.zone == "db")'
 
 # Grep for a specific volume by persist name
 ek vol list | awk '/pg-data/ {print $1}'
+
+# Current nft counter rates
+ek nft counters
+
+# Recent canonical firewall events
+ek firewall events --limit 20
+
+# Stream canonical firewall events into a line-oriented JSON consumer
+ek --format json firewall watch --limit 20 | jq -c 'select(.severity != "debug")'
 ```
 
 ## Behaviour on error
@@ -392,28 +490,22 @@ Three classes of failure are surfaced cleanly:
 Genuine internal exceptions still print a full trace, because at
 that point the operator wants the detail.
 
-## Where this chapter doesn't go
+## Not in the packaged CLI yet
 
-The command-line escript is intentionally narrower than the interactive
-Erlang shell helper module `ek`. The following operator tasks are not
-part of the shipped one-shot CLI yet:
+The shipped escript now includes the nft/firewall read-side commands
+shown above. It is still intentionally narrower than every Erlang module
+or attached-shell helper. These names are not current packaged
+subcommands:
 
-- **`fw` (firewall)** — needs a serialiser that renders the live
-  nft state to text or JSON. The Erlang surface is there
-  (`erlkoenig_nft_firewall`), only the formatter is missing.
-- **`threat`** — needs a public API on `erlkoenig_threat_actor` /
-  `_mesh` that returns a stable snapshot. Today the gen_statem
-  state isn't designed for external read.
-- **`events tail`** — long-running subscribe; needs a different
-  signal-handling story than the one-shot RPC pattern.
-- **`logs` / `top`** — interactive streaming views exist naturally in
-  an attached Erlang shell, but the packaged `ek` escript currently
-  keeps to one-shot commands.
-- **`elf analyze`** — calling `erlkoenig_elf:parse/1` on an
-  arbitrary file is straightforward, but the printable rendering
-  needs design work.
-- **`sig sign` / `pki`** — Build-pipeline integration usually wants
-  something more scriptable than an interactive CLI.
+- `ek logs`
+- `ek top`
+- `ek sign`
+- `ek verify`
+- `ek pki`
+- `ek fw`
+- `ek threat`
+- `ek events tail`
 
-Each of these is a small extension of the same dispatch table once
-the underlying API is stable.
+Some equivalent functionality may exist through Erlang modules, AMQP
+consumers, or separate tools, but it is not exposed as a stable packaged
+CLI command yet.

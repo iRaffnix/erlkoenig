@@ -46,7 +46,7 @@ integration, operator procedures.
 20. [Customer-side Audit Verification](20-audit-verifier.md) — A 2.4 MB statically-linked Go binary the customer hands to their auditor; recomputes hash chain, Ed25519 signatures, and HMAC seal offline
 21. [Full-Stack Use-Case: case_mgmt](21-case-mgmt.md) — Real workload (Go binary, Postgres, journal) running inside a container; peer-auth via bind-mounted socket, every mutation tamper-evident, externally re-verifiable
 22. [DNS Egress Allowlist — `:dns.allowlist`](22-dns-egress-allowlist.md) — L7 name filter as a declarative capability, operator-owned L4 stays intact (Glasbox); NXDOMAIN + audit chain for denied lookups; foundation for SNI/TLS-pin phases of SPEC-AS-009
-23. [Edge Primitives: CIDR Sets and Connection Limits](23-edge-primitives.md) — `nft_cidr_set` and `conn_limit per_ip / global` in the DSL; nginx/HAProxy ergonomics over nft without giving up Glasbox; first concrete column of the SPEC-EK-028 Tracker frame with signed `tracker_installed`/`tracker_torn_down` audit events
+23. [Edge Primitives: CIDR Sets and Connection Limits](23-edge-primitives.md) — `nft_cidr_set` and chain-scoped `conn_limit per_ip` in the DSL; nginx/HAProxy ergonomics over nft without giving up Glasbox; first concrete Tracker primitive, with broader roadmap notes kept as external architecture material
 
 ## How to read
 
@@ -63,6 +63,6 @@ structure is meant to be stable.
 - All code samples are verified against the current tree.
 - DSL syntax is Elixir; runtime orchestration is Erlang.
 - Paths are relative to the repository root unless noted otherwise.
-- Specifications (architecture decisions, `SPEC-EK-*` documents) live in a
-  separate repository at `erlkoenigin/` — this book is the reader-facing
-  layer on top.
+- Architecture notes and `SPEC-EK-*` documents may be referenced for context,
+  but they live outside this repository in `erlkoenigin/`. They are not local
+  book links unless a chapter explicitly points to a file in this tree.

@@ -73,7 +73,9 @@ other `requires`, with one extra keyword list:
 
 ```elixir
 pod "case_mgmt", strategy: :one_for_one do
-  container "agent", binary: "/opt/.../case_mgmt", ... do
+  container "agent",
+    binary: "/opt/erlkoenig/rt/demo/case_mgmt",
+    zone: "ops" do
     # ── Capabilities ────────────────────────────────────────
     requires :"postgres.local"
     requires :"journal.local"
@@ -214,21 +216,64 @@ the canonical JSON + chain structure matter. That separation is
 deliberate: future capabilities add new event types without
 breaking customer verification binaries.
 
-## Full worked example
+## Showcase wiring
 
-The showcase pod from Chapter 21 (`examples/showcase/case_mgmt_stack.exs`)
-already declares the capability. Run the showcase end-to-end:
+The showcase stack source from Chapter 21,
+`examples/showcase/case_mgmt_stack.exs`, already declares the
+capability:
 
-```bash
-make showcase                 # build + deploy + reseed
-ssh erlkoenig-2__root \
-    /root/erlkoenig/tests/integration/showcase_case_mgmt.escript &
+```elixir
+requires :"dns.allowlist",
+  hosts: [
+    "*.postgres.internal",
+    "audit.erlkoenig.internal"
+  ]
 ```
 
-From inside the container's net namespace, exercise the filter:
+The repo-supported showcase deployment path is still the Makefile:
 
 ```bash
-PID=$(pgrep -f "rt/demo/case_mgmt" | head -1)
+make showcase
+```
+
+That target runs `make agents-build`, copies the two Go agents to
+the showcase host, resets the `cases` database, and deploys the
+long-running runner:
+
+```text
+/opt/erlkoenig/rt/demo/case_mgmt
+/opt/erlkoenig/rt/demo/deadline_worker
+/root/erlkoenig/tests/integration/showcase_case_mgmt.escript
+```
+
+Start the operator-facing demo with:
+
+```bash
+ssh erlkoenig-2__root /root/erlkoenig/tests/integration/showcase_case_mgmt.escript
+```
+
+That runner starts the `case_mgmt` API container and the
+`deadline_worker` container, then prints:
+
+```text
+case_mgmt:        http://10.0.0.210:8080
+deadline_worker:  polls case_mgmt every 30s
+audit log:        /var/log/erlkoenig/case_mgmt_audit.jsonl
+```
+
+The runner is useful for the chapter-21 workload and audit-chain
+demo. It is not the DNS allowlist conformance test: the current
+`showcase_case_mgmt.escript` spawns direct runtime opts instead of
+loading `examples/showcase/case_mgmt_stack.exs`. For DNS
+enforcement, use the dedicated integration tests below.
+
+## Manual namespace probe
+
+When the `case_mgmt` container is running with the allowlist from
+the stack file, exercise the filter from inside its net namespace:
+
+```bash
+PID=$(pgrep -f "/opt/erlkoenig/rt/demo/case_mgmt" | head -1)
 
 # Registered hosts resolve
 nsenter --target $PID --net /usr/bin/nslookup \
@@ -244,24 +289,32 @@ grep '"type":"dns_filter"' /var/log/erlkoenig/case_mgmt_audit.jsonl
 # → {"seq":…,"query":"google.com","reason":"not_in_allowlist",…}
 ```
 
-The verifier re-checks the chain offline:
+The long-running showcase log can be re-checked offline through the
+Makefile wrapper:
 
 ```bash
-dist/audit-verifier verify-chain \
-    /var/log/erlkoenig/case_mgmt_audit.jsonl
-# → ok: <N> event(s), chain head <hex>
+make showcase-verify
 ```
+
+`make showcase-verify` pulls
+`/var/log/erlkoenig/case_mgmt_audit.jsonl` from the showcase host
+and runs `dist/audit-verifier verify-chain` against the local copy.
 
 ## Integration tests
 
-Two tests exercise the two halves:
+The DNS capability itself is covered by the DNS-specific tests.
+The case-management tests cover the workload path:
 
 | Test | What it proves |
 |------|----------------|
 | `28_dns_allowlist.escript` | Runtime UDP path — denied name gets AA=1 NXDOMAIN within milliseconds, allowed name is not filter-NXDOMAIN'd, audit chain captures the deny, `unregister/1` returns to pass-through |
 | `29_dns_allowlist_dsl.escript` | DSL lifecycle — spawning with `dns_allowlist => [...]` auto-registers in the filter's ETS at `running`, exact + wildcard `check/2` results, and stopping the container auto-unregisters |
+| `45_case_mgmt.escript` | One-shot `case_mgmt` API path — Postgres socket mount, journal.local writes, and audit-chain verification |
+| `showcase_case_mgmt.escript` | Long-running demo pod — `/opt/erlkoenig/rt/demo/case_mgmt` plus `/opt/erlkoenig/rt/demo/deadline_worker` |
 
-Both run as root because the default-zone DNS binds UDP/53.
+The DNS tests run as root because the default-zone DNS binds UDP/53.
+The case-management scripts also run as root because they spawn
+erlkoenig containers.
 
 ## What this deliberately does NOT do
 

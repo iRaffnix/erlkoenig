@@ -9,6 +9,9 @@ defmodule Erlkoenig.Images.Builder do
 
   defstruct images: []
 
+  @type t :: %__MODULE__{images: list()}
+
+  @spec new() :: t()
   def new, do: %__MODULE__{}
 
   def add_image(%__MODULE__{images: imgs} = b, name, opts) do
@@ -24,14 +27,21 @@ defmodule Erlkoenig.Images.Builder do
     %{b | images: imgs ++ [entry]}
   end
 
+  @spec validate!(t()) :: t()
+  def validate!(%__MODULE__{} = b), do: b
+
+  @spec to_term(t()) :: map()
   def to_term(%__MODULE__{images: imgs}) do
     Map.new(imgs, fn %{name: n, path: p} -> {n, p} end)
   end
 
+  @spec image_names(t()) :: [String.t()]
   def image_names(%__MODULE__{images: imgs}) do
     Enum.map(imgs, & &1.name)
   end
 
+  @spec resolve_path(t(), atom() | String.t()) ::
+          {:ok, String.t()} | {:error, {:undeclared_image, term()}}
   def resolve_path(%__MODULE__{images: imgs}, name) do
     case Enum.find(imgs, fn i -> i.name == to_string(name) end) do
       %{path: p} -> {:ok, p}

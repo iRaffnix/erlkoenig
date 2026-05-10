@@ -33,6 +33,7 @@ defmodule Tutorial.ThreatDetection do
                    subnet: {10, 40, 0, 0, 24}
 
     nft_host do
+      nft_nflog_group 1, name: "host"
       nft_set "ban", :ipv4_addr
       nft_counter "input_drop"
       nft_counter "input_ban"
@@ -59,7 +60,7 @@ defmodule Tutorial.ThreatDetection do
         # via NFLOG-group in die erlkoenig_nft_nflog → ct_events
         # pg-broadcast → threat_actor handle_info-Chain.
         nft_rule :drop, counter: "input_drop",
-                        log_prefix: "HOST: "
+                        log_prefix: "HOST: ", nflog_group: 1
       end
     end
   end

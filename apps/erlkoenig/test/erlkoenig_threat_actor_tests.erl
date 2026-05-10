@@ -102,6 +102,39 @@ three_ports_becomes_suspicious_test() ->
     gen_statem:stop(Pid),
     teardown(Reg).
 
+three_ports_broadcasts_legacy_and_canonical_suspect_events_test() ->
+    Reg = setup(),
+    ok = pg:join(erlkoenig_nft, ct_guard_events, self()),
+    Pid = start_actor(<<10,0,0,55>>, Reg),
+    erlkoenig_threat_actor:connection(Pid, 80),
+    erlkoenig_threat_actor:connection(Pid, 443),
+    erlkoenig_threat_actor:connection(Pid, 8080),
+
+    Legacy =
+        receive
+            {ct_guard_suspect, #{ip := <<10,0,0,55>>, ports := Ports1}} ->
+                lists:sort(Ports1)
+        after 500 ->
+            timeout
+        end,
+    Canonical =
+        receive
+            {firewall_event, #{kind := scan_suspect,
+                               source := threat_actor,
+                               src_ip := <<10,0,0,55>>,
+                               evidence := #{ports := Ports2}}} ->
+                lists:sort(Ports2)
+        after 500 ->
+            timeout
+        end,
+
+    ?assertEqual([80, 443, 8080], Legacy),
+    ?assertEqual([80, 443, 8080], Canonical),
+
+    catch pg:leave(erlkoenig_nft, ct_guard_events, self()),
+    gen_statem:stop(Pid),
+    teardown(Reg).
+
 terminate_cleans_registry_test() ->
     Reg = setup(),
     IP = <<10,0,0,6>>,

@@ -116,6 +116,14 @@ dispatch(["quarantine", "remove", Hash], O)           -> q_remove(O, normalize_h
 %% --- Admission ----------------------------------------------------
 dispatch(["admission", "snapshot"], O) -> adm_snapshot(O);
 
+%% --- NFT ----------------------------------------------------------
+dispatch(["nft", "counters"], O) -> nft_counters(O);
+
+%% --- Interactive firewall ----------------------------------------
+dispatch(["firewall", "status"], O) -> firewall_status(O);
+dispatch(["firewall", "events"], O) -> firewall_events(O);
+dispatch(["firewall", "watch"], O)  -> firewall_watch(O);
+
 %% --- Help / unknown ----------------------------------------------
 dispatch(Other, _) ->
     die(usage, io_lib:format("unknown command: ~s~n  run `ek help` for usage",
@@ -1374,6 +1382,131 @@ adm_snapshot(O) ->
     end.
 
 %%====================================================================
+%% NFT
+%%====================================================================
+
+nft_counters(O) ->
+    Rows = operator_value(O, nft_counters, []),
+    case maps:get(format, O, table) of
+        json ->
+            emit_json([to_json(nft_counter, R) || R <- Rows]);
+        _ ->
+            emit_table(O,
+                       [table, name, packets, bytes, total_packets,
+                        total_bytes, pps, bps, interval],
+                       [nft_counter_row(R) || R <- Rows])
+    end.
+
+nft_counter_row(R) ->
+    [maps:get(table, R, <<"-">>),
+     maps:get(name, R, <<"-">>),
+     maps:get(packets, R, 0),
+     maps:get(bytes, R, 0),
+     maps:get(total_packets, R, maps:get(packets, R, 0)),
+     maps:get(total_bytes, R, maps:get(bytes, R, 0)),
+     maps:get(pps, R, 0),
+     maps:get(bps, R, 0),
+     maps:get(interval, R, 0)].
+
+%%====================================================================
+%% Interactive firewall
+%%====================================================================
+
+firewall_status(O) ->
+    case op_call(O, firewall_status, []) of
+        {ok, Status} ->
+            case maps:get(format, O, table) of
+                json -> emit_json(to_json(firewall_status, Status));
+                _    -> emit_firewall_status(Status)
+            end;
+        {error, Err} ->
+            die_operator(Err)
+    end.
+
+firewall_events(O) ->
+    Limit = maps:get(limit, O, 50),
+    case op_call(O, firewall_events, [Limit]) of
+        {ok, Events} ->
+            case maps:get(format, O, table) of
+                json -> emit_json([to_json(firewall_event, E) || E <- Events]);
+                _    -> emit_firewall_events(O, Events)
+            end;
+        {error, Err} ->
+            die_operator(Err)
+    end.
+
+firewall_watch(O) ->
+    Limit = maps:get(limit, O, 50),
+    case op_call(O, firewall_events_since, [0, 0, Limit]) of
+        {ok, #{cursor := Cursor0, events := Events0}} ->
+            PrintedHeader = emit_firewall_event_stream(O, Events0, false),
+            firewall_watch_loop(O, Cursor0, Limit, PrintedHeader);
+        {error, Err} ->
+            die_operator(Err)
+    end.
+
+firewall_watch_loop(O, Cursor, Limit, PrintedHeader0) ->
+    case op_call(O, firewall_events_since, [Cursor, 1000, Limit]) of
+        {ok, #{cursor := Cursor1, events := Events}} ->
+            PrintedHeader = emit_firewall_event_stream(O, Events, PrintedHeader0),
+            firewall_watch_loop(O, Cursor1, Limit, PrintedHeader);
+        {error, Err} ->
+            die_operator(Err)
+    end.
+
+emit_firewall_events(_O, []) ->
+    ok;
+emit_firewall_events(O, Events) ->
+    emit_table(O,
+               firewall_event_headers(),
+               [firewall_event_row(E) || E <- Events]).
+
+emit_firewall_event_stream(_O, [], PrintedHeader) ->
+    PrintedHeader;
+emit_firewall_event_stream(#{format := json}, Events, PrintedHeader) ->
+    [emit_json(to_json(firewall_event, E)) || E <- Events],
+    PrintedHeader;
+emit_firewall_event_stream(#{format := plain} = O, Events, PrintedHeader) ->
+    emit_firewall_events(O, Events),
+    PrintedHeader;
+emit_firewall_event_stream(O, Events, PrintedHeader) ->
+    Headers = firewall_event_headers(),
+    Rows = [firewall_event_row(E) || E <- Events],
+    emit_table_maybe_header(O, Headers, Rows, not PrintedHeader),
+    true.
+
+firewall_event_headers() ->
+    [seq, ts, severity, kind, source, table, owner, src_ip, dst_ip, chain, dst_port, reason].
+
+firewall_event_row(E) ->
+    [maps:get(seq, E, 0),
+     format_ts(maps:get(ts_wall, E, 0)),
+     maps:get(severity, E, <<"-">>),
+     maps:get(kind, E, <<"-">>),
+     maps:get(source, E, <<"-">>),
+     maps:get(table, E, <<"-">>),
+     maps:get(table_owner, E, <<"-">>),
+     format_ip_value(maps:get(src_ip, E, undefined)),
+     format_ip_value(maps:get(dst_ip, E, undefined)),
+     maps:get(chain, E, <<"-">>),
+     maps:get(dst_port, E, <<"-">>),
+     maps:get(reason, E, <<"-">>)].
+
+emit_firewall_status(Status) ->
+    Events = maps:get(events, Status, #{}),
+    Guard = maps:get(guard, Status, #{}),
+    emit_table(#{format => table},
+               [component, key, value],
+               firewall_status_rows(events, Events) ++
+               firewall_status_rows(guard, Guard)).
+
+firewall_status_rows(Component, Map) when is_map(Map) ->
+    [[Component, K, V] || {K, V} <- lists:sort(maps:to_list(Map))];
+firewall_status_rows(Component, Other) ->
+    [[Component, status, Other]].
+
+
+%%====================================================================
 %% Distribution + RPC
 %%====================================================================
 
@@ -1597,6 +1730,8 @@ parse_global_opts(["--dry-run" | Rest], Acc) ->
     parse_global_opts(Rest, Acc#{dry_run => true});
 parse_global_opts(["--allow-lockout" | Rest], Acc) ->
     parse_global_opts(Rest, Acc#{allow_lockout => true});
+parse_global_opts(["--limit", Limit | Rest], Acc) ->
+    parse_global_opts(Rest, Acc#{limit => parse_positive_int("--limit", Limit)});
 parse_global_opts([Arg | Rest], Acc) when is_list(Arg) ->
     %% Also accept --key=value form for shell-friendly invocations.
     case string:split(Arg, "=") of
@@ -1607,6 +1742,7 @@ parse_global_opts([Arg | Rest], Acc) when is_list(Arg) ->
         ["--yes"]            -> parse_global_opts(Rest, Acc#{yes => true});
         ["--dry-run"]        -> parse_global_opts(Rest, Acc#{dry_run => true});
         ["--allow-lockout"]  -> parse_global_opts(Rest, Acc#{allow_lockout => true});
+        ["--limit", V]       -> parse_global_opts(Rest, Acc#{limit => parse_positive_int("--limit", V)});
         _                    ->
             {NextAcc, NextRest} = parse_global_opts(Rest, Acc),
             {NextAcc, [Arg | NextRest]}
@@ -1641,11 +1777,23 @@ emit_table(#{format := plain}, _Headers, Rows) ->
                       [string:join([to_value(V) || V <- Row], "\t")])
         end, Rows);
 emit_table(_, Headers, Rows) ->
+    emit_table_maybe_header(#{format => table}, Headers, Rows, true).
+
+emit_table_maybe_header(#{format := json} = O, Headers, Rows, _PrintHeader) ->
+    emit_table(O, Headers, Rows);
+emit_table_maybe_header(#{format := plain} = O, Headers, Rows, _PrintHeader) ->
+    emit_table(O, Headers, Rows);
+emit_table_maybe_header(_, Headers, Rows, PrintHeader) ->
     HeaderStrs = [atom_to_list(H) || H <- Headers],
     StringRows = [[to_value(V) || V <- Row] || Row <- Rows],
     Widths = column_widths([HeaderStrs | StringRows]),
-    print_row(HeaderStrs, Widths),
-    print_row([lists:duplicate(W, $-) || W <- Widths], Widths),
+    case PrintHeader of
+        true ->
+            print_row(HeaderStrs, Widths),
+            print_row([lists:duplicate(W, $-) || W <- Widths], Widths);
+        false ->
+            ok
+    end,
     [print_row(R, Widths) || R <- StringRows],
     ok.
 
@@ -1721,7 +1869,10 @@ to_json(volume,            V)    -> normalize_volume(V);
 to_json(pod,               P)    -> normalize_pod(P);
 to_json(quarantine_entry,  E)    -> normalize_quarantine_entry(E);
 to_json(admission_snapshot, S)   -> normalize_admission_snapshot(S);
-to_json(node_health,       H)    -> normalize_node_health(H).
+to_json(node_health,       H)    -> normalize_node_health(H);
+to_json(nft_counter,       C)    -> normalize_nft_counter(C);
+to_json(firewall_status,   S)    -> normalize_firewall_status(S);
+to_json(firewall_event,    E)    -> normalize_firewall_event(E).
 
 %% Apply explicit field handlers; unknown fields fall through to
 %% to_json_generic and may emit a one-shot notice if the value is a
@@ -1806,6 +1957,11 @@ maybe_notice(Kind, Field, _V) ->
 %% IPv4/IPv6 tuple → printable form. Uses inet:ntoa for IPv6 to get
 %% RFC-5952 compressed form ("fe80::1" not "fe80:0:0:0:0:0:0:1").
 ip_to_binary(undefined) -> null;
+ip_to_binary(<<A,B,C,D>>) ->
+    iolist_to_binary(io_lib:format("~B.~B.~B.~B", [A,B,C,D]));
+ip_to_binary(<<A:16/big, B:16/big, C:16/big, D:16/big,
+               E:16/big, F:16/big, G:16/big, H:16/big>>) ->
+    iolist_to_binary(inet:ntoa({A,B,C,D,E,F,G,H}));
 ip_to_binary({A,B,C,D}) when is_integer(A), is_integer(B),
                              is_integer(C), is_integer(D) ->
     iolist_to_binary(io_lib:format("~B.~B.~B.~B", [A,B,C,D]));
@@ -1985,6 +2141,71 @@ normalize_node_health(H) ->
         <<"sup_children">> => int_or_null(maps:get(sup_children, H, undefined))
     }.
 
+normalize_nft_counter(C) ->
+    #{
+        <<"table">>         => to_str_or_null(maps:get(table, C, undefined)),
+        <<"name">>          => to_str_or_null(maps:get(name, C, undefined)),
+        <<"packets">>       => number_or_null(maps:get(packets, C, undefined)),
+        <<"bytes">>         => number_or_null(maps:get(bytes, C, undefined)),
+        <<"total_packets">> => number_or_null(
+                                  maps:get(total_packets, C,
+                                           maps:get(packets, C, undefined))),
+        <<"total_bytes">>   => number_or_null(
+                                  maps:get(total_bytes, C,
+                                           maps:get(bytes, C, undefined))),
+        <<"pps">>           => number_or_null(maps:get(pps, C, undefined)),
+        <<"bps">>           => number_or_null(maps:get(bps, C, undefined)),
+        <<"interval">>      => int_or_null(maps:get(interval, C, undefined))
+    }.
+
+normalize_firewall_status(S) ->
+    #{
+        <<"events">> => to_json_generic(maps:get(events, S, #{})),
+        <<"guard">>  => to_json_generic(maps:get(guard, S, #{}))
+    }.
+
+normalize_firewall_event(E) ->
+    Known = #{
+        seq         => fun int_or_null/1,
+        id          => fun to_str_or_null/1,
+        ts_mono     => fun int_or_null/1,
+        ts_wall     => fun int_or_null/1,
+        source      => fun atom_to_str_or_null/1,
+        severity    => fun atom_to_str_or_null/1,
+        kind        => fun atom_to_str_or_null/1,
+        table       => fun to_str_or_null/1,
+        table_owner => fun atom_to_str_or_null/1,
+        chain       => fun to_str_or_null/1,
+        counter     => fun to_str_or_null/1,
+        src_ip      => fun ip_to_binary/1,
+        dst_ip      => fun ip_to_binary/1,
+        proto       => fun atom_to_str_or_null/1,
+        src_port    => fun int_or_null/1,
+        dst_port    => fun int_or_null/1,
+        verdict     => fun atom_to_str_or_null/1,
+        reason      => fun atom_to_str_or_null/1,
+        evidence    => fun normalize_firewall_evidence/1,
+        labels      => fun list_of_str/1
+    },
+    apply_known(firewall_event, Known, E).
+
+normalize_firewall_evidence(undefined) -> #{};
+normalize_firewall_evidence(M) when is_map(M) ->
+    maps:fold(fun(K, V, Acc) ->
+        Acc#{normalize_key(K) => normalize_firewall_evidence_value(K, V)}
+    end, #{}, M);
+normalize_firewall_evidence(L) when is_list(L) ->
+    [normalize_firewall_evidence(V) || V <- L];
+normalize_firewall_evidence(Other) ->
+    to_json_generic(Other).
+
+normalize_firewall_evidence_value(K, V)
+  when K =:= src_raw; K =:= dst_raw;
+       K =:= <<"src_raw">>; K =:= <<"dst_raw">> ->
+    ip_to_binary(V);
+normalize_firewall_evidence_value(_K, V) ->
+    normalize_firewall_evidence(V).
+
 %% Small leaf converters — keep them honest about absence vs zero.
 to_str_or_null(undefined) -> null;
 to_str_or_null(null)      -> null;
@@ -2008,6 +2229,11 @@ int_or_null(undefined) -> null;
 int_or_null(I) when is_integer(I) -> I;
 int_or_null(_) -> null.
 
+number_or_null(undefined) -> null;
+number_or_null(I) when is_integer(I) -> I;
+number_or_null(F) when is_float(F) -> F;
+number_or_null(_) -> null.
+
 pid_to_str_or_null(undefined) -> null;
 pid_to_str_or_null(P) when is_pid(P) -> iolist_to_binary(pid_to_list(P));
 pid_to_str_or_null(B) when is_binary(B) -> B;
@@ -2022,6 +2248,19 @@ list_of_str(_) -> [].
 format_ip(undefined) -> "-";
 format_ip({A, B, C, D}) ->
     io_lib:format("~B.~B.~B.~B", [A, B, C, D]).
+
+format_ip_value(undefined) -> <<"-">>;
+format_ip_value(<<A, B, C, D>>) ->
+    iolist_to_binary(io_lib:format("~B.~B.~B.~B", [A, B, C, D]));
+format_ip_value(<<A:16/big, B:16/big, C:16/big, D:16/big,
+                  E:16/big, F:16/big, G:16/big, H:16/big>>) ->
+    iolist_to_binary(inet:ntoa({A, B, C, D, E, F, G, H}));
+format_ip_value({A, B, C, D}) ->
+    iolist_to_binary(io_lib:format("~B.~B.~B.~B", [A, B, C, D]));
+format_ip_value({_,_,_,_,_,_,_,_} = T) ->
+    iolist_to_binary(inet:ntoa(T));
+format_ip_value(B) when is_binary(B) -> B;
+format_ip_value(Other) -> io_lib:format("~p", [Other]).
 
 format_ts(Ms) when is_integer(Ms) ->
     Sec = Ms div 1000,
@@ -2043,6 +2282,14 @@ normalize_hash(Bin) when is_binary(Bin) ->
     catch _:_ -> die(usage, "quarantine hash must be hex-encoded")
     end.
 
+parse_positive_int(Name, Value) ->
+    try list_to_integer(Value) of
+        I when I > 0 -> I;
+        _ -> die(usage, io_lib:format("~s must be a positive integer", [Name]))
+    catch
+        _:_ -> die(usage, io_lib:format("~s must be a positive integer", [Name]))
+    end.
+
 %%====================================================================
 %% Help / fatal errors
 %%====================================================================
@@ -2059,6 +2306,7 @@ print_usage() ->
         "  --cookie-file <path> Cookie file (default: ERLKOENIG_COOKIE_FILE, /etc/erlkoenig/cookie, ~~/.config/erlkoenig/cookie)~n"
         "  --format <fmt>       Output format: table | json | plain (default: table)~n"
         "  --allow-lockout      Bypass host-firewall preflight on `up' / `config load' (you must have out-of-band recovery available)~n"
+        "  --limit <n>          Limit rows for commands that return event/history buffers~n"
         "  --version, -V        Print CLI version and exit~n"
         "~n"
         "Areas and commands:~n"
@@ -2099,6 +2347,11 @@ print_usage() ->
         "  quarantine remove <hash>           Lift a quarantine~n"
         "~n"
         "  admission snapshot                 Spawn-gate state~n"
+        "~n"
+        "  nft counters                       Live nft counter rates~n"
+        "  firewall status                    Event-buffer and guard status~n"
+        "  firewall events [--limit N]        Recent canonical firewall events~n"
+        "  firewall watch  [--limit N]        Follow canonical firewall events live~n"
         "~n"
         "Examples:~n"
         "  ek up my_stack.exs~n"

@@ -7,16 +7,16 @@ defmodule Erlkoenig.ContainerDslTest do
     use Erlkoenig.Container
 
     container :web do
-      binary "/opt/bin/web_server"
-      ip {10, 0, 0, 10}
-      ports [{8080, 80}]
-      env %{"PORT" => "80"}
+      binary("/opt/bin/web_server")
+      ip({10, 0, 0, 10})
+      ports([{8080, 80}])
+      env(%{"PORT" => "80"})
     end
 
     container :worker do
-      binary "/opt/bin/worker"
-      ip {10, 0, 0, 20}
-      args ["--threads", "4"]
+      binary("/opt/bin/worker")
+      ip({10, 0, 0, 20})
+      args(["--threads", "4"])
     end
   end
 
@@ -24,23 +24,25 @@ defmodule Erlkoenig.ContainerDslTest do
     use Erlkoenig.Container
 
     container :app do
-      binary "/opt/bin/app"
-      ip {10, 0, 0, 10}
+      binary("/opt/bin/app")
+      ip({10, 0, 0, 10})
+
       firewall do
-        rule :accept, ct: :established
-        rule :accept, icmp: true
-        rule :accept, udp: 53
-        rule :accept
+        rule(:accept, ct: :established)
+        rule(:accept, icmp: true)
+        rule(:accept, udp: 53)
+        rule(:accept)
       end
     end
 
     container :api do
-      binary "/opt/bin/api"
-      ip {10, 0, 0, 20}
+      binary("/opt/bin/api")
+      ip({10, 0, 0, 20})
+
       firewall do
-        rule :accept, ct: :established
-        rule :accept, icmp: true
-        rule :accept, tcp: 443
+        rule(:accept, ct: :established)
+        rule(:accept, icmp: true)
+        rule(:accept, tcp: 443)
       end
     end
   end
@@ -49,8 +51,8 @@ defmodule Erlkoenig.ContainerDslTest do
     use Erlkoenig.Container
 
     container :echo do
-      binary "/usr/bin/echo"
-      ip {10, 0, 0, 5}
+      binary("/usr/bin/echo")
+      ip({10, 0, 0, 5})
     end
   end
 
@@ -58,27 +60,27 @@ defmodule Erlkoenig.ContainerDslTest do
     use Erlkoenig.Container
 
     container :restarter do
-      binary "/opt/bin/server"
-      ip {10, 0, 0, 10}
-      restart {:on_failure, 3}
+      binary("/opt/bin/server")
+      ip({10, 0, 0, 10})
+      restart({:on_failure, 3})
     end
 
     container :injected do
-      binary "/opt/bin/app"
-      ip {10, 0, 0, 20}
-      files %{"/etc/hostname" => "erlkoenig-test\n", "/etc/config.json" => ~s({"port": 8080}\n)}
+      binary("/opt/bin/app")
+      ip({10, 0, 0, 20})
+      files(%{"/etc/hostname" => "erlkoenig-test\n", "/etc/config.json" => ~s({"port": 8080}\n)})
     end
 
     container :named do
-      binary "/opt/bin/server"
-      ip {10, 0, 0, 30}
-      dns_name "webserver"
+      binary("/opt/bin/server")
+      ip({10, 0, 0, 30})
+      dns_name("webserver")
     end
 
     container :with_single_file do
-      binary "/opt/bin/app"
-      ip {10, 0, 0, 40}
-      file "/etc/hostname", "single-file-test\n"
+      binary("/opt/bin/app")
+      ip({10, 0, 0, 40})
+      file("/etc/hostname", "single-file-test\n")
     end
   end
 
@@ -86,22 +88,22 @@ defmodule Erlkoenig.ContainerDslTest do
     use Erlkoenig.Container
 
     container :dmz_web do
-      binary "/opt/bin/web"
-      ip {10, 0, 1, 10}
-      zone :dmz
-      ports [{443, 443}]
-      health_check port: 443, interval: 5000, retries: 3
+      binary("/opt/bin/web")
+      ip({10, 0, 1, 10})
+      zone(:dmz)
+      ports([{443, 443}])
+      health_check(port: 443, interval: 5000, retries: 3)
     end
 
     container :internal_db do
-      binary "/opt/bin/db"
-      ip {10, 0, 2, 10}
-      zone :internal
+      binary("/opt/bin/db")
+      ip({10, 0, 2, 10})
+      zone(:internal)
     end
 
     container :default_app do
-      binary "/opt/bin/app"
-      ip {10, 0, 0, 10}
+      binary("/opt/bin/app")
+      ip({10, 0, 0, 10})
     end
   end
 
@@ -109,33 +111,33 @@ defmodule Erlkoenig.ContainerDslTest do
     use Erlkoenig.Container
 
     container :full_rootfs do
-      binary "/opt/bin/web"
-      ip {10, 0, 0, 50}
+      binary("/opt/bin/web")
+      ip({10, 0, 0, 50})
 
       rootfs do
-        base :minimal
-        file "/etc/ssl/certs/ca-certificates.crt", from: :host
-        file "/etc/myapp/cert.pem", from: "/opt/certs/production.pem"
-        file "/etc/myapp/config.json", content: ~S'{"port": 8443}'
-        directory "/etc/myapp/templates", from: "configs/templates/"
-        tmpfs "/tmp", size: "64M"
-        tmpfs "/run", size: "16M"
-        tmpfs "/var/log", size: "32M"
+        base(:minimal)
+        file("/etc/ssl/certs/ca-certificates.crt", from: :host)
+        file("/etc/myapp/cert.pem", from: "/opt/certs/production.pem")
+        file("/etc/myapp/config.json", content: ~S'{"port": 8443}')
+        directory("/etc/myapp/templates", from: "configs/templates/")
+        tmpfs("/tmp", size: "64M")
+        tmpfs("/run", size: "16M")
+        tmpfs("/var/log", size: "32M")
       end
     end
 
     container :minimal_rootfs do
-      binary "/opt/bin/worker"
-      ip {10, 0, 0, 51}
+      binary("/opt/bin/worker")
+      ip({10, 0, 0, 51})
 
       rootfs do
-        base :minimal
+        base(:minimal)
       end
     end
 
     container :no_rootfs do
-      binary "/opt/bin/plain"
-      ip {10, 0, 0, 52}
+      binary("/opt/bin/plain")
+      ip({10, 0, 0, 52})
     end
   end
 
@@ -143,18 +145,21 @@ defmodule Erlkoenig.ContainerDslTest do
     use Erlkoenig.Container
 
     container :archive do
-      binary "/opt/archive"
-      ip {10, 0, 0, 30}
-      volume "/data/db", persist: "archive-db", quota: "2G"
-      volume "/var/log", persist: "archive-logs"
-      volume "/etc/config", persist: "shared-config", read_only: true
-      volume "/srv/ingest", persist: "ingest-data",
-             opts: "ro,nosuid,nodev,noexec"
+      binary("/opt/archive")
+      ip({10, 0, 0, 30})
+      volume("/data/db", persist: "archive-db", quota: "2G")
+      volume("/var/log", persist: "archive-logs")
+      volume("/etc/config", persist: "shared-config", read_only: true)
+
+      volume("/srv/ingest",
+        persist: "ingest-data",
+        opts: "ro,nosuid,nodev,noexec"
+      )
     end
 
     container :no_volumes do
-      binary "/opt/plain"
-      ip {10, 0, 0, 31}
+      binary("/opt/plain")
+      ip({10, 0, 0, 31})
     end
   end
 
@@ -279,7 +284,7 @@ defmodule Erlkoenig.ContainerDslTest do
     end
 
     test "write! creates term file" do
-      path = Path.join(System.tmp_dir!(), "erlkoenig_ct_test_#{:rand.uniform(100000)}.term")
+      path = Path.join(System.tmp_dir!(), "erlkoenig_ct_test_#{:rand.uniform(100_000)}.term")
       SimpleCluster.write!(path)
       assert File.exists?(path)
       content = File.read!(path)
@@ -309,7 +314,10 @@ defmodule Erlkoenig.ContainerDslTest do
     test "rootfs file from host produces correct term" do
       containers = WithRootfs.containers()
       full = Enum.find(containers, &(&1.name == "full_rootfs"))
-      cert_entry = Enum.find(full.rootfs.files, &(&1.path == "/etc/ssl/certs/ca-certificates.crt"))
+
+      cert_entry =
+        Enum.find(full.rootfs.files, &(&1.path == "/etc/ssl/certs/ca-certificates.crt"))
+
       assert cert_entry != nil
       assert cert_entry.source == {:host, "/etc/ssl/certs/ca-certificates.crt"}
     end
@@ -430,8 +438,8 @@ defmodule Erlkoenig.ContainerDslTest do
           use Erlkoenig.Container
 
           container :bad do
-            binary "/opt/x"
-            volume "/x", persist: "p", opts: :atom_not_string
+            binary("/opt/x")
+            volume("/x", persist: "p", opts: :atom_not_string)
           end
         end
       end
@@ -455,6 +463,42 @@ defmodule Erlkoenig.ContainerDslTest do
       {_, _, opts} = Enum.find(opts_list, fn {n, _, _} -> n == "archive" end)
       assert Map.has_key?(opts, :volumes)
       assert length(opts.volumes) == 4
+    end
+  end
+
+  describe "regression: fail-loud macro context errors" do
+    test "two guard blocks in one container raise a clear CompileError" do
+      assert_raise CompileError, ~r/guard already defined for container "app"/, fn ->
+        Code.compile_string(~S"""
+        defmodule TestContainer.DoubleGuard do
+          use Erlkoenig.Container
+
+          container :app do
+            binary "/opt/app"
+
+            guard do
+              detect :conn_flood, threshold: 10, window: 5
+            end
+
+            guard do
+              ban_duration 60
+            end
+          end
+        end
+        """)
+      end
+    end
+
+    test "ErlkoenigNft.Firewall macros outside firewall block raise CompileError" do
+      assert_raise CompileError, ~r/must be used inside a `firewall .* do` block/, fn ->
+        Code.compile_string(~S"""
+        defmodule TestFirewall.StraySet do
+          use ErlkoenigNft.Firewall
+
+          set "blocklist", :ipv4_addr
+        end
+        """)
+      end
     end
   end
 end

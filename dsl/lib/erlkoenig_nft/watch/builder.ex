@@ -21,16 +21,27 @@ defmodule ErlkoenigNft.Watch.Builder do
   Produces terms compatible with `erlkoenig_nft_watch:start_link/1`.
   """
 
+  defstruct name: nil,
+            family: 1,
+            table: "erlkoenig_ct",
+            counters: [],
+            interval: 2000,
+            thresholds: [],
+            actions: []
+
+  @type t :: %__MODULE__{
+          name: String.t() | nil,
+          family: integer(),
+          table: String.t(),
+          counters: [String.t()],
+          interval: pos_integer(),
+          thresholds: list(),
+          actions: list()
+        }
+
+  @spec new(atom() | String.t()) :: t()
   def new(name) when is_atom(name) or is_binary(name) do
-    %{
-      name: to_string(name),
-      family: 1,
-      table: "erlkoenig_ct",
-      counters: [],
-      interval: 2000,
-      thresholds: [],
-      actions: []
-    }
+    %__MODULE__{name: to_string(name)}
   end
 
   def set_interval(state, ms) when is_integer(ms) and ms > 0 do
@@ -49,7 +60,8 @@ defmodule ErlkoenigNft.Watch.Builder do
     %{state | counters: state.counters ++ Enum.map(names, &to_string/1)}
   end
 
-  def add_threshold(state, counter, metric, op, value) when metric in [:pps, :bps, :packets, :bytes] and op in [:>, :<, :>=, :<=, :==] do
+  def add_threshold(state, counter, metric, op, value)
+      when metric in [:pps, :bps, :packets, :bytes] and op in [:>, :<, :>=, :<=, :==] do
     t = %{counter: to_string(counter), metric: metric, op: op, value: value}
     %{state | thresholds: state.thresholds ++ [t]}
   end
@@ -70,6 +82,10 @@ defmodule ErlkoenigNft.Watch.Builder do
     %{state | actions: state.actions ++ [:isolate]}
   end
 
+  @spec validate!(t()) :: t()
+  def validate!(%__MODULE__{} = state), do: state
+
+  @spec to_term(t()) :: map()
   def to_term(state) do
     base = %{
       family: state.family,
@@ -78,7 +94,11 @@ defmodule ErlkoenigNft.Watch.Builder do
       interval: state.interval
     }
 
-    base = if state.thresholds != [], do: Map.put(base, :thresholds, thresholds_to_term(state.thresholds)), else: base
+    base =
+      if state.thresholds != [],
+        do: Map.put(base, :thresholds, thresholds_to_term(state.thresholds)),
+        else: base
+
     base = if state.actions != [], do: Map.put(base, :actions, state.actions), else: base
     Map.put(base, :name, state.name)
   end

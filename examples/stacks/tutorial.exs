@@ -121,6 +121,7 @@ defmodule Tutorial do
       subnet: {10, 99, 0, 0, 24}
 
     nft_host do
+      nft_nflog_group 1, name: "host"
       nft_set "ban", :ipv4_addr
 
       nft_counter "input_drop"
@@ -147,7 +148,8 @@ defmodule Tutorial do
         # nicht — die Regel muss explizit dastehen.
         nft_rule :accept, ip_saddr: {10, 99, 0, 0, 24}, udp_dport: 53
 
-        nft_rule :drop, counter: "input_drop", log_prefix: "HOST-DROP: "
+        nft_rule :drop, counter: "input_drop",
+                        log_prefix: "HOST-DROP: ", nflog_group: 1
       end
     end
   end

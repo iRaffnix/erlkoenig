@@ -21,43 +21,75 @@ defmodule Erlkoenig.Limits.Builder do
   Produces Erlang terms for cgroup-based resource control.
   """
 
+  defstruct cpu: nil,
+            memory: nil,
+            pids: nil,
+            pps: nil,
+            bps: nil,
+            io_weight: nil
+
+  @type t :: %__MODULE__{
+          cpu: pos_integer() | nil,
+          memory: pos_integer() | nil,
+          pids: pos_integer() | nil,
+          pps: pos_integer() | nil,
+          bps: pos_integer() | nil,
+          io_weight: pos_integer() | nil
+        }
+
+  @spec new() :: t()
   def new do
-    %{}
+    %__MODULE__{}
   end
 
+  @spec set_cpu(t(), pos_integer()) :: t()
   def set_cpu(limits, count) when is_integer(count) and count > 0 do
-    Map.put(limits, :cpu, count)
+    %{limits | cpu: count}
   end
 
+  @spec set_memory(t(), pos_integer() | String.t()) :: t()
   def set_memory(limits, bytes) when is_integer(bytes) and bytes > 0 do
-    Map.put(limits, :memory, bytes)
+    %{limits | memory: bytes}
   end
 
   def set_memory(limits, str) when is_binary(str) do
-    Map.put(limits, :memory, parse_bytes(str))
+    %{limits | memory: parse_bytes(str)}
   end
 
+  @spec set_pids(t(), pos_integer()) :: t()
   def set_pids(limits, max) when is_integer(max) and max > 0 do
-    Map.put(limits, :pids, max)
+    %{limits | pids: max}
   end
 
+  @spec set_pps(t(), pos_integer()) :: t()
   def set_pps(limits, rate) when is_integer(rate) and rate > 0 do
-    Map.put(limits, :pps, rate)
+    %{limits | pps: rate}
   end
 
+  @spec set_bps(t(), pos_integer() | String.t()) :: t()
   def set_bps(limits, bytes) when is_integer(bytes) and bytes > 0 do
-    Map.put(limits, :bps, bytes)
+    %{limits | bps: bytes}
   end
 
   def set_bps(limits, str) when is_binary(str) do
-    Map.put(limits, :bps, parse_bytes(str))
+    %{limits | bps: parse_bytes(str)}
   end
 
+  @spec set_io_weight(t(), pos_integer()) :: t()
   def set_io_weight(limits, weight) when is_integer(weight) and weight >= 1 and weight <= 10000 do
-    Map.put(limits, :io_weight, weight)
+    %{limits | io_weight: weight}
   end
 
-  def to_term(limits), do: limits
+  @spec validate!(t()) :: t()
+  def validate!(%__MODULE__{} = limits), do: limits
+
+  @spec to_term(t()) :: map()
+  def to_term(%__MODULE__{} = limits) do
+    limits
+    |> Map.from_struct()
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> Map.new()
+  end
 
   # --- Byte parsing ---
 

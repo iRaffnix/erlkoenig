@@ -1,0 +1,936 @@
+%{
+  sha256: "dacb980a3a4bd065fac90032759cabe1f21f6c37fe13323766a537668d73f676",
+  facts: [
+    %Erlkoenig.Ontology.Fact{
+      ref: {:capability, "three_tier.api.dns.local"},
+      type: :capability,
+      properties: %{name: :"dns.local"},
+      metadata: nil,
+      links: [requires_capability: {:container, "three_tier.api"}],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:capability, "three_tier.nginx.dns.local"},
+      type: :capability,
+      properties: %{name: :"dns.local"},
+      metadata: nil,
+      links: [requires_capability: {:container, "three_tier.nginx"}],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:capability, "three_tier.postgres.dns.local"},
+      type: :capability,
+      properties: %{name: :"dns.local"},
+      metadata: nil,
+      links: [requires_capability: {:container, "three_tier.postgres"}],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:container, "three_tier.api"},
+      type: :container,
+      properties: %{
+        args: ["4000"],
+        binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
+        env: %{},
+        name: "api",
+        ports: [],
+        restart: :transient,
+        image: nil,
+        gid: 65534,
+        uid: 65534,
+        zone: "containers",
+        replicas: 1,
+        limits: %{memory: 536870912, pids: 200},
+        seccomp: :default,
+        caps: []
+      },
+      metadata: nil,
+      links: [
+        has_container: {:pod, "three_tier"},
+        runs_in_zone: {:zone, "containers"}
+      ],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:container, "three_tier.nginx"},
+      type: :container,
+      properties: %{
+        args: ["8443"],
+        binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
+        env: %{},
+        name: "nginx",
+        ports: [],
+        restart: :permanent,
+        image: nil,
+        gid: 65534,
+        uid: 65534,
+        zone: "containers",
+        replicas: 3,
+        limits: %{memory: 268435456, pids: 100},
+        seccomp: :default,
+        caps: []
+      },
+      metadata: nil,
+      links: [
+        has_container: {:pod, "three_tier"},
+        runs_in_zone: {:zone, "containers"}
+      ],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:container, "three_tier.postgres"},
+      type: :container,
+      properties: %{
+        args: ["5432"],
+        binary: "/opt/erlkoenig/rt/demo/test-erlkoenig-echo_server",
+        env: %{},
+        name: "postgres",
+        ports: [],
+        restart: :permanent,
+        image: nil,
+        gid: 65534,
+        uid: 65534,
+        zone: "containers",
+        replicas: 1,
+        limits: %{memory: 1073741824, pids: 50},
+        seccomp: :default,
+        caps: []
+      },
+      metadata: nil,
+      links: [
+        has_container: {:pod, "three_tier"},
+        runs_in_zone: {:zone, "containers"}
+      ],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:guard, "guard"},
+      type: :guard,
+      properties: %{
+        port_scan: {20, 60},
+        slow_scan: {5, 3600},
+        forget_after: 300,
+        conn_flood: {50, 10},
+        ban_duration: 3600,
+        cleanup_interval: 30000,
+        escalation: [3600, 21600, 86400, 604800],
+        honeypot_ban_duration: 86400,
+        honeypot_ports: [21, 23, 445, 1433, 1521, 3306, 3389, 5900, 6379, 8080,
+         8888, 9200, 27017],
+        probation: 120,
+        suspect_after: 3,
+        suspect_by: :ports,
+        whitelist: [{127, 0, 0, 1}, {10, 50, 100, 1}]
+      },
+      metadata: nil,
+      links: [has_guard: {:stack, "ThreeTierIpvlanFw"}],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:host, "host"},
+      type: :host,
+      properties: %{},
+      metadata: nil,
+      links: [has_host: {:stack, "ThreeTierIpvlanFw"}],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:interface, "host.eth0"},
+      type: :interface,
+      properties: %{name: "eth0", zone: :wan},
+      metadata: nil,
+      links: [has_interface: {:host, "host"}],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nflog_group, "erlkoenig_host.1"},
+      type: :nflog_group,
+      properties: %{name: "host", group: 1},
+      metadata: nil,
+      links: [logs_to_nflog_group: {:nft_table, "erlkoenig_host"}],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nflog_group, "erlkoenig_zone.2"},
+      type: :nflog_group,
+      properties: %{name: "zone", group: 2},
+      metadata: nil,
+      links: [logs_to_nflog_group: {:nft_table, "erlkoenig_zone"}],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_chain, "erlkoenig_host.input"},
+      type: :nft_chain,
+      properties: %{
+        name: "input",
+        owner: :host,
+        priority: :filter,
+        type: :base,
+        policy: :drop,
+        hook: :input,
+        chain_type: :filter
+      },
+      metadata: nil,
+      links: [has_chain: {:nft_table, "erlkoenig_host"}],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_chain, "erlkoenig_host.prerouting"},
+      type: :nft_chain,
+      properties: %{
+        name: "prerouting",
+        owner: :host,
+        priority: :raw,
+        type: :base,
+        policy: :accept,
+        hook: :prerouting,
+        chain_type: :filter
+      },
+      metadata: nil,
+      links: [has_chain: {:nft_table, "erlkoenig_host"}],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_chain, "erlkoenig_zone.forward"},
+      type: :nft_chain,
+      properties: %{
+        name: "forward",
+        owner: :zone,
+        priority: :filter,
+        type: :base,
+        policy: :drop,
+        hook: :forward,
+        chain_type: :filter
+      },
+      metadata: nil,
+      links: [has_chain: {:nft_table, "erlkoenig_zone"}],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_chain, "three_tier.api.input"},
+      type: :nft_chain,
+      properties: %{
+        name: "input",
+        owner: :in_container,
+        priority: 0,
+        type: :filter,
+        policy: :drop,
+        hook: :input
+      },
+      metadata: nil,
+      links: [has_chain: {:container, "three_tier.api"}],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_chain, "three_tier.api.output"},
+      type: :nft_chain,
+      properties: %{
+        name: "output",
+        owner: :in_container,
+        priority: 0,
+        type: :filter,
+        policy: :drop,
+        hook: :output
+      },
+      metadata: nil,
+      links: [has_chain: {:container, "three_tier.api"}],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_chain, "three_tier.nginx.input"},
+      type: :nft_chain,
+      properties: %{
+        name: "input",
+        owner: :in_container,
+        priority: 0,
+        type: :filter,
+        policy: :drop,
+        hook: :input
+      },
+      metadata: nil,
+      links: [has_chain: {:container, "three_tier.nginx"}],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_chain, "three_tier.nginx.output"},
+      type: :nft_chain,
+      properties: %{
+        name: "output",
+        owner: :in_container,
+        priority: 0,
+        type: :filter,
+        policy: :drop,
+        hook: :output
+      },
+      metadata: nil,
+      links: [has_chain: {:container, "three_tier.nginx"}],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_chain, "three_tier.postgres.input"},
+      type: :nft_chain,
+      properties: %{
+        name: "input",
+        owner: :in_container,
+        priority: 0,
+        type: :filter,
+        policy: :drop,
+        hook: :input
+      },
+      metadata: nil,
+      links: [has_chain: {:container, "three_tier.postgres"}],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_chain, "three_tier.postgres.output"},
+      type: :nft_chain,
+      properties: %{
+        name: "output",
+        owner: :in_container,
+        priority: 0,
+        type: :filter,
+        policy: :drop,
+        hook: :output
+      },
+      metadata: nil,
+      links: [has_chain: {:container, "three_tier.postgres"}],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_counter, "erlkoenig_host.input_ban"},
+      type: :nft_counter,
+      properties: %{name: "input_ban"},
+      metadata: nil,
+      links: [uses_counter: {:nft_table, "erlkoenig_host"}],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_counter, "erlkoenig_host.input_drop"},
+      type: :nft_counter,
+      properties: %{name: "input_drop"},
+      metadata: nil,
+      links: [uses_counter: {:nft_table, "erlkoenig_host"}],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_counter, "erlkoenig_zone.forward_drop"},
+      type: :nft_counter,
+      properties: %{name: "forward_drop"},
+      metadata: nil,
+      links: [uses_counter: {:nft_table, "erlkoenig_zone"}],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_rule, "erlkoenig_host.input.rule_1"},
+      type: :nft_rule,
+      properties: %{
+        opts: %{ct_state: [:established, :related]},
+        action: :accept
+      },
+      metadata: nil,
+      links: [
+        has_rule: {:nft_chain, "erlkoenig_host.input"},
+        performs_action: {:nft_chain, "erlkoenig_host.input"}
+      ],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_rule, "erlkoenig_host.input.rule_2"},
+      type: :nft_rule,
+      properties: %{opts: %{iifname: "lo"}, action: :accept},
+      metadata: nil,
+      links: [
+        has_rule: {:nft_chain, "erlkoenig_host.input"},
+        performs_action: {:nft_chain, "erlkoenig_host.input"}
+      ],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_rule, "erlkoenig_host.input.rule_3"},
+      type: :nft_rule,
+      properties: %{opts: %{ip_protocol: :icmp}, action: :accept},
+      metadata: nil,
+      links: [
+        has_rule: {:nft_chain, "erlkoenig_host.input"},
+        performs_action: {:nft_chain, "erlkoenig_host.input"}
+      ],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_rule, "erlkoenig_host.input.rule_4"},
+      type: :nft_rule,
+      properties: %{opts: %{tcp_dport: 22}, action: :accept},
+      metadata: nil,
+      links: [
+        has_rule: {:nft_chain, "erlkoenig_host.input"},
+        performs_action: {:nft_chain, "erlkoenig_host.input"}
+      ],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_rule, "erlkoenig_host.input.rule_5"},
+      type: :nft_rule,
+      properties: %{opts: %{tcp_dport: 9100}, action: :accept},
+      metadata: nil,
+      links: [
+        has_rule: {:nft_chain, "erlkoenig_host.input"},
+        performs_action: {:nft_chain, "erlkoenig_host.input"}
+      ],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_rule, "erlkoenig_host.input.rule_6"},
+      type: :nft_rule,
+      properties: %{
+        opts: %{ip_saddr: {10, 50, 100, 0, 24}, udp_dport: 53},
+        action: :accept
+      },
+      metadata: nil,
+      links: [
+        has_rule: {:nft_chain, "erlkoenig_host.input"},
+        performs_action: {:nft_chain, "erlkoenig_host.input"}
+      ],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_rule, "erlkoenig_host.input.rule_7"},
+      type: :nft_rule,
+      properties: %{
+        opts: %{counter: "input_drop", nflog_group: 1, log_prefix: "HOST: "},
+        action: :drop
+      },
+      metadata: nil,
+      links: [
+        has_rule: {:nft_chain, "erlkoenig_host.input"},
+        performs_action: {:nft_chain, "erlkoenig_host.input"},
+        logs_to_nflog_group: {:external, :nflog_group, 1},
+        uses_counter: {:external, :nft_counter, "input_drop"}
+      ],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_rule, "erlkoenig_host.prerouting.rule_1"},
+      type: :nft_rule,
+      properties: %{opts: %{set: "ban", counter: "input_ban"}, action: :drop},
+      metadata: nil,
+      links: [
+        has_rule: {:nft_chain, "erlkoenig_host.prerouting"},
+        performs_action: {:nft_chain, "erlkoenig_host.prerouting"},
+        uses_set: {:external, :nft_set, "ban"},
+        uses_counter: {:external, :nft_counter, "input_ban"}
+      ],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_rule, "erlkoenig_zone.forward.rule_1"},
+      type: :nft_rule,
+      properties: %{
+        opts: %{ct_state: [:established, :related]},
+        action: :accept
+      },
+      metadata: nil,
+      links: [
+        has_rule: {:nft_chain, "erlkoenig_zone.forward"},
+        performs_action: {:nft_chain, "erlkoenig_zone.forward"}
+      ],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_rule, "erlkoenig_zone.forward.rule_10"},
+      type: :nft_rule,
+      properties: %{
+        opts: %{counter: "forward_drop", nflog_group: 2, log_prefix: "FWD: "},
+        action: :drop
+      },
+      metadata: nil,
+      links: [
+        has_rule: {:nft_chain, "erlkoenig_zone.forward"},
+        performs_action: {:nft_chain, "erlkoenig_zone.forward"},
+        logs_to_nflog_group: {:external, :nflog_group, 2},
+        uses_counter: {:external, :nft_counter, "forward_drop"}
+      ],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_rule, "erlkoenig_zone.forward.rule_2"},
+      type: :nft_rule,
+      properties: %{
+        opts: %{
+          ip_daddr: {10, 50, 100, 5},
+          tcp_dport: 4000,
+          ip_saddr: {10, 50, 100, 2}
+        },
+        action: :accept
+      },
+      metadata: nil,
+      links: [
+        has_rule: {:nft_chain, "erlkoenig_zone.forward"},
+        performs_action: {:nft_chain, "erlkoenig_zone.forward"}
+      ],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_rule, "erlkoenig_zone.forward.rule_3"},
+      type: :nft_rule,
+      properties: %{
+        opts: %{
+          ip_daddr: {10, 50, 100, 5},
+          tcp_dport: 4000,
+          ip_saddr: {10, 50, 100, 3}
+        },
+        action: :accept
+      },
+      metadata: nil,
+      links: [
+        has_rule: {:nft_chain, "erlkoenig_zone.forward"},
+        performs_action: {:nft_chain, "erlkoenig_zone.forward"}
+      ],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_rule, "erlkoenig_zone.forward.rule_4"},
+      type: :nft_rule,
+      properties: %{
+        opts: %{
+          ip_daddr: {10, 50, 100, 5},
+          tcp_dport: 4000,
+          ip_saddr: {10, 50, 100, 4}
+        },
+        action: :accept
+      },
+      metadata: nil,
+      links: [
+        has_rule: {:nft_chain, "erlkoenig_zone.forward"},
+        performs_action: {:nft_chain, "erlkoenig_zone.forward"}
+      ],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_rule, "erlkoenig_zone.forward.rule_5"},
+      type: :nft_rule,
+      properties: %{
+        opts: %{
+          ip_daddr: {10, 50, 100, 6},
+          tcp_dport: 5432,
+          ip_saddr: {10, 50, 100, 5}
+        },
+        action: :accept
+      },
+      metadata: nil,
+      links: [
+        has_rule: {:nft_chain, "erlkoenig_zone.forward"},
+        performs_action: {:nft_chain, "erlkoenig_zone.forward"}
+      ],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_rule, "erlkoenig_zone.forward.rule_6"},
+      type: :nft_rule,
+      properties: %{
+        opts: %{
+          ip_daddr: {10, 50, 100, 5},
+          ip_saddr: {10, 50, 100, 2},
+          ip_protocol: :icmp
+        },
+        action: :accept
+      },
+      metadata: nil,
+      links: [
+        has_rule: {:nft_chain, "erlkoenig_zone.forward"},
+        performs_action: {:nft_chain, "erlkoenig_zone.forward"}
+      ],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_rule, "erlkoenig_zone.forward.rule_7"},
+      type: :nft_rule,
+      properties: %{
+        opts: %{
+          ip_daddr: {10, 50, 100, 5},
+          ip_saddr: {10, 50, 100, 3},
+          ip_protocol: :icmp
+        },
+        action: :accept
+      },
+      metadata: nil,
+      links: [
+        has_rule: {:nft_chain, "erlkoenig_zone.forward"},
+        performs_action: {:nft_chain, "erlkoenig_zone.forward"}
+      ],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_rule, "erlkoenig_zone.forward.rule_8"},
+      type: :nft_rule,
+      properties: %{
+        opts: %{
+          ip_daddr: {10, 50, 100, 5},
+          ip_saddr: {10, 50, 100, 4},
+          ip_protocol: :icmp
+        },
+        action: :accept
+      },
+      metadata: nil,
+      links: [
+        has_rule: {:nft_chain, "erlkoenig_zone.forward"},
+        performs_action: {:nft_chain, "erlkoenig_zone.forward"}
+      ],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_rule, "erlkoenig_zone.forward.rule_9"},
+      type: :nft_rule,
+      properties: %{
+        opts: %{
+          ip_daddr: {10, 50, 100, 6},
+          ip_saddr: {10, 50, 100, 5},
+          ip_protocol: :icmp
+        },
+        action: :accept
+      },
+      metadata: nil,
+      links: [
+        has_rule: {:nft_chain, "erlkoenig_zone.forward"},
+        performs_action: {:nft_chain, "erlkoenig_zone.forward"}
+      ],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_rule, "three_tier.api.input.rule_1"},
+      type: :nft_rule,
+      properties: %{opts: %{iifname: "lo"}, action: :accept},
+      metadata: nil,
+      links: [
+        has_rule: {:nft_chain, "three_tier.api.input"},
+        performs_action: {:nft_chain, "three_tier.api.input"}
+      ],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_rule, "three_tier.api.input.rule_2"},
+      type: :nft_rule,
+      properties: %{
+        opts: %{ct_state: [:established, :related]},
+        action: :accept
+      },
+      metadata: nil,
+      links: [
+        has_rule: {:nft_chain, "three_tier.api.input"},
+        performs_action: {:nft_chain, "three_tier.api.input"}
+      ],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_rule, "three_tier.api.input.rule_3"},
+      type: :nft_rule,
+      properties: %{
+        opts: %{tcp_dport: 4000, ip_saddr: {10, 50, 100, 2}},
+        action: :accept
+      },
+      metadata: nil,
+      links: [
+        has_rule: {:nft_chain, "three_tier.api.input"},
+        performs_action: {:nft_chain, "three_tier.api.input"}
+      ],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_rule, "three_tier.api.input.rule_4"},
+      type: :nft_rule,
+      properties: %{
+        opts: %{tcp_dport: 4000, ip_saddr: {10, 50, 100, 3}},
+        action: :accept
+      },
+      metadata: nil,
+      links: [
+        has_rule: {:nft_chain, "three_tier.api.input"},
+        performs_action: {:nft_chain, "three_tier.api.input"}
+      ],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_rule, "three_tier.api.input.rule_5"},
+      type: :nft_rule,
+      properties: %{
+        opts: %{tcp_dport: 4000, ip_saddr: {10, 50, 100, 4}},
+        action: :accept
+      },
+      metadata: nil,
+      links: [
+        has_rule: {:nft_chain, "three_tier.api.input"},
+        performs_action: {:nft_chain, "three_tier.api.input"}
+      ],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_rule, "three_tier.api.output.rule_1"},
+      type: :nft_rule,
+      properties: %{opts: %{iifname: "lo"}, action: :accept},
+      metadata: nil,
+      links: [
+        has_rule: {:nft_chain, "three_tier.api.output"},
+        performs_action: {:nft_chain, "three_tier.api.output"}
+      ],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_rule, "three_tier.api.output.rule_2"},
+      type: :nft_rule,
+      properties: %{
+        opts: %{ct_state: [:established, :related]},
+        action: :accept
+      },
+      metadata: nil,
+      links: [
+        has_rule: {:nft_chain, "three_tier.api.output"},
+        performs_action: {:nft_chain, "three_tier.api.output"}
+      ],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_rule, "three_tier.api.output.rule_3"},
+      type: :nft_rule,
+      properties: %{
+        opts: %{ip_daddr: {10, 50, 100, 6}, tcp_dport: 5432},
+        action: :accept
+      },
+      metadata: nil,
+      links: [
+        has_rule: {:nft_chain, "three_tier.api.output"},
+        performs_action: {:nft_chain, "three_tier.api.output"}
+      ],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_rule, "three_tier.nginx.input.rule_1"},
+      type: :nft_rule,
+      properties: %{opts: %{iifname: "lo"}, action: :accept},
+      metadata: nil,
+      links: [
+        has_rule: {:nft_chain, "three_tier.nginx.input"},
+        performs_action: {:nft_chain, "three_tier.nginx.input"}
+      ],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_rule, "three_tier.nginx.input.rule_2"},
+      type: :nft_rule,
+      properties: %{
+        opts: %{ct_state: [:established, :related]},
+        action: :accept
+      },
+      metadata: nil,
+      links: [
+        has_rule: {:nft_chain, "three_tier.nginx.input"},
+        performs_action: {:nft_chain, "three_tier.nginx.input"}
+      ],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_rule, "three_tier.nginx.input.rule_3"},
+      type: :nft_rule,
+      properties: %{opts: %{tcp_dport: 8443}, action: :accept},
+      metadata: nil,
+      links: [
+        has_rule: {:nft_chain, "three_tier.nginx.input"},
+        performs_action: {:nft_chain, "three_tier.nginx.input"}
+      ],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_rule, "three_tier.nginx.output.rule_1"},
+      type: :nft_rule,
+      properties: %{opts: %{iifname: "lo"}, action: :accept},
+      metadata: nil,
+      links: [
+        has_rule: {:nft_chain, "three_tier.nginx.output"},
+        performs_action: {:nft_chain, "three_tier.nginx.output"}
+      ],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_rule, "three_tier.nginx.output.rule_2"},
+      type: :nft_rule,
+      properties: %{
+        opts: %{ct_state: [:established, :related]},
+        action: :accept
+      },
+      metadata: nil,
+      links: [
+        has_rule: {:nft_chain, "three_tier.nginx.output"},
+        performs_action: {:nft_chain, "three_tier.nginx.output"}
+      ],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_rule, "three_tier.nginx.output.rule_3"},
+      type: :nft_rule,
+      properties: %{
+        opts: %{ip_daddr: {10, 50, 100, 5}, tcp_dport: 4000},
+        action: :accept
+      },
+      metadata: nil,
+      links: [
+        has_rule: {:nft_chain, "three_tier.nginx.output"},
+        performs_action: {:nft_chain, "three_tier.nginx.output"}
+      ],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_rule, "three_tier.postgres.input.rule_1"},
+      type: :nft_rule,
+      properties: %{opts: %{iifname: "lo"}, action: :accept},
+      metadata: nil,
+      links: [
+        has_rule: {:nft_chain, "three_tier.postgres.input"},
+        performs_action: {:nft_chain, "three_tier.postgres.input"}
+      ],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_rule, "three_tier.postgres.input.rule_2"},
+      type: :nft_rule,
+      properties: %{
+        opts: %{ct_state: [:established, :related]},
+        action: :accept
+      },
+      metadata: nil,
+      links: [
+        has_rule: {:nft_chain, "three_tier.postgres.input"},
+        performs_action: {:nft_chain, "three_tier.postgres.input"}
+      ],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_rule, "three_tier.postgres.input.rule_3"},
+      type: :nft_rule,
+      properties: %{
+        opts: %{tcp_dport: 5432, ip_saddr: {10, 50, 100, 5}},
+        action: :accept
+      },
+      metadata: nil,
+      links: [
+        has_rule: {:nft_chain, "three_tier.postgres.input"},
+        performs_action: {:nft_chain, "three_tier.postgres.input"}
+      ],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_rule, "three_tier.postgres.output.rule_1"},
+      type: :nft_rule,
+      properties: %{opts: %{iifname: "lo"}, action: :accept},
+      metadata: nil,
+      links: [
+        has_rule: {:nft_chain, "three_tier.postgres.output"},
+        performs_action: {:nft_chain, "three_tier.postgres.output"}
+      ],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_rule, "three_tier.postgres.output.rule_2"},
+      type: :nft_rule,
+      properties: %{
+        opts: %{ct_state: [:established, :related]},
+        action: :accept
+      },
+      metadata: nil,
+      links: [
+        has_rule: {:nft_chain, "three_tier.postgres.output"},
+        performs_action: {:nft_chain, "three_tier.postgres.output"}
+      ],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_set, "erlkoenig_host.ban"},
+      type: :nft_set,
+      properties: %{name: "ban", set_type: :ipv4_addr},
+      metadata: nil,
+      links: [uses_set: {:nft_table, "erlkoenig_host"}],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_table, "erlkoenig_host"},
+      type: :nft_table,
+      properties: %{name: "erlkoenig_host", owner: :host, family: :inet},
+      metadata: nil,
+      links: [has_nft_table: {:stack, "ThreeTierIpvlanFw"}],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:nft_table, "erlkoenig_zone"},
+      type: :nft_table,
+      properties: %{name: "erlkoenig_zone", owner: :zone, family: :inet},
+      metadata: nil,
+      links: [has_nft_table: {:stack, "ThreeTierIpvlanFw"}],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:pod, "three_tier"},
+      type: :pod,
+      properties: %{name: "three_tier", strategy: :one_for_one},
+      metadata: nil,
+      links: [has_pod: {:stack, "ThreeTierIpvlanFw"}],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:publish, "three_tier.api.publish"},
+      type: :publish,
+      properties: %{interval: 2000, metrics: [:memory, :cpu]},
+      metadata: nil,
+      links: [publishes_metric: {:container, "three_tier.api"}],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:publish, "three_tier.nginx.publish"},
+      type: :publish,
+      properties: %{interval: 2000, metrics: [:memory, :cpu, :pids]},
+      metadata: nil,
+      links: [publishes_metric: {:container, "three_tier.nginx"}],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:publish, "three_tier.postgres.publish"},
+      type: :publish,
+      properties: %{interval: 5000, metrics: [:memory, :pids]},
+      metadata: nil,
+      links: [publishes_metric: {:container, "three_tier.postgres"}],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:stack, "ThreeTierIpvlanFw"},
+      type: :stack,
+      properties: %{module: "ThreeTierIpvlanFw"},
+      metadata: nil,
+      links: [],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:stream, "three_tier.nginx.stream"},
+      type: :stream,
+      properties: %{
+        max_bytes: nil,
+        channels: [:stdout, :stderr],
+        retention_days: 30
+      },
+      metadata: nil,
+      links: [streams_channel: {:container, "three_tier.nginx"}],
+      origin: nil
+    },
+    %Erlkoenig.Ontology.Fact{
+      ref: {:zone, "containers"},
+      type: :zone,
+      properties: %{
+        name: "containers",
+        parent: "ek_ct0",
+        netmask: 24,
+        parent_type: :dummy,
+        subnet: {10, 50, 100, 0},
+        ipvlan_mode: :l3s,
+        gateway: nil
+      },
+      metadata: nil,
+      links: [has_zone: {:host, "host"}],
+      origin: nil
+    }
+  ]
+}

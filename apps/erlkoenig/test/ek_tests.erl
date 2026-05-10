@@ -554,6 +554,129 @@ json_node_health_test() ->
     ?assertEqual(123456, maps:get(<<"uptime_ms">>, Json)),
     ?assertEqual(8, maps:get(<<"sup_children">>, Json)).
 
+json_nft_counters_test() ->
+    Path = write_operator_api_mock(#{
+        nft_counters => {ok, [
+            #{table => <<"erlkoenig_host">>,
+              name => <<"egress">>,
+              packets => 12,
+              bytes => 960,
+              total_packets => 1200,
+              total_bytes => 96000,
+              pps => 6.0,
+              bps => 480.0,
+              interval => 2000}
+        ]}}),
+    {0, Output} = run_ek_escript(
+        ["--format", "json", "nft", "counters"],
+        [{"ERLKOENIG_EK_MOCK_OPERATOR_API", Path}]),
+    [Row] = json:decode(list_to_binary(Output)),
+    ?assertEqual(<<"erlkoenig_host">>, maps:get(<<"table">>, Row)),
+    ?assertEqual(<<"egress">>, maps:get(<<"name">>, Row)),
+    ?assertEqual(12, maps:get(<<"packets">>, Row)),
+    ?assertEqual(960, maps:get(<<"bytes">>, Row)),
+    ?assertEqual(1200, maps:get(<<"total_packets">>, Row)),
+    ?assertEqual(96000, maps:get(<<"total_bytes">>, Row)),
+    ?assertEqual(6.0, maps:get(<<"pps">>, Row)),
+    ?assertEqual(480.0, maps:get(<<"bps">>, Row)),
+    ?assertEqual(2000, maps:get(<<"interval">>, Row)),
+    ?assertEqual([{nft_counters, []}], read_operator_api_mock_calls(Path)).
+
+firewall_status_table_uses_operator_api_test() ->
+    Path = write_operator_api_mock(#{
+        firewall_status => {ok, #{
+            events => #{running => true, cursor => 12, buffered => 3},
+            guard => #{active_actors => 1, active_bans => 0}
+        }}}),
+    {0, Output} = run_ek_escript(
+        ["firewall", "status"],
+        [{"ERLKOENIG_EK_MOCK_OPERATOR_API", Path}]),
+    ?assert(string:find(Output, "events") =/= nomatch),
+    ?assert(string:find(Output, "cursor") =/= nomatch),
+    ?assert(string:find(Output, "guard") =/= nomatch),
+    ?assertEqual([{firewall_status, []}], read_operator_api_mock_calls(Path)).
+
+json_firewall_status_shape_test() ->
+    Path = write_operator_api_mock(#{
+        firewall_status => {ok, #{
+            events => #{running => true, cursor => 12,
+                        buffered => 3, groups => [nflog_events, counter_events]},
+            guard => #{active_actors => 1, active_bans => 0}
+        }}}),
+    {0, Output} = run_ek_escript(
+        ["--format", "json", "firewall", "status"],
+        [{"ERLKOENIG_EK_MOCK_OPERATOR_API", Path}]),
+    Json = json:decode(list_to_binary(Output)),
+    Events = maps:get(<<"events">>, Json),
+    ?assertEqual(true, maps:get(<<"running">>, Events)),
+    ?assertEqual(12, maps:get(<<"cursor">>, Events)),
+    ?assertEqual(3, maps:get(<<"buffered">>, Events)),
+    Guard = maps:get(<<"guard">>, Json),
+    ?assertEqual(1, maps:get(<<"active_actors">>, Guard)),
+    ?assertEqual([{firewall_status, []}], read_operator_api_mock_calls(Path)).
+
+firewall_events_table_uses_operator_api_test() ->
+    Path = write_operator_api_mock(#{
+        firewall_events => {ok, [
+            #{seq => 7,
+              ts_wall => 1778147168000,
+              severity => notice,
+              kind => scan_suspect,
+              source => threat_actor,
+              table => <<"erlkoenig_host">>,
+              table_owner => host,
+              src_ip => <<203,0,113,44>>,
+              reason => distinct_ports_seen}
+        ]}}),
+    {0, Output} = run_ek_escript(
+        ["firewall", "events", "--limit", "1"],
+        [{"ERLKOENIG_EK_MOCK_OPERATOR_API", Path}]),
+    ?assert(string:find(Output, "scan_suspect") =/= nomatch),
+    ?assert(string:find(Output, "erlkoenig_host") =/= nomatch),
+    ?assert(string:find(Output, "host") =/= nomatch),
+    ?assert(string:find(Output, "203.0.113.44") =/= nomatch),
+    ?assertEqual([{firewall_events, [1]}], read_operator_api_mock_calls(Path)).
+
+json_firewall_events_normalizes_ip_and_evidence_test() ->
+    Path = write_operator_api_mock(#{
+        firewall_events => {ok, [
+            #{seq => 8,
+              id => <<"fw-test">>,
+              ts_mono => 100,
+              ts_wall => 1778147168000,
+              severity => warning,
+              kind => firewall_packet,
+              source => nflog,
+              src_ip => {203,0,113,44},
+              dst_ip => {10,0,0,1},
+              chain => <<"input">>,
+              dst_port => 22,
+              evidence => #{ports => [22, 443],
+                            src_raw => <<203,0,113,44>>,
+                            dst_raw => <<10,0,0,1>>},
+              labels => [firewall, packet]}
+        ]}}),
+    {0, Output} = run_ek_escript(
+        ["--format", "json", "firewall", "events"],
+        [{"ERLKOENIG_EK_MOCK_OPERATOR_API", Path}]),
+    [Row] = json:decode(list_to_binary(Output)),
+    ?assertEqual(8, maps:get(<<"seq">>, Row)),
+    ?assertEqual(<<"fw-test">>, maps:get(<<"id">>, Row)),
+    ?assertEqual(<<"warning">>, maps:get(<<"severity">>, Row)),
+    ?assertEqual(<<"firewall_packet">>, maps:get(<<"kind">>, Row)),
+    ?assertEqual(<<"203.0.113.44">>, maps:get(<<"src_ip">>, Row)),
+    ?assertEqual(<<"10.0.0.1">>, maps:get(<<"dst_ip">>, Row)),
+    Evidence = maps:get(<<"evidence">>, Row),
+    ?assertEqual([22, 443], maps:get(<<"ports">>, Evidence)),
+    ?assertEqual(<<"203.0.113.44">>, maps:get(<<"src_raw">>, Evidence)),
+    ?assertEqual(<<"10.0.0.1">>, maps:get(<<"dst_raw">>, Evidence)),
+    ?assertEqual([{firewall_events, [50]}], read_operator_api_mock_calls(Path)).
+
+firewall_events_bad_limit_is_usage_error_test() ->
+    {Status, Output} = run_ek_escript(["firewall", "events", "--limit", "0"]),
+    ?assertEqual(2, Status),
+    ?assert(string:find(Output, "--limit must be a positive integer") =/= nomatch).
+
 escript_doctor_json_uses_catalog_codes_test() ->
     {1, Output} = run_ek_escript(
         ["--format", "json", "doctor"],

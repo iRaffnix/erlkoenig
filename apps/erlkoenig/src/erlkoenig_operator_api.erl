@@ -63,6 +63,12 @@ they do NOT pattern-match on raw tuples from internal modules.
     %% Node
     node_health/0,
 
+    %% NFT
+    nft_counters/0,
+    firewall_status/0,
+    firewall_events/1,
+    firewall_events_since/3,
+
     %% Containers
     container_list/0,
     container_inspect/1,
@@ -351,6 +357,78 @@ node_health() ->
                catch _:_ -> 0
                end,
     {ok, #{uptime_ms => UptimeMs, sup_children => Children}}.
+
+%%====================================================================
+%% NFT
+%%====================================================================
+
+-doc """
+Live nft counter snapshot.
+
+Returns one row per configured firewall counter. Values come from the
+running nft watcher state, which is fed by kernel counter reads.
+""".
+-spec nft_counters() -> result([map()]).
+nft_counters() ->
+    try erlkoenig_nft:list_counters() of
+        Rows when is_list(Rows) ->
+            {ok, Rows}
+    catch
+        Class:Reason ->
+            {error, internal_err(nft_counters, {Class, Reason})}
+    end.
+
+-doc "Interactive firewall read-side status.".
+-spec firewall_status() -> result(map()).
+firewall_status() ->
+    EventStats = case erlkoenig_firewall_events:stats() of
+        {ok, S} -> S;
+        {error, Reason} -> #{running => false, error => Reason}
+    end,
+    GuardStats = try erlkoenig_nft_ct_guard:stats()
+                 catch _:_ -> #{running => false}
+                 end,
+    {ok, #{events => EventStats, guard => GuardStats}}.
+
+-doc """
+Newest canonical firewall events, oldest first.
+
+The source is the node-local `erlkoenig_firewall_events` buffer. Each
+event has at least `seq`, `id`, `ts_mono`, `ts_wall`, `source`,
+`severity`, `kind`, `evidence`, and `labels`. Packet/threat events add
+fields such as `src_ip`, `dst_ip`, `chain`, `dst_port`, and `reason`.
+""".
+-spec firewall_events(pos_integer()) -> result([map()]).
+firewall_events(Limit) when is_integer(Limit), Limit > 0 ->
+    case erlkoenig_firewall_events:recent(Limit) of
+        {ok, Events} -> {ok, Events};
+        {error, Reason} -> {error, internal_err(firewall_events, Reason)}
+    end;
+firewall_events(Other) ->
+    {error, bad_arg_err(limit, Other, <<"positive integer">>)}.
+
+-doc """
+Canonical firewall events with `seq > Cursor`.
+
+`TimeoutMs = 0` returns immediately. Positive values long-poll until a
+new event arrives or the timeout expires.
+""".
+-spec firewall_events_since(non_neg_integer(), non_neg_integer(), pos_integer()) ->
+    result(#{cursor := non_neg_integer(), events := [map()]}).
+firewall_events_since(Cursor, TimeoutMs, Limit)
+  when is_integer(Cursor), Cursor >= 0,
+       is_integer(TimeoutMs), TimeoutMs >= 0,
+       is_integer(Limit), Limit > 0 ->
+    case erlkoenig_firewall_events:since(Cursor, TimeoutMs, Limit) of
+        {ok, NewCursor, Events} ->
+            {ok, #{cursor => NewCursor, events => Events}};
+        {error, Reason} ->
+            {error, internal_err(firewall_events_since, Reason)}
+    end;
+firewall_events_since(Cursor, TimeoutMs, Limit) ->
+    {error, bad_arg_err(firewall_events_since,
+                        #{cursor => Cursor, timeout_ms => TimeoutMs, limit => Limit},
+                        <<"cursor >= 0, timeout_ms >= 0, limit > 0">>)}.
 
 %%====================================================================
 %% Containers

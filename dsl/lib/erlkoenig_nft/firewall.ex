@@ -71,60 +71,76 @@ defmodule ErlkoenigNft.Firewall do
 
   defmacro set(name, type) do
     quote do
+      unquote(require_firewall_builder_ast())
       @fw_builder Builder.add_set(@fw_builder, unquote(name), unquote(type))
     end
   end
 
   defmacro set(name, type, opts) do
     quote do
+      unquote(require_firewall_builder_ast())
       @fw_builder Builder.add_set(@fw_builder, unquote(name), unquote(type), unquote(opts))
     end
   end
 
   defmacro concat_set(name, fields) do
     quote do
+      unquote(require_firewall_builder_ast())
       @fw_builder Builder.add_concat_set(@fw_builder, unquote(name), unquote(fields))
     end
   end
 
   defmacro concat_set(name, fields, opts) do
     quote do
-      @fw_builder Builder.add_concat_set(@fw_builder, unquote(name), unquote(fields), unquote(opts))
+      unquote(require_firewall_builder_ast())
+
+      @fw_builder Builder.add_concat_set(
+                    @fw_builder,
+                    unquote(name),
+                    unquote(fields),
+                    unquote(opts)
+                  )
     end
   end
 
   defmacro vmap(name, type, opts) do
     quote do
+      unquote(require_firewall_builder_ast())
       @fw_builder Builder.add_vmap(@fw_builder, unquote(name), unquote(type), unquote(opts))
     end
   end
 
   defmacro counters(names) do
     quote do
+      unquote(require_firewall_builder_ast())
       @fw_builder Builder.add_counters(@fw_builder, unquote(names))
     end
   end
 
   defmacro ban_set(name) do
     quote do
+      unquote(require_firewall_builder_ast())
       @fw_builder Builder.set_ban_set(@fw_builder, unquote(name))
     end
   end
 
   defmacro quota(name, bytes, opts \\ []) do
     quote do
+      unquote(require_firewall_builder_ast())
       @fw_builder Builder.add_quota(@fw_builder, unquote(name), unquote(bytes), unquote(opts))
     end
   end
 
   defmacro flowtable(name, opts) do
     quote do
+      unquote(require_firewall_builder_ast())
       @fw_builder Builder.add_flowtable(@fw_builder, unquote(name), unquote(opts))
     end
   end
 
   defmacro chain(name, opts, do: block) do
     quote do
+      unquote(require_firewall_builder_ast())
       @fw_builder %{@fw_builder | rules_acc: []}
       unquote(block)
       {rules, builder} = Builder.take_rules(@fw_builder)
@@ -163,8 +179,22 @@ defmodule ErlkoenigNft.Firewall do
   """
   defmacro rule(verdict, opts \\ []) do
     quote do
-      @fw_builder Builder.push_rule(@fw_builder,
-        Builder.build_rule(unquote(verdict), unquote(opts)))
+      unquote(require_firewall_builder_ast())
+
+      @fw_builder Builder.push_rule(
+                    @fw_builder,
+                    Builder.build_rule(unquote(verdict), unquote(opts))
+                  )
+    end
+  end
+
+  defp require_firewall_builder_ast do
+    quote do
+      if is_nil(@fw_builder) do
+        raise CompileError,
+          description:
+            "ErlkoenigNft.Firewall macros must be used inside a `firewall ... do` block"
+      end
     end
   end
 end

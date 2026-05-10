@@ -115,27 +115,27 @@ defmodule Erlkoenig.Container do
   # --- Container properties ---
 
   defmacro binary(path) do
-    quote do: @ct_current Builder.set_binary(@ct_current, unquote(path))
+    quote do: @ct_current(Builder.set_binary(@ct_current, unquote(path)))
   end
 
   defmacro signature(mode_or_path) do
-    quote do: @ct_current Builder.set_signature(@ct_current, unquote(mode_or_path))
+    quote do: @ct_current(Builder.set_signature(@ct_current, unquote(mode_or_path)))
   end
 
   defmacro ip(addr) do
-    quote do: @ct_current Builder.set_ip(@ct_current, unquote(addr))
+    quote do: @ct_current(Builder.set_ip(@ct_current, unquote(addr)))
   end
 
   defmacro ports(port_list) do
-    quote do: @ct_current Builder.set_ports(@ct_current, unquote(port_list))
+    quote do: @ct_current(Builder.set_ports(@ct_current, unquote(port_list)))
   end
 
   defmacro args(arg_list) do
-    quote do: @ct_current Builder.set_args(@ct_current, unquote(arg_list))
+    quote do: @ct_current(Builder.set_args(@ct_current, unquote(arg_list)))
   end
 
   defmacro env(env_map) do
-    quote do: @ct_current Builder.set_env(@ct_current, unquote(env_map))
+    quote do: @ct_current(Builder.set_env(@ct_current, unquote(env_map)))
   end
 
   @doc """
@@ -160,17 +160,18 @@ defmodule Erlkoenig.Container do
   """
   defmacro requires(capability) do
     quote do
-      @ct_current Builder.add_requires(@ct_current,
-                                       unquote(capability), [])
+      @ct_current Builder.add_requires(@ct_current, unquote(capability), [])
     end
   end
 
   @doc "`requires/2` — declare a capability with parameterised options."
   defmacro requires(capability, opts) do
     quote do
-      @ct_current Builder.add_requires(@ct_current,
-                                       unquote(capability),
-                                       unquote(opts))
+      @ct_current Builder.add_requires(
+                    @ct_current,
+                    unquote(capability),
+                    unquote(opts)
+                  )
     end
   end
 
@@ -212,38 +213,50 @@ defmodule Erlkoenig.Container do
   defmacro volume(container_path, opts) do
     quote do
       persist_name = Keyword.fetch!(unquote(opts), :persist)
-      read_only   = Keyword.get(unquote(opts), :read_only, false)
-      mount_opts  = Keyword.get(unquote(opts), :opts)
-      ephemeral   = Keyword.get(unquote(opts), :ephemeral, false)
-      quota       = Keyword.get(unquote(opts), :quota)
+      read_only = Keyword.get(unquote(opts), :read_only, false)
+      mount_opts = Keyword.get(unquote(opts), :opts)
+      ephemeral = Keyword.get(unquote(opts), :ephemeral, false)
+      quota = Keyword.get(unquote(opts), :quota)
 
       unless is_boolean(ephemeral) do
         raise ArgumentError,
-          "volume ephemeral: expected a boolean, got #{inspect(ephemeral)}"
+              "volume ephemeral: expected a boolean, got #{inspect(ephemeral)}"
       end
 
-      entry = %{container: unquote(container_path),
-                persist: persist_name,
-                read_only: read_only,
-                ephemeral: ephemeral}
+      entry = %{
+        container: unquote(container_path),
+        persist: persist_name,
+        read_only: read_only,
+        ephemeral: ephemeral
+      }
 
       entry =
         case mount_opts do
-          nil -> entry
-          s when is_binary(s) -> Map.put(entry, :opts, s)
+          nil ->
+            entry
+
+          s when is_binary(s) ->
+            Map.put(entry, :opts, s)
+
           other ->
             raise ArgumentError,
-              "volume opts: expected a binary string, got #{inspect(other)}"
+                  "volume opts: expected a binary string, got #{inspect(other)}"
         end
 
       entry =
         case quota do
-          nil -> entry
-          q when is_binary(q) -> Map.put(entry, :quota, q)
-          q when is_integer(q) and q >= 0 -> Map.put(entry, :quota, q)
+          nil ->
+            entry
+
+          q when is_binary(q) ->
+            Map.put(entry, :quota, q)
+
+          q when is_integer(q) and q >= 0 ->
+            Map.put(entry, :quota, q)
+
           other ->
             raise ArgumentError,
-              "volume quota: expected a size string (\"1G\") or non-negative integer, got #{inspect(other)}"
+                  "volume quota: expected a size string (\"1G\") or non-negative integer, got #{inspect(other)}"
         end
 
       @ct_current Builder.add_volume(@ct_current, entry)
@@ -261,23 +274,30 @@ defmodule Erlkoenig.Container do
   @doc "Generic rule macro for per-container firewall. Same syntax as host firewall."
   defmacro rule(verdict, opts \\ []) do
     quote do
-      @ct_current Builder.add_fw_rule(@ct_current,
-        ErlkoenigNft.Firewall.Builder.build_rule(unquote(verdict), unquote(opts)))
+      @ct_current Builder.add_fw_rule(
+                    @ct_current,
+                    ErlkoenigNft.Firewall.Builder.build_rule(unquote(verdict), unquote(opts))
+                  )
     end
   end
 
   defmacro counters(names) do
-    quote do: @ct_current Builder.set_fw_counters(@ct_current, unquote(names))
+    quote do: @ct_current(Builder.set_fw_counters(@ct_current, unquote(names)))
   end
 
   defmacro set(name, type) do
-    quote do: @ct_current Builder.add_fw_set(@ct_current, unquote(name), unquote(type))
+    quote do: @ct_current(Builder.add_fw_set(@ct_current, unquote(name), unquote(type)))
   end
 
   # --- Guard (threat detection) ---
 
   defmacro guard(do: block) do
     quote do
+      if @ct_current.guard != nil do
+        raise CompileError,
+          description: "guard already defined for container #{inspect(@ct_current.name)}"
+      end
+
       @ct_guard_acc %{}
       unquote(block)
       @ct_current Builder.set_guard(@ct_current, @ct_guard_acc)
@@ -293,35 +313,39 @@ defmodule Erlkoenig.Container do
   end
 
   defmacro ban_duration(seconds) do
-    quote do: @ct_guard_acc Map.put(@ct_guard_acc, :ban_duration, unquote(seconds))
+    quote do: @ct_guard_acc(Map.put(@ct_guard_acc, :ban_duration, unquote(seconds)))
   end
 
   # --- Restart ---
 
   defmacro restart(policy) do
-    quote do: @ct_current Builder.set_restart(@ct_current, unquote(policy))
+    quote do: @ct_current(Builder.set_restart(@ct_current, unquote(policy)))
   end
 
   # --- Files ---
 
   defmacro files(file_map) do
-    quote do: @ct_current Builder.set_files(@ct_current, unquote(file_map))
+    quote do: @ct_current(Builder.set_files(@ct_current, unquote(file_map)))
   end
 
   defmacro file(path, content) when is_binary(content) do
-    quote do: @ct_current Builder.add_file(@ct_current, unquote(path), unquote(content))
+    quote do: @ct_current(Builder.add_file(@ct_current, unquote(path), unquote(content)))
   end
 
   defmacro file(path, opts) when is_list(opts) do
     quote do
-      entry = case unquote(opts) do
-        [from: :host] ->
-          %{path: unquote(path), source: {:host, unquote(path)}}
-        [from: host_path] when is_binary(host_path) ->
-          %{path: unquote(path), source: {:host, host_path}}
-        [content: content] when is_binary(content) ->
-          %{path: unquote(path), source: {:inline, content}}
-      end
+      entry =
+        case unquote(opts) do
+          [from: :host] ->
+            %{path: unquote(path), source: {:host, unquote(path)}}
+
+          [from: host_path] when is_binary(host_path) ->
+            %{path: unquote(path), source: {:host, host_path}}
+
+          [content: content] when is_binary(content) ->
+            %{path: unquote(path), source: {:inline, content}}
+        end
+
       @ct_rootfs_acc Map.update!(@ct_rootfs_acc, :files, &(&1 ++ [entry]))
     end
   end
@@ -362,7 +386,7 @@ defmodule Erlkoenig.Container do
   # --- DNS Name ---
 
   defmacro dns_name(name) do
-    quote do: @ct_current Builder.set_dns_name(@ct_current, unquote(name))
+    quote do: @ct_current(Builder.set_dns_name(@ct_current, unquote(name)))
   end
 
   # --- Limits ---
@@ -385,13 +409,13 @@ defmodule Erlkoenig.Container do
   # --- Zone ---
 
   defmacro zone(name) when is_atom(name) do
-    quote do: @ct_current Builder.set_zone(@ct_current, unquote(name))
+    quote do: @ct_current(Builder.set_zone(@ct_current, unquote(name)))
   end
 
   # --- Capabilities ---
 
   defmacro caps(cap_list) do
-    quote do: @ct_current Builder.set_caps(@ct_current, unquote(cap_list))
+    quote do: @ct_current(Builder.set_caps(@ct_current, unquote(cap_list)))
   end
 
   # --- Seccomp ---
@@ -438,7 +462,9 @@ defmodule Erlkoenig.Container do
 
   defmacro observe(m1, m2, m3, m4) do
     quote do
-      metrics = Erlkoenig.Container.expand_observe([unquote(m1), unquote(m2), unquote(m3), unquote(m4)])
+      metrics =
+        Erlkoenig.Container.expand_observe([unquote(m1), unquote(m2), unquote(m3), unquote(m4)])
+
       @ct_current Builder.set_observe(@ct_current, metrics)
     end
   end
@@ -448,9 +474,11 @@ defmodule Erlkoenig.Container do
       [:forks, :execs, :exits, :oom]
     else
       valid = [:forks, :execs, :exits, :oom]
+
       Enum.each(metrics, fn m ->
         unless m in valid, do: raise(ArgumentError, "unknown observe metric: #{inspect(m)}")
       end)
+
       metrics
     end
   end
@@ -482,28 +510,37 @@ defmodule Erlkoenig.Container do
   defmacro max_forks(count, opts) do
     quote do
       per = Keyword.fetch!(unquote(opts), :per)
-      key = case per do
-        :second -> :max_forks_per_sec
-        :minute -> :max_forks_per_min
-        other -> raise ArgumentError, "max_forks per: must be :second or :minute, got #{inspect(other)}"
-      end
+
+      key =
+        case per do
+          :second ->
+            :max_forks_per_sec
+
+          :minute ->
+            :max_forks_per_min
+
+          other ->
+            raise ArgumentError,
+                  "max_forks per: must be :second or :minute, got #{inspect(other)}"
+        end
+
       @ct_policy_acc Map.put(@ct_policy_acc, key, unquote(count))
     end
   end
 
   defmacro on_oom(action) when action in [:restart, :kill, :alert] do
-    quote do: @ct_policy_acc Map.put(@ct_policy_acc, :on_oom, unquote(action))
+    quote do: @ct_policy_acc(Map.put(@ct_policy_acc, :on_oom, unquote(action)))
   end
 
   defmacro on_fork_flood(action) when action in [:kill, :alert] do
-    quote do: @ct_policy_acc Map.put(@ct_policy_acc, :on_fork_flood, unquote(action))
+    quote do: @ct_policy_acc(Map.put(@ct_policy_acc, :on_fork_flood, unquote(action)))
   end
 
   defmacro allowed_comms(comm_list) do
-    quote do: @ct_policy_acc Map.put(@ct_policy_acc, :allowed_comms, unquote(comm_list))
+    quote do: @ct_policy_acc(Map.put(@ct_policy_acc, :allowed_comms, unquote(comm_list)))
   end
 
   defmacro on_unexpected_exec(action) when action in [:kill, :alert] do
-    quote do: @ct_policy_acc Map.put(@ct_policy_acc, :on_unexpected_exec, unquote(action))
+    quote do: @ct_policy_acc(Map.put(@ct_policy_acc, :on_unexpected_exec, unquote(action)))
   end
 end

@@ -242,6 +242,12 @@ encode_payload({policy_violation, Id, Details}) ->
 %% Routing: firewall.<chain>.drop | firewall.<chain>.packet
 %% Routing: control.<scope>.<action>
 
+encode_payload({firewall_event, _} = Event) ->
+    case erlkoenig_firewall_event:amqp(Event) of
+        {ok, RoutingKey, Payload} -> {ok, RoutingKey, encode_map(Payload)};
+        skip -> skip
+    end;
+
 encode_payload({control_event, #{action := Action, status := Status, details := Details}}) ->
     ActionBin = atom_to_binary(Action),
     Scope = case Action of
@@ -633,10 +639,18 @@ encode_map(_) ->
 is_ip_key(ip) -> true;
 is_ip_key(src) -> true;
 is_ip_key(dst) -> true;
+is_ip_key(src_ip) -> true;
+is_ip_key(dst_ip) -> true;
+is_ip_key(src_raw) -> true;
+is_ip_key(dst_raw) -> true;
 is_ip_key(ip_raw) -> true;
 is_ip_key(<<"ip">>) -> true;
 is_ip_key(<<"src">>) -> true;
 is_ip_key(<<"dst">>) -> true;
+is_ip_key(<<"src_ip">>) -> true;
+is_ip_key(<<"dst_ip">>) -> true;
+is_ip_key(<<"src_raw">>) -> true;
+is_ip_key(<<"dst_raw">>) -> true;
 is_ip_key(_) -> false.
 
 -spec encode_value(term()) -> term().

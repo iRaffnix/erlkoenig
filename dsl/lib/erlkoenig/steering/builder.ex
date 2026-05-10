@@ -11,6 +11,9 @@ defmodule Erlkoenig.Steering.Builder do
 
   defstruct services: [], routes: []
 
+  @type t :: %__MODULE__{services: list(), routes: [String.t()]}
+
+  @spec new() :: t()
   def new, do: %__MODULE__{}
 
   def add_service(%__MODULE__{services: svcs} = b, name, opts) do
@@ -37,14 +40,16 @@ defmodule Erlkoenig.Steering.Builder do
     %{b | routes: routes ++ [to_string(container_name)]}
   end
 
+  @spec validate!(t(), [String.t()]) :: t()
   def validate!(%__MODULE__{} = b, all_container_names) do
     # Check service backends reference declared containers
     Enum.each(b.services, fn svc ->
       Enum.each(svc.backends, fn backend ->
         if backend not in all_container_names do
           raise CompileError,
-            description: "service #{inspect(svc.name)}: unknown backend #{inspect(backend)}. " <>
-              "Must reference a declared container."
+            description:
+              "service #{inspect(svc.name)}: unknown backend #{inspect(backend)}. " <>
+                "Must reference a declared container."
         end
       end)
     end)
@@ -57,32 +62,37 @@ defmodule Erlkoenig.Steering.Builder do
       end
     end)
 
-    :ok
+    b
   end
 
+  @spec to_term(t()) :: map()
   def to_term(%__MODULE__{services: svcs, routes: routes}) do
     %{
-      services: Enum.map(svcs, fn s ->
-        %{
-          name: s.name,
-          vip: s.vip,
-          port: s.port,
-          proto: s.proto,
-          backends: s.backends
-        }
-      end),
+      services:
+        Enum.map(svcs, fn s ->
+          %{
+            name: s.name,
+            vip: s.vip,
+            port: s.port,
+            proto: s.proto,
+            backends: s.backends
+          }
+        end),
       routes: routes
     }
   end
 
   defp validate_proto!(proto) when proto in [:tcp, :udp], do: :ok
+
   defp validate_proto!(proto) do
     raise CompileError,
       description: "invalid proto #{inspect(proto)}, must be :tcp or :udp"
   end
 
   defp validate_ip!({a, b, c, d})
-       when a in 0..255 and b in 0..255 and c in 0..255 and d in 0..255, do: :ok
+       when a in 0..255 and b in 0..255 and c in 0..255 and d in 0..255,
+       do: :ok
+
   defp validate_ip!(ip) do
     raise CompileError,
       description: "invalid IP #{inspect(ip)}, must be {0..255, 0..255, 0..255, 0..255}"

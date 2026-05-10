@@ -280,11 +280,11 @@ defmodule Erlkoenig.TutorialShapeTest do
       assert tmp.ephemeral == true
     end
 
-    test "db container propagates signature: :required as :signature_required",
+    test "db container keeps signature verification as an operator note",
          %{config: c} do
       [pod] = c.pods
       db = Enum.find(pod.containers, &(&1.name == "db"))
-      assert db[:signature_required] == true
+      refute Map.has_key?(db, :signature_required)
     end
 
     test "db container propagates files injection map", %{config: c} do
@@ -295,11 +295,11 @@ defmodule Erlkoenig.TutorialShapeTest do
       assert Map.has_key?(db.files, "/etc/db/config.toml")
     end
 
-    test "api container propagates explicit signature path as :sig_path",
+    test "api container omits the unsigned demo signature path",
          %{config: c} do
       [pod] = c.pods
       api = Enum.find(pod.containers, &(&1.name == "api"))
-      assert api[:sig_path] == "/etc/erlkoenig/artifacts/api.sig"
+      refute Map.has_key?(api, :sig_path)
     end
 
     test "api container has the expected cgroup limits", %{config: c} do

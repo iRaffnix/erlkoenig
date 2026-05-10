@@ -5,8 +5,9 @@ defmodule HostIpvlanTest do
 
   describe "add_ipvlan/3" do
     test "creates ipvlan entry with required fields" do
-      h = Builder.new()
-      |> Builder.add_ipvlan("edge", parent: {:device, "eth0"}, subnet: {10, 20, 0, 0, 24})
+      h =
+        Builder.new()
+        |> Builder.add_ipvlan("edge", parent: {:device, "eth0"}, subnet: {10, 20, 0, 0, 24})
 
       assert [ipv] = h.ipvlans
       assert ipv.name == "edge"
@@ -19,9 +20,14 @@ defmodule HostIpvlanTest do
     end
 
     test "respects explicit mode and gateway" do
-      h = Builder.new()
-      |> Builder.add_ipvlan("prod", parent: {:device, "bond0"}, subnet: {172, 16, 0, 0, 24},
-                            mode: :l3, gateway: {172, 16, 0, 1})
+      h =
+        Builder.new()
+        |> Builder.add_ipvlan("prod",
+          parent: {:device, "bond0"},
+          subnet: {172, 16, 0, 0, 24},
+          mode: :l3,
+          gateway: {172, 16, 0, 1}
+        )
 
       [ipv] = h.ipvlans
       assert ipv.ipvlan_mode == :l3
@@ -30,8 +36,9 @@ defmodule HostIpvlanTest do
     end
 
     test "dummy parent type" do
-      h = Builder.new()
-      |> Builder.add_ipvlan("internal", parent: {:dummy, "ek_ct0"}, subnet: {10, 50, 0, 0, 24})
+      h =
+        Builder.new()
+        |> Builder.add_ipvlan("internal", parent: {:dummy, "ek_ct0"}, subnet: {10, 50, 0, 0, 24})
 
       [ipv] = h.ipvlans
       assert ipv.parent == "ek_ct0"
@@ -53,8 +60,9 @@ defmodule HostIpvlanTest do
     end
 
     test "default netmask is 24 when not in subnet tuple" do
-      h = Builder.new()
-      |> Builder.add_ipvlan("x", parent: {:device, "eth0"}, subnet: {10, 0, 0, 0})
+      h =
+        Builder.new()
+        |> Builder.add_ipvlan("x", parent: {:device, "eth0"}, subnet: {10, 0, 0, 0})
 
       [ipv] = h.ipvlans
       assert ipv.netmask == 24
@@ -63,17 +71,19 @@ defmodule HostIpvlanTest do
 
   describe "validate!/3" do
     test "allows ipvlan" do
-      h = Builder.new()
-      |> Builder.add_ipvlan("ipv", parent: {:device, "eth0"}, subnet: {10, 0, 0, 0, 24})
+      h =
+        Builder.new()
+        |> Builder.add_ipvlan("ipv", parent: {:device, "eth0"}, subnet: {10, 0, 0, 0, 24})
 
-      assert :ok = Builder.validate!(h, [], [])
+      assert Builder.validate!(h, [], []) == h
     end
   end
 
   describe "to_term/1" do
     test "ipvlan mode emits network discriminated union" do
-      h = Builder.new()
-      |> Builder.add_ipvlan("edge", parent: {:device, "eth0"}, subnet: {10, 20, 0, 0, 24})
+      h =
+        Builder.new()
+        |> Builder.add_ipvlan("edge", parent: {:device, "eth0"}, subnet: {10, 20, 0, 0, 24})
 
       term = Builder.to_term(h)
       assert %{network: %{mode: :ipvlan, parent: "eth0", parent_type: :device}} = term
@@ -82,17 +92,22 @@ defmodule HostIpvlanTest do
     end
 
     test "ipvlan with gateway emits gateway in network" do
-      h = Builder.new()
-      |> Builder.add_ipvlan("edge", parent: {:device, "eth0"}, subnet: {10, 20, 0, 0, 24},
-                            gateway: {10, 20, 0, 1})
+      h =
+        Builder.new()
+        |> Builder.add_ipvlan("edge",
+          parent: {:device, "eth0"},
+          subnet: {10, 20, 0, 0, 24},
+          gateway: {10, 20, 0, 1}
+        )
 
       term = Builder.to_term(h)
       assert term.network.gateway == {10, 20, 0, 1}
     end
 
     test "ipvlan without gateway emits nil gateway" do
-      h = Builder.new()
-      |> Builder.add_ipvlan("edge", parent: {:device, "eth0"}, subnet: {10, 20, 0, 0, 24})
+      h =
+        Builder.new()
+        |> Builder.add_ipvlan("edge", parent: {:device, "eth0"}, subnet: {10, 20, 0, 0, 24})
 
       term = Builder.to_term(h)
       assert term.network.gateway == nil

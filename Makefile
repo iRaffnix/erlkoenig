@@ -30,7 +30,7 @@
 #
 #   make clean        — Alles aufraeumen
 
-.PHONY: all check erl test dialyzer integration release \
+.PHONY: all check erl test dialyzer dsl-dialyzer integration release \
         dsl dsl-bundle dsl-escript test-dsl docs docs-erlang docs-error-codes go-demos \
         fmt fmt-check xref lint error-catalog-check \
         verifier verifier-xcheck agents-build showcase showcase-verify \
@@ -81,12 +81,15 @@ erl:
 test: erl
 	rebar3 eunit
 
-dialyzer: erl
+dialyzer: erl dsl-dialyzer
 	@RESULT=$$(rebar3 dialyzer 2>&1); RC=$$?; echo "$$RESULT" | tail -20; \
 	if echo "$$RESULT" | grep -q "no_return\|will never be called\|invalid_contract\|has no local return"; then \
 		echo ""; echo "ERROR: Dialyzer found real type errors"; exit 1; \
 	fi; \
 	echo "Dialyzer: OK"
+
+dsl-dialyzer:
+	cd dsl && mix deps.get && mix dialyzer
 
 integration: erl
 	@echo ""

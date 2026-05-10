@@ -43,6 +43,7 @@ defmodule SimpleEcho do
     # nft evaluiert top-to-bottom; die erste matchende Regel gewinnt.
 
     nft_host do
+      nft_nflog_group 1, name: "host"
 
       # ── Sets ─────────────────────────────────────────────
       # Ban-Set: wird vom Guard automatisch gefüllt.
@@ -141,7 +142,8 @@ defmodule SimpleEcho do
         # │                                                 │
         # │ In Production: log_prefix weglassen wenn laut.  │
         # └─────────────────────────────────────────────────┘
-        nft_rule :drop, counter: "input_drop", log_prefix: "HOST: "
+        nft_rule :drop, counter: "input_drop",
+                        log_prefix: "HOST: ", nflog_group: 1
       end
     end
   end

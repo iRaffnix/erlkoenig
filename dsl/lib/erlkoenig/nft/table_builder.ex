@@ -29,8 +29,24 @@ defmodule Erlkoenig.Nft.TableBuilder do
             maps: [],
             vmaps: [],
             flowtables: [],
+            nflog_groups: [],
             chains: []
 
+  @type owner :: :host | :zone | :ct | :in_container
+  @type t :: %__MODULE__{
+          family: atom(),
+          name: String.t() | atom() | nil,
+          owner: owner() | nil,
+          counters: list(),
+          sets: list(),
+          maps: list(),
+          vmaps: list(),
+          flowtables: list(),
+          nflog_groups: list(),
+          chains: list()
+        }
+
+  @spec new(atom(), String.t() | atom(), keyword()) :: t()
   def new(family, name, opts \\ []) do
     owner =
       Keyword.get_lazy(opts, :owner, fn ->
@@ -229,6 +245,31 @@ defmodule Erlkoenig.Nft.TableBuilder do
     %{t | flowtables: fts ++ [ft]}
   end
 
+  def add_nflog_group(%__MODULE__{nflog_groups: groups} = t, group, opts \\ []) do
+    unless is_integer(group) and group >= 0 do
+      raise CompileError,
+        description: "nft_nflog_group #{inspect(group)}: group must be a non-negative integer"
+    end
+
+    meta =
+      %{
+        group: group,
+        name: Keyword.get(opts, :name, "group_#{group}")
+      }
+      |> put_if_binary_or_string(opts, :description)
+
+    %{t | nflog_groups: groups ++ [meta]}
+  end
+
+  defp put_if_binary_or_string(map, opts, key) do
+    case Keyword.get(opts, key) do
+      nil -> map
+      value when is_binary(value) or is_list(value) -> Map.put(map, key, value)
+      _ -> map
+    end
+  end
+
+  @spec validate!(t()) :: t()
   def validate!(%__MODULE__{} = t) do
     if t.chains == [] do
       raise CompileError,
@@ -293,8 +334,14 @@ defmodule Erlkoenig.Nft.TableBuilder do
       "flowtable names in nft_table #{inspect(t.name)}"
     )
 
+    ensure_unique_names!(
+      Enum.map(t.nflog_groups, & &1.group),
+      "nflog groups in nft_table #{inspect(t.name)}"
+    )
+
     # Check counter references exist
     declared_counters = MapSet.new(t.counters)
+    declared_nflog_groups = MapSet.new(Enum.map(t.nflog_groups, & &1.group))
     all_rules = Enum.flat_map(t.chains, & &1.rules)
 
     Enum.each(all_rules, fn {_action, opts} ->
@@ -308,6 +355,23 @@ defmodule Erlkoenig.Nft.TableBuilder do
               description:
                 "nft_table #{inspect(t.name)}: counter #{inspect(name)} referenced but not declared"
           end
+      end
+
+      case {Map.get(opts, :log), Map.get(opts, :log_prefix), Map.get(opts, :nflog_group)} do
+        {nil, nil, nil} ->
+          :ok
+
+        {nil, nil, group} ->
+          ensure_declared_nflog_group!(t, declared_nflog_groups, group)
+
+        {_log, _prefix, nil} ->
+          raise CompileError,
+            description:
+              "nft_table #{inspect(t.name)}: logged nft_rule must declare " <>
+                "nflog_group: N and the table must declare `nft_nflog_group N`"
+
+        {_log, _prefix, group} ->
+          ensure_declared_nflog_group!(t, declared_nflog_groups, group)
       end
     end)
 
@@ -366,7 +430,7 @@ defmodule Erlkoenig.Nft.TableBuilder do
       end)
     end)
 
-    :ok
+    t
   end
 
   # Block-scoped jump-target resolver. Raises with §4.4 reference
@@ -415,43 +479,39 @@ defmodule Erlkoenig.Nft.TableBuilder do
     end)
   end
 
+  @spec to_term(t()) :: map()
   def to_term(%__MODULE__{} = t) do
     base = %{
       family: t.family,
       name: t.name,
       owner: t.owner,
       counters: t.counters,
-      chains: Enum.map(t.chains, &chain_to_term(&1, t.owner))
+      chains: Enum.map(t.chains, &Erlkoenig.Nft.ChainBuilder.to_term/1)
     }
 
     base = if t.sets != [], do: Map.put(base, :sets, t.sets), else: base
     base = if t.maps != [], do: Map.put(base, :maps, t.maps), else: base
     base = if t.vmaps != [], do: Map.put(base, :vmaps, t.vmaps), else: base
     base = if t.flowtables != [], do: Map.put(base, :flowtables, t.flowtables), else: base
+    base = if t.nflog_groups != [], do: Map.put(base, :nflog_groups, t.nflog_groups), else: base
     base
   end
 
-  # Per Spec §7 IR-scope rule: emit owner on the table and
-  # denormalize it into each chain (for audit/diagnostics).
-  # Sets/counters/maps/vmaps/flowtables keep their existing
-  # tuple/map shape — owner is fixed by the table context.
-  defp chain_to_term(%{type: :base} = c, owner) do
-    %{
-      name: c.name,
-      owner: owner,
-      hook: c.hook,
-      type: c.chain_type,
-      priority: c.priority,
-      policy: c.policy,
-      rules: c.rules
-    }
+  defp ensure_declared_nflog_group!(table, declared_groups, group)
+       when is_integer(group) and group >= 0 do
+    unless MapSet.member?(declared_groups, group) do
+      raise CompileError,
+        description:
+          "nft_table #{inspect(table.name)}: nft_rule references " <>
+            "nflog_group #{inspect(group)} but this table does not declare " <>
+            "`nft_nflog_group #{group}`"
+    end
   end
 
-  defp chain_to_term(c, owner) do
-    %{
-      name: c.name,
-      owner: owner,
-      rules: c.rules
-    }
+  defp ensure_declared_nflog_group!(table, _declared_groups, group) do
+    raise CompileError,
+      description:
+        "nft_table #{inspect(table.name)}: nflog_group must be a non-negative integer, " <>
+          "got #{inspect(group)}"
   end
 end

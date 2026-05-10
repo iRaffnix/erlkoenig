@@ -66,7 +66,7 @@ calling this module directly.
 
 -ifdef(TEST).
 -export([configured_ban_set/2, dev_default_enabled/0,
-         host_table/0, normalize_config/1]).
+         host_table/0, normalize_config/1, observe_drop_exprs/2]).
 -endif.
 
 -include("nft_tables.hrl").
@@ -74,6 +74,7 @@ calling this module directly.
 %% --- Constants ---
 
 -define(INET, 1).
+-define(HOST_NFLOG_GROUP, 1).
 
 %% --- Types ---
 
@@ -418,16 +419,25 @@ handle_call({list_set, Name}, _From, #{config := Config} = State) ->
     end;
 handle_call(list_counters, _From, #{config := Config} = State) ->
     Counters = maps:get(counters, Config, []),
+    Table = maps:get(table, Config),
     Rates = collect_rates(),
     Result = [
         begin
             CName = counter_name(C),
             Rate = maps:get(CName, Rates, #{}),
+            Live = read_live_counter(Table, CName),
             #{
+                table => Table,
                 name => CName,
                 packets => maps:get(packets, Rate, 0),
                 bytes => maps:get(bytes, Rate, 0),
-                pps => maps:get(pps, Rate, 0)
+                total_packets => maps:get(total_packets, Rate,
+                                          maps:get(packets, Live, 0)),
+                total_bytes => maps:get(total_bytes, Rate,
+                                        maps:get(bytes, Live, 0)),
+                pps => maps:get(pps, Rate, 0),
+                bps => maps:get(bps, Rate, 0),
+                interval => maps:get(interval, Rate, 0)
             }
         end
      || C <- Counters
@@ -615,7 +625,17 @@ apply_config_unsafe(Config) ->
         lists:flatten([build_chain_rules(Table, Chain, Config) || Chain <- Chains])
     ]),
 
-    nfnl_server:apply_msgs(erlkoenig_nft_srv, Msgs).
+    case nfnl_server:apply_msgs(erlkoenig_nft_srv, Msgs) of
+        ok ->
+            register_host_nflog_group(Config),
+            ok;
+        {error, _} = Err ->
+            Err
+    end.
+
+register_host_nflog_group(Config) ->
+    Table = maps:get(table, Config),
+    ok = erlkoenig_nft_nflog_registry:register_group(?HOST_NFLOG_GROUP, Table, host).
 
 %% --- Internal: Diagnostic Error Localization ---
 %%
@@ -786,10 +806,10 @@ diagnose_rules(DiagTable, Chain, [Rule | Rest], Config, Idx) ->
 start_counters(Config) ->
     Table = maps:get(table, Config),
     Counters = maps:get(counters, Config, []),
-    Watch = maps:get(watch, Config, undefined),
+    Watch = maps:get(watch, Config, #{interval => 2000, thresholds => []}),
 
     case Watch of
-        undefined ->
+        false ->
             ok;
         WatchConfig ->
             Interval = maps:get(interval, WatchConfig, 2000),
@@ -856,7 +876,54 @@ build_chain_create(Table, ChainConfig) ->
 build_chain_rules(Table, ChainConfig, Config) ->
     Name = maps:get(name, ChainConfig),
     Rules = maps:get(rules, ChainConfig, []),
-    lists:flatten([build_rule(Table, Name, Rule, Config) || Rule <- Rules]).
+    lists:flatten([
+        chain_counter_rule(Table, ChainConfig, Config),
+        [build_rule(Table, Name, Rule, Config) || Rule <- Rules],
+        default_drop_observability_rule(Table, ChainConfig, Config)
+    ]).
+
+chain_counter_rule(Table, ChainConfig, Config) ->
+    case maps:find(hook, ChainConfig) of
+        {ok, Hook} ->
+            Counter = counter_name(Hook),
+            case has_counter(Config, Counter) of
+                true ->
+                    Name = maps:get(name, ChainConfig),
+                    encode_rule(Table, Name, [nft_expr_ir:objref_counter(Counter)]);
+                false ->
+                    []
+            end;
+        error ->
+            []
+    end.
+
+default_drop_observability_rule(Table, ChainConfig, Config) ->
+    case {maps:get(policy, ChainConfig, accept), has_counter(Config, <<"dropped">>)} of
+        {drop, true} ->
+            Name = maps:get(name, ChainConfig),
+            Prefix = <<Name/binary, "_default_drop">>,
+            encode_rule(Table, Name, [
+                nft_expr_ir:objref_counter(<<"dropped">>),
+                nft_expr_ir:log(#{prefix => Prefix, group => ?HOST_NFLOG_GROUP}),
+                nft_expr_ir:drop()
+            ]);
+        _ ->
+            []
+    end.
+
+observe_drop_exprs(Exprs, Prefix) ->
+    inject_observability_before_drop(Exprs, Prefix, []).
+
+inject_observability_before_drop([], _Prefix, Acc) ->
+    lists:reverse(Acc);
+inject_observability_before_drop([{immediate, #{verdict := drop}} = Drop | Rest],
+                                 Prefix, Acc) ->
+    Observability = [
+        nft_expr_ir:log(#{prefix => Prefix, group => ?HOST_NFLOG_GROUP})
+    ],
+    lists:reverse(Acc) ++ Observability ++ [Drop | Rest];
+inject_observability_before_drop([Expr | Rest], Prefix, Acc) ->
+    inject_observability_before_drop(Rest, Prefix, [Expr | Acc]).
 
 %% --- Internal: Build rule → semantic terms → msg_fun ---
 
@@ -903,7 +970,10 @@ build_rule(Table, Chain, {set_lookup_drop, SetName, Counter}, Config) ->
     encode_rule(
         Table,
         Chain,
-        nft_rules:set_lookup_drop_named(SetName, counter_name(Counter), SetType)
+        observe_drop_exprs(
+            nft_rules:set_lookup_drop_named(SetName, counter_name(Counter), SetType),
+            counter_name(Counter)
+        )
     );
 %% Set lookup without counter — resolve set type from config
 build_rule(Table, Chain, {set_lookup_drop, SetName}, Config) ->
@@ -1261,6 +1331,10 @@ normalize_value(Value, _Type) ->
 counter_name(Name) when is_binary(Name) -> Name;
 counter_name(Name) when is_atom(Name) -> atom_to_binary(Name).
 
+-spec has_counter(map(), binary()) -> boolean().
+has_counter(Config, Name) ->
+    lists:member(Name, [counter_name(C) || C <- maps:get(counters, Config, [])]).
+
 -spec quota_name(#{name := atom() | binary(), _ => _}) -> binary().
 quota_name(#{name := Name}) when is_binary(Name) -> Name;
 quota_name(#{name := Name}) when is_atom(Name) -> atom_to_binary(Name).
@@ -1548,7 +1622,37 @@ normalize_config(Config) ->
                    #{allowed => [HostTable],
                      hint => <<"legacy/raw host firewall table names are refused after phase 6i; rewrite firewall.term to erlkoenig_host/nft_host">>}})
     end,
-    Config#{table => HostTable}.
+    ensure_observability_counters(Config#{table => HostTable}).
+
+ensure_observability_counters(Config) ->
+    Existing = [counter_name(C) || C <- maps:get(counters, Config, [])],
+    Chains = maps:get(chains, Config, []),
+    HookCounters = [
+        counter_name(Hook)
+     || #{hook := Hook} <- Chains,
+        lists:member(Hook, [input, forward, output])
+    ],
+    DropCounters =
+        case lists:any(fun(#{policy := drop}) -> true;
+                          (_) -> false
+                       end, Chains) of
+            true -> [<<"dropped">>];
+            false -> []
+        end,
+    Counters = unique_binaries(Existing ++ HookCounters ++ DropCounters),
+    Config#{counters => Counters}.
+
+unique_binaries(Items) ->
+    lists:reverse(
+        element(1, lists:foldl(
+            fun(Item, {Acc, Seen}) ->
+                case sets:is_element(Item, Seen) of
+                    true -> {Acc, Seen};
+                    false -> {[Item | Acc], sets:add_element(Item, Seen)}
+                end
+            end,
+            {[], sets:new([{version, 2}])},
+            Items))).
 
 %% §6.2 ct_state audit. Returns a list of structured issues so
 %% the caller can surface them however it prefers; the soft
@@ -1804,6 +1908,13 @@ collect_rates() ->
         #{},
         Children
     ).
+
+-spec read_live_counter(binary(), binary()) -> map().
+read_live_counter(Table, Name) ->
+    case nfnl_server:get_counter(erlkoenig_nft_srv, ?INET, Table, Name) of
+        {ok, #{packets := _, bytes := _} = Counter} -> Counter;
+        _ -> #{}
+    end.
 
 -spec counter_count() -> non_neg_integer().
 counter_count() ->

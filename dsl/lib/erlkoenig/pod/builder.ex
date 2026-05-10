@@ -70,39 +70,61 @@ defmodule Erlkoenig.Pod.Builder do
             current_nft_chain: nil,
             nft_rules_acc: []
 
+  @type t :: %__MODULE__{
+          name: String.t() | nil,
+          strategy: atom() | nil,
+          containers: list(),
+          current_ct: map() | nil,
+          current_publish: map() | nil,
+          current_stream: map() | nil,
+          current_nft: map() | nil,
+          current_nft_chain: map() | nil,
+          nft_rules_acc: list()
+        }
+
+  @spec new(String.t(), keyword()) :: t()
   def new(name, opts) when is_binary(name) do
-    strategy = case Keyword.fetch(opts, :strategy) do
-      {:ok, s} -> s
-      :error ->
-        raise CompileError,
-          description: "pod #{inspect(name)}: strategy: is required " <>
-            "(one of #{inspect(@valid_strategies)})"
-    end
+    strategy =
+      case Keyword.fetch(opts, :strategy) do
+        {:ok, s} ->
+          s
+
+        :error ->
+          raise CompileError,
+            description:
+              "pod #{inspect(name)}: strategy: is required " <>
+                "(one of #{inspect(@valid_strategies)})"
+      end
+
     unless strategy in @valid_strategies do
       raise CompileError,
-        description: "pod #{inspect(name)}: invalid strategy #{inspect(strategy)}. " <>
-          "Allowed: #{inspect(@valid_strategies)}"
+        description:
+          "pod #{inspect(name)}: invalid strategy #{inspect(strategy)}. " <>
+            "Allowed: #{inspect(@valid_strategies)}"
     end
+
     %__MODULE__{name: name, strategy: strategy}
   end
 
   # --- Container lifecycle ---
 
   def begin_container(%__MODULE__{} = pod, name, opts) when is_binary(name) do
-    binary  = require_opt!(opts, :binary, name, "path to the binary")
-    zone    = require_opt!(opts, :zone, name, "IPVLAN zone name")
+    binary = require_opt!(opts, :binary, name, "path to the binary")
+    zone = require_opt!(opts, :zone, name, "IPVLAN zone name")
     replicas = Keyword.get(opts, :replicas, 1)
-    restart  = require_opt!(opts, :restart, name,
-                            "one of #{inspect(@valid_restart_policies)}")
+    restart = require_opt!(opts, :restart, name, "one of #{inspect(@valid_restart_policies)}")
 
     unless is_integer(replicas) and replicas > 0 do
       raise CompileError,
-        description: "container #{inspect(name)}: replicas: must be a positive integer, got #{inspect(replicas)}"
+        description:
+          "container #{inspect(name)}: replicas: must be a positive integer, got #{inspect(replicas)}"
     end
+
     unless restart in @valid_restart_policies do
       raise CompileError,
-        description: "container #{inspect(name)}: invalid restart #{inspect(restart)}. " <>
-          "Allowed: #{inspect(@valid_restart_policies)}"
+        description:
+          "container #{inspect(name)}: invalid restart #{inspect(restart)}. " <>
+            "Allowed: #{inspect(@valid_restart_policies)}"
     end
 
     validate_signature!(name, opts[:signature])
@@ -131,6 +153,7 @@ defmodule Erlkoenig.Pod.Builder do
       publish: [],
       stream: nil
     }
+
     %{pod | current_ct: ct}
   end
 
@@ -146,8 +169,8 @@ defmodule Erlkoenig.Pod.Builder do
     raise CompileError,
       description:
         "conn_limit must appear inside an `nft do input ... end` " <>
-        "(or output) block — it compiles to a chain rule, not to " <>
-        "a hidden synthesis"
+          "(or output) block — it compiles to a chain rule, not to " <>
+          "a hidden synthesis"
   end
 
   def add_conn_limit(%__MODULE__{} = pod, opts) when is_list(opts) do
@@ -202,10 +225,12 @@ defmodule Erlkoenig.Pod.Builder do
     # the socket-file path. Capabilities override via :env_value.
     env_value = Map.get(spec, :env_value, spec.container_socket)
 
-    %{ct |
-       requires: ct.requires ++ [capability],
-       socket_mounts: socket_mounts,
-       env: Map.put(ct.env, spec.env_var, env_value)}
+    %{
+      ct
+      | requires: ct.requires ++ [capability],
+        socket_mounts: socket_mounts,
+        env: Map.put(ct.env, spec.env_var, env_value)
+    }
   end
 
   defp apply_capability(ct, capability, %{kind: :dns_allowlist}, opts) do
@@ -242,9 +267,11 @@ defmodule Erlkoenig.Pod.Builder do
   defp validate_host_pattern!(h) when is_binary(h) do
     if valid_host_pattern?(h), do: h, else: bad_host!(h)
   end
+
   defp validate_host_pattern!(h) when is_atom(h) do
     validate_host_pattern!(Atom.to_string(h))
   end
+
   defp validate_host_pattern!(h) when is_list(h) do
     if List.ascii_printable?(h) do
       validate_host_pattern!(List.to_string(h))
@@ -252,6 +279,7 @@ defmodule Erlkoenig.Pod.Builder do
       bad_host!(h)
     end
   end
+
   defp validate_host_pattern!(h), do: bad_host!(h)
 
   # A DNS-filter-matchable pattern: optional `*.` wildcard followed
@@ -278,7 +306,9 @@ defmodule Erlkoenig.Pod.Builder do
 
   defp require_opt!(opts, key, ct_name, hint) do
     case Keyword.fetch(opts, key) do
-      {:ok, v} -> v
+      {:ok, v} ->
+        v
+
       :error ->
         raise CompileError,
           description: "container #{inspect(ct_name)}: #{inspect(key)} is required (#{hint})"
@@ -286,8 +316,7 @@ defmodule Erlkoenig.Pod.Builder do
   end
 
   def end_container(%__MODULE__{current_ct: ct, containers: cts} = pod) do
-    %{pod | containers: cts ++ [ct], current_ct: nil, current_publish: nil,
-            current_stream: nil}
+    %{pod | containers: cts ++ [ct], current_ct: nil, current_publish: nil, current_stream: nil}
   end
 
   # --- Publish block lifecycle ---
@@ -302,6 +331,7 @@ defmodule Erlkoenig.Pod.Builder do
       raise CompileError,
         description: "publish interval must be >= #{@min_interval}ms, got: #{interval}"
     end
+
     %{pod | current_publish: %{interval: interval, metrics: []}}
   end
 
@@ -313,13 +343,16 @@ defmodule Erlkoenig.Pod.Builder do
   def add_metric(%__MODULE__{current_publish: pub} = pod, metric) when is_atom(metric) do
     unless metric in @valid_metrics do
       raise CompileError,
-        description: "unknown metric #{inspect(metric)}. " <>
-          "Allowed: #{inspect(@valid_metrics)}"
+        description:
+          "unknown metric #{inspect(metric)}. " <>
+            "Allowed: #{inspect(@valid_metrics)}"
     end
+
     if metric in pub.metrics do
       raise CompileError,
         description: "duplicate metric #{inspect(metric)} in publish block"
     end
+
     %{pod | current_publish: %{pub | metrics: pub.metrics ++ [metric]}}
   end
 
@@ -330,6 +363,7 @@ defmodule Erlkoenig.Pod.Builder do
       raise CompileError,
         description: "publish block must contain at least one metric"
     end
+
     ct = %{ct | publish: ct.publish ++ [pub]}
     %{pod | current_ct: ct, current_publish: nil}
   end
@@ -347,21 +381,35 @@ defmodule Erlkoenig.Pod.Builder do
   end
 
   def begin_stream(%__MODULE__{} = pod, opts) do
-    retention_days = case Keyword.get(opts, :retention) do
-      nil -> 7
-      {n, :days} when is_integer(n) and n > 0 -> n
-      other ->
-        raise CompileError,
-          description: "stream retention must be {N, :days}, got: #{inspect(other)}"
-    end
-    max_bytes = case Keyword.get(opts, :max_bytes) do
-      nil -> nil
-      {n, :gb} when is_number(n) and n > 0 -> trunc(n * 1_073_741_824)
-      {n, :mb} when is_number(n) and n > 0 -> trunc(n * 1_048_576)
-      other ->
-        raise CompileError,
-          description: "stream max_bytes must be {N, :gb} or {N, :mb}, got: #{inspect(other)}"
-    end
+    retention_days =
+      case Keyword.get(opts, :retention) do
+        nil ->
+          7
+
+        {n, :days} when is_integer(n) and n > 0 ->
+          n
+
+        other ->
+          raise CompileError,
+            description: "stream retention must be {N, :days}, got: #{inspect(other)}"
+      end
+
+    max_bytes =
+      case Keyword.get(opts, :max_bytes) do
+        nil ->
+          nil
+
+        {n, :gb} when is_number(n) and n > 0 ->
+          trunc(n * 1_073_741_824)
+
+        {n, :mb} when is_number(n) and n > 0 ->
+          trunc(n * 1_048_576)
+
+        other ->
+          raise CompileError,
+            description: "stream max_bytes must be {N, :gb} or {N, :mb}, got: #{inspect(other)}"
+      end
+
     %{pod | current_stream: %{channels: [], retention_days: retention_days, max_bytes: max_bytes}}
   end
 
@@ -375,10 +423,12 @@ defmodule Erlkoenig.Pod.Builder do
       raise CompileError,
         description: "unknown channel #{inspect(channel)}. Allowed: #{inspect(@valid_channels)}"
     end
+
     if channel in stream.channels do
       raise CompileError,
         description: "duplicate channel #{inspect(channel)} in stream block"
     end
+
     %{pod | current_stream: %{stream | channels: stream.channels ++ [channel]}}
   end
 
@@ -389,6 +439,7 @@ defmodule Erlkoenig.Pod.Builder do
       raise CompileError,
         description: "stream block must contain at least one channel"
     end
+
     ct = %{ct | stream: stream}
     %{pod | current_ct: ct, current_stream: nil}
   end
@@ -405,11 +456,13 @@ defmodule Erlkoenig.Pod.Builder do
   def begin_nft(%__MODULE__{current_ct: nil}) do
     raise CompileError, description: "nft block must be inside a container"
   end
+
   def begin_nft(%__MODULE__{} = pod) do
     %{pod | current_nft: %{owner: :in_container, chains: []}, nft_rules_acc: []}
   end
 
   def end_nft(%__MODULE__{current_nft: nil} = pod), do: pod
+
   def end_nft(%__MODULE__{current_nft: nft, current_ct: ct} = pod) do
     ct = Map.put(ct, :nft, nft)
     %{pod | current_ct: ct, current_nft: nil}
@@ -418,8 +471,10 @@ defmodule Erlkoenig.Pod.Builder do
   def begin_nft_chain(%__MODULE__{current_nft: nil}, _hook, _opts) do
     raise CompileError, description: "output/input block must be inside an nft block"
   end
+
   def begin_nft_chain(%__MODULE__{} = pod, hook, opts) when hook in [:output, :input] do
     policy = Keyword.get(opts, :policy, :accept)
+
     chain = %{
       name: Atom.to_string(hook),
       owner: :in_container,
@@ -428,12 +483,15 @@ defmodule Erlkoenig.Pod.Builder do
       priority: 0,
       policy: policy
     }
+
     %{pod | current_nft_chain: chain, nft_rules_acc: []}
   end
 
   def end_nft_chain(%__MODULE__{current_nft_chain: nil} = pod), do: pod
-  def end_nft_chain(%__MODULE__{current_nft_chain: chain, current_nft: nft,
-                                nft_rules_acc: rules} = pod) do
+
+  def end_nft_chain(
+        %__MODULE__{current_nft_chain: chain, current_nft: nft, nft_rules_acc: rules} = pod
+      ) do
     chain = Map.put(chain, :rules, Enum.reverse(rules))
     nft = %{nft | chains: nft.chains ++ [chain]}
     %{pod | current_nft: nft, current_nft_chain: nil, nft_rules_acc: []}
@@ -442,6 +500,7 @@ defmodule Erlkoenig.Pod.Builder do
   def add_nft_rule(%__MODULE__{current_nft_chain: nil}, _action, _opts) do
     raise CompileError, description: "nft_rule must be inside an output or input block"
   end
+
   def add_nft_rule(%__MODULE__{} = pod, action, opts) do
     rule = {action, Map.new(opts)}
     %{pod | nft_rules_acc: [rule | pod.nft_rules_acc]}
@@ -449,115 +508,146 @@ defmodule Erlkoenig.Pod.Builder do
 
   # --- Validation ---
 
+  @spec validate!(t()) :: t()
   def validate!(%__MODULE__{} = pod) do
     if pod.containers == [] do
       raise CompileError,
         description: "pod #{inspect(pod.name)}: must have at least one container"
     end
 
-    Erlkoenig.Validation.check_uniqueness(pod.containers, :name,
-                                          "container names in pod #{inspect(pod.name)}")
-    :ok
+    Erlkoenig.Validation.check_uniqueness(
+      pod.containers,
+      :name,
+      "container names in pod #{inspect(pod.name)}"
+    )
+
+    pod
   end
 
   # --- Term output ---
 
+  @spec to_term(t()) :: map()
   def to_term(%__MODULE__{} = pod) do
-    containers = Enum.map(pod.containers, fn ct ->
-      ct_term = %{
-        name: ct.name,
-        binary: ct.binary,
-        zone: ct.zone,
-        replicas: ct.replicas,
-        restart: ct.restart,
-        ports: ct.ports,
-        limits: ct.limits,
-        seccomp: ct.seccomp,
-        uid: ct.uid,
-        gid: ct.gid,
-        args: ct.args,
-        caps: ct.caps
-      }
+    containers =
+      Enum.map(pod.containers, fn ct ->
+        ct_term = %{
+          name: ct.name,
+          binary: ct.binary,
+          zone: ct.zone,
+          replicas: ct.replicas,
+          restart: ct.restart,
+          ports: ct.ports,
+          limits: ct.limits,
+          seccomp: ct.seccomp,
+          uid: ct.uid,
+          gid: ct.gid,
+          args: ct.args,
+          caps: ct.caps
+        }
 
-      # Runtime convention is `:image_path` (see erlkoenig_config:build_spawn_opts).
-      # The DSL option is still `image:` for operator ergonomics.
-      ct_term = if ct.image, do: Map.put(ct_term, :image_path, ct.image), else: ct_term
+        # Runtime convention is `:image_path` (see erlkoenig_config:build_spawn_opts).
+        # The DSL option is still `image:` for operator ergonomics.
+        ct_term = if ct.image, do: Map.put(ct_term, :image_path, ct.image), else: ct_term
 
-      ct_term = if ct[:publish] != nil and ct[:publish] != [] do
-        publish_term = Enum.map(ct.publish, fn pub ->
-          %{interval: pub.interval, metrics: pub.metrics}
-        end)
-        Map.put(ct_term, :publish, publish_term)
-      else
+        ct_term =
+          if ct[:publish] != nil and ct[:publish] != [] do
+            publish_term =
+              Enum.map(ct.publish, fn pub ->
+                %{interval: pub.interval, metrics: pub.metrics}
+              end)
+
+            Map.put(ct_term, :publish, publish_term)
+          else
+            ct_term
+          end
+
+        ct_term =
+          if ct[:stream] != nil do
+            stream_term = %{
+              channels: ct.stream.channels,
+              retention_days: ct.stream.retention_days
+            }
+
+            stream_term =
+              if ct.stream.max_bytes,
+                do: Map.put(stream_term, :max_bytes, ct.stream.max_bytes),
+                else: stream_term
+
+            Map.put(ct_term, :stream, stream_term)
+          else
+            ct_term
+          end
+
+        ct_term =
+          if ct[:nft] != nil do
+            Map.put(ct_term, :nft, ct.nft)
+          else
+            ct_term
+          end
+
+        ct_term =
+          if ct[:volumes] != nil and ct[:volumes] != [] do
+            Map.put(ct_term, :volumes, ct.volumes)
+          else
+            ct_term
+          end
+
+        # Capability declarations and their injections.
+        ct_term =
+          if ct[:requires] != nil and ct[:requires] != [] do
+            Map.put(ct_term, :requires, ct.requires)
+          else
+            ct_term
+          end
+
+        ct_term =
+          if ct[:socket_mounts] != nil and ct[:socket_mounts] != [] do
+            Map.put(ct_term, :socket_mounts, ct.socket_mounts)
+          else
+            ct_term
+          end
+
+        ct_term =
+          case ct[:dns_allowlist] do
+            nil -> ct_term
+            [] -> ct_term
+            hosts -> Map.put(ct_term, :dns_allowlist, hosts)
+          end
+
+        ct_term =
+          if ct[:env] != nil and ct[:env] != %{} do
+            Map.put(ct_term, :env, ct.env)
+          else
+            ct_term
+          end
+
+        # Signature gate (SPEC-EK-017). Two shapes:
+        #   signature: :required   → runtime enforces trusted sig against installed roots
+        #   signature: "/path.sig" → explicit detached signature file
+        ct_term =
+          case ct[:signature] do
+            nil ->
+              ct_term
+
+            :required ->
+              Map.put(ct_term, :signature_required, true)
+
+            path when is_binary(path) or is_list(path) ->
+              Map.put(ct_term, :sig_path, to_string(path))
+          end
+
+        # Injected files (SPEC-EK-024 §4). Map of container-path → contents.
+        ct_term =
+          if is_map(ct[:files]) and ct[:files] != %{} do
+            Map.put(ct_term, :files, ct.files)
+          else
+            ct_term
+          end
+
         ct_term
-      end
-
-      ct_term = if ct[:stream] != nil do
-        stream_term = %{channels: ct.stream.channels, retention_days: ct.stream.retention_days}
-        stream_term = if ct.stream.max_bytes, do: Map.put(stream_term, :max_bytes, ct.stream.max_bytes), else: stream_term
-        Map.put(ct_term, :stream, stream_term)
-      else
-        ct_term
-      end
-
-      ct_term = if ct[:nft] != nil do
-        Map.put(ct_term, :nft, ct.nft)
-      else
-        ct_term
-      end
-
-      ct_term = if ct[:volumes] != nil and ct[:volumes] != [] do
-        Map.put(ct_term, :volumes, ct.volumes)
-      else
-        ct_term
-      end
-
-      # Capability declarations and their injections.
-      ct_term = if ct[:requires] != nil and ct[:requires] != [] do
-        Map.put(ct_term, :requires, ct.requires)
-      else
-        ct_term
-      end
-
-      ct_term = if ct[:socket_mounts] != nil and ct[:socket_mounts] != [] do
-        Map.put(ct_term, :socket_mounts, ct.socket_mounts)
-      else
-        ct_term
-      end
-
-      ct_term = case ct[:dns_allowlist] do
-        nil -> ct_term
-        []  -> ct_term
-        hosts -> Map.put(ct_term, :dns_allowlist, hosts)
-      end
-
-      ct_term = if ct[:env] != nil and ct[:env] != %{} do
-        Map.put(ct_term, :env, ct.env)
-      else
-        ct_term
-      end
-
-      # Signature gate (SPEC-EK-017). Two shapes:
-      #   signature: :required   → runtime enforces trusted sig against installed roots
-      #   signature: "/path.sig" → explicit detached signature file
-      ct_term = case ct[:signature] do
-        nil       -> ct_term
-        :required -> Map.put(ct_term, :signature_required, true)
-        path when is_binary(path) or is_list(path) ->
-          Map.put(ct_term, :sig_path, to_string(path))
-      end
-
-      # Injected files (SPEC-EK-024 §4). Map of container-path → contents.
-      ct_term = if is_map(ct[:files]) and ct[:files] != %{} do
-        Map.put(ct_term, :files, ct.files)
-      else
-        ct_term
-      end
-
-      ct_term
-      |> Enum.reject(fn {_k, v} -> v == nil or v == [] or v == %{} end)
-      |> Map.new()
-    end)
+        |> Enum.reject(fn {_k, v} -> v == nil or v == [] or v == %{} end)
+        |> Map.new()
+      end)
 
     %{
       name: pod.name,
@@ -572,27 +662,36 @@ defmodule Erlkoenig.Pod.Builder do
   defp validate_signature!(_name, nil), do: :ok
   defp validate_signature!(_name, :required), do: :ok
   defp validate_signature!(_name, path) when is_binary(path), do: :ok
+
   defp validate_signature!(name, other) do
     raise CompileError,
-      description: "container #{inspect(name)}: signature: must be " <>
-        ":required or a string path, got #{inspect(other)}"
+      description:
+        "container #{inspect(name)}: signature: must be " <>
+          ":required or a string path, got #{inspect(other)}"
   end
 
   defp validate_files!(_name, nil), do: :ok
+
   defp validate_files!(name, files) when is_map(files) do
     Enum.each(files, fn
-      {path, content} when (is_binary(path) or is_list(path)) and
-                            (is_binary(content) or is_list(content)) -> :ok
+      {path, content}
+      when (is_binary(path) or is_list(path)) and
+             (is_binary(content) or is_list(content)) ->
+        :ok
+
       {path, content} ->
         raise CompileError,
-          description: "container #{inspect(name)}: files entry " <>
-            "#{inspect(path)} → #{inspect(content)}: both key and " <>
-            "value must be strings"
+          description:
+            "container #{inspect(name)}: files entry " <>
+              "#{inspect(path)} → #{inspect(content)}: both key and " <>
+              "value must be strings"
     end)
   end
+
   defp validate_files!(name, other) do
     raise CompileError,
-      description: "container #{inspect(name)}: files: must be a map " <>
-        "of \"/path\" => \"contents\", got #{inspect(other)}"
+      description:
+        "container #{inspect(name)}: files: must be a map " <>
+          "of \"/path\" => \"contents\", got #{inspect(other)}"
   end
 end

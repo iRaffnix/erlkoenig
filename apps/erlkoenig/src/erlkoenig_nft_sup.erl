@@ -83,7 +83,7 @@ init([]) ->
         %% 3. NFLOG receiver — optional, won't take down the tree
         #{
             id => erlkoenig_nft_nflog,
-            start => {erlkoenig_nft_nflog, start_link, [1]},
+            start => {erlkoenig_nft_nflog, ensure_started, [1]},
             restart => transient,
             shutdown => 5000,
             type => worker,

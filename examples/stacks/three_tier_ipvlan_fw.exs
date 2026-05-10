@@ -176,6 +176,7 @@ defmodule ThreeTierIpvlanFw do
     # ── Host-Firewall ────────────────────────────────
 
     nft_host do
+      nft_nflog_group 1, name: "host"
       nft_set "ban", :ipv4_addr
       nft_counter "input_drop"
       nft_counter "input_ban"
@@ -203,7 +204,8 @@ defmodule ThreeTierIpvlanFw do
         # (Kapitel 6 Service-Catalogue).
         nft_rule :accept, ip_saddr: {10, 50, 100, 0, 24}, udp_dport: 53
 
-        nft_rule :drop, counter: "input_drop", log_prefix: "HOST: "
+        nft_rule :drop, counter: "input_drop",
+                        log_prefix: "HOST: ", nflog_group: 1
       end
     end
 
@@ -221,6 +223,7 @@ defmodule ThreeTierIpvlanFw do
     #   data-0-postgres: 10.50.100.6
 
     nft_zone do
+      nft_nflog_group 2, name: "zone"
       nft_counter "forward_drop"
 
       # Forward-Policy (priority 0)
@@ -274,7 +277,8 @@ defmodule ThreeTierIpvlanFw do
           ip_protocol: :icmp
 
         # 5. Default: drop + log
-        nft_rule :drop, log_prefix: "FWD: ", counter: "forward_drop"
+        nft_rule :drop, log_prefix: "FWD: ", counter: "forward_drop",
+                        nflog_group: 2
       end
     end
   end

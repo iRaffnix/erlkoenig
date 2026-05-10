@@ -75,6 +75,7 @@ init([]) ->
     %%   ├── erlkoenig_audit
     %%   ├── erlkoenig_pki
     %%   ├── erlkoenig_nft_sup (firewall subtree)
+    %%   ├── erlkoenig_firewall_events (operator-facing event buffer)
     %%   ├── erlkoenig_amqp_sup (optional, AMQP integration, ADR-0014)
     %%   └── erlkoenig_pod_sup_sup (simple_one_for_one for pod supervisors)
     %% `auto_shutdown => any_significant`: the root shuts down cleanly
@@ -165,6 +166,12 @@ init([]) ->
         type => supervisor,
         shutdown => infinity
     },
+    FirewallEventsSpec = #{
+        id => erlkoenig_firewall_events,
+        start => {erlkoenig_firewall_events, start_link, []},
+        restart => permanent,
+        type => worker
+    },
     QuarantineSpec = #{
         id => erlkoenig_quarantine,
         start => {erlkoenig_quarantine, start_link, []},
@@ -211,6 +218,7 @@ init([]) ->
     {ok, {SupFlags, [PgSpec, ZoneSpec, DnsFilterSpec, ZoneSupSpec,
                      CgroupSpec, EventsSpec,
                      HealthSpec, AuditSpec, PkiSpec, NftSupSpec,
+                     FirewallEventsSpec,
                      QuarantineSpec, AdmissionSpec,
                      VolumeStoreSpec, VolumeStatsSpec, PodSupSupSpec
                      | JournalSpecs]}};

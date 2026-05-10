@@ -31,6 +31,10 @@ exports_arity_test() ->
         {volume_orphans, 0},
         {volume_gc_orphans, 1},
         {node_health, 0},
+        {nft_counters, 0},
+        {firewall_status, 0},
+        {firewall_events, 1},
+        {firewall_events_since, 3},
         {container_list, 0},
         {container_inspect, 1},
         {container_stop, 1},
@@ -101,6 +105,14 @@ container_inspect_rejects_non_binary_test() ->
 
 container_stop_rejects_non_binary_test() ->
     R = erlkoenig_operator_api:container_stop("id"),
+    assert_error_code('EK_OPERATOR_BAD_ARGUMENT', R).
+
+firewall_events_rejects_invalid_limit_test() ->
+    R = erlkoenig_operator_api:firewall_events(0),
+    assert_error_code('EK_OPERATOR_BAD_ARGUMENT', R).
+
+firewall_events_since_rejects_invalid_args_test() ->
+    R = erlkoenig_operator_api:firewall_events_since(-1, 0, 10),
     assert_error_code('EK_OPERATOR_BAD_ARGUMENT', R).
 
 %%====================================================================

@@ -12,6 +12,14 @@ defmodule Erlkoenig.Host.Builder do
             chains: [],
             rules_acc: []
 
+  @type t :: %__MODULE__{
+          interfaces: list(),
+          ipvlans: list(),
+          chains: list(),
+          rules_acc: list()
+        }
+
+  @spec new() :: t()
   def new, do: %__MODULE__{}
 
   # --- Interfaces ---
@@ -21,30 +29,39 @@ defmodule Erlkoenig.Host.Builder do
       name: to_string(name),
       zone: Keyword.get(opts, :zone)
     }
+
     %{h | interfaces: ifs ++ [iface]}
   end
 
   # --- IPVLAN ---
 
   def add_ipvlan(%__MODULE__{ipvlans: ipvs} = h, name, opts) do
-    {parent_type, parent_name} = case Keyword.fetch!(opts, :parent) do
-      {:dummy, n}  -> {:dummy, to_string(n)}
-      {:device, n} -> {:device, to_string(n)}
-      n when is_binary(n) or is_atom(n) ->
-        raise CompileError,
-          description: "ipvlan #{inspect(name)}: parent must be {:dummy, name} " <>
-            "or {:device, name}, got #{inspect(n)}"
-    end
+    {parent_type, parent_name} =
+      case Keyword.fetch!(opts, :parent) do
+        {:dummy, n} ->
+          {:dummy, to_string(n)}
 
-    {subnet, netmask} = case Keyword.fetch!(opts, :subnet) do
-      {a, b, c, d, mask} -> {{a, b, c, d}, mask}
-      {a, b, c, d} -> {{a, b, c, d}, 24}
-    end
+        {:device, n} ->
+          {:device, to_string(n)}
+
+        n when is_binary(n) or is_atom(n) ->
+          raise CompileError,
+            description:
+              "ipvlan #{inspect(name)}: parent must be {:dummy, name} " <>
+                "or {:device, name}, got #{inspect(n)}"
+      end
+
+    {subnet, netmask} =
+      case Keyword.fetch!(opts, :subnet) do
+        {a, b, c, d, mask} -> {{a, b, c, d}, mask}
+        {a, b, c, d} -> {{a, b, c, d}, 24}
+      end
 
     if netmask != 24 do
       raise CompileError,
-        description: "ipvlan #{inspect(name)}: only /24 subnets are supported " <>
-          "(got /#{netmask}). erlkoenig_ip_pool allocates from the last octet."
+        description:
+          "ipvlan #{inspect(name)}: only /24 subnets are supported " <>
+            "(got /#{netmask}). erlkoenig_ip_pool allocates from the last octet."
     end
 
     ipv = %{
@@ -56,6 +73,7 @@ defmodule Erlkoenig.Host.Builder do
       ipvlan_mode: Keyword.get(opts, :mode, :l3s),
       gateway: Keyword.get(opts, :gateway)
     }
+
     %{h | ipvlans: ipvs ++ [ipv]}
   end
 
@@ -85,6 +103,7 @@ defmodule Erlkoenig.Host.Builder do
 
   # --- Validation ---
 
+  @spec validate!(t(), [String.t()], [String.t()]) :: t()
   def validate!(%__MODULE__{} = h, pod_names, all_container_names) do
     iface_names = Enum.map(h.interfaces, & &1.name)
     ipvlan_names = Enum.map(h.ipvlans, & &1.name)
@@ -95,56 +114,78 @@ defmodule Erlkoenig.Host.Builder do
         {:rule, _verdict, opts} when is_map(opts) ->
           check_iface_ref(opts, :iif, valid_names, pod_names)
           check_iface_ref(opts, :oif, valid_names, pod_names)
-        _ -> :ok
+
+        _ ->
+          :ok
       end)
     end)
 
-    :ok
+    h
   end
 
   defp check_iface_ref(opts, key, valid_names, pod_names) do
     case Map.get(opts, key) do
-      nil -> :ok
+      nil ->
+        :ok
+
       name when is_binary(name) ->
         # Could be "eth0", "lo", an IPVLAN zone name, or "pod.container"
         # Pod-qualified names (pod.container) are checked separately
         base = name |> String.split(".") |> hd()
+
         unless MapSet.member?(valid_names, name) or
-               MapSet.member?(valid_names, base) or
-               base in pod_names do
+                 MapSet.member?(valid_names, base) or
+                 base in pod_names do
           raise CompileError,
-            description: "rule references unknown interface #{inspect(name)}. " <>
-              "Known: #{inspect(MapSet.to_list(valid_names))}"
+            description:
+              "rule references unknown interface #{inspect(name)}. " <>
+                "Known: #{inspect(MapSet.to_list(valid_names))}"
         end
-      _ -> :ok
+
+      _ ->
+        :ok
     end
   end
 
   # --- Term output ---
 
+  @spec to_term(t()) :: map()
   def to_term(%__MODULE__{} = h) do
     term = %{}
-    term = if h.interfaces != [],
-      do: Map.put(term, :interfaces, h.interfaces),
-      else: term
-    term = case h.ipvlans do
-      [ipv | _] ->
-        net = %{
-          mode: :ipvlan,
-          parent: ipv.parent,
-          parent_type: ipv.parent_type,
-          subnet: ipv.subnet,
-          netmask: ipv.netmask,
-          ipvlan_mode: ipv.ipvlan_mode
-        }
-        net = if ipv.gateway, do: Map.put(net, :gateway, ipv.gateway), else: Map.put(net, :gateway, nil)
-        Map.put(term, :network, net)
-      _ ->
-        term
-    end
-    term = if h.chains != [],
-      do: Map.put(term, :chains, h.chains),
-      else: term
+
+    term =
+      if h.interfaces != [],
+        do: Map.put(term, :interfaces, h.interfaces),
+        else: term
+
+    term =
+      case h.ipvlans do
+        [ipv | _] ->
+          net = %{
+            mode: :ipvlan,
+            parent: ipv.parent,
+            parent_type: ipv.parent_type,
+            subnet: ipv.subnet,
+            netmask: ipv.netmask,
+            ipvlan_mode: ipv.ipvlan_mode
+          }
+
+          net =
+            if ipv.gateway,
+              do: Map.put(net, :gateway, ipv.gateway),
+              else: Map.put(net, :gateway, nil)
+
+          Map.put(term, :network, net)
+
+        _ ->
+          term
+      end
+
+    term =
+      if h.chains != [],
+        do: Map.put(term, :chains, h.chains),
+        else: term
+
     term
   end
 end

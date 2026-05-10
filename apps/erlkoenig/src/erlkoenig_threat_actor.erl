@@ -117,8 +117,7 @@ observing(cast, {connection, DstPort}, Data) ->
             threat_actor_error(suspicious_transition,
                                #{ip => Data2#data.ip,
                                  ports => sets:to_list(Data2#data.ports_seen)}),
-            broadcast({ct_guard_suspect, #{ip => Data2#data.ip,
-                ports => sets:to_list(Data2#data.ports_seen)}}),
+            broadcast_suspect(Data2),
             {next_state, suspicious, Data2,
              [{state_timeout, idle_timeout_ms(Data2#data.config), idle_expire}]};
         clear ->
@@ -308,6 +307,28 @@ broadcast(Msg) ->
                            #{message => Msg, class => C, error => R}),
         ok
     end.
+
+broadcast_suspect(#data{ip = IP, ports_seen = PortsSet, first_seen = FirstSeen,
+                         config = Config}) ->
+    Ports = sets:to_list(PortsSet),
+    Legacy = {ct_guard_suspect, #{ip => IP, ports => Ports}},
+    Canonical = {firewall_event, #{
+        source => threat_actor,
+        severity => notice,
+        kind => scan_suspect,
+        src_ip => IP,
+        reason => distinct_ports_seen,
+        evidence => #{
+            ports => Ports,
+            port_count => length(Ports),
+            window_ms => maps:get(scan_window, Config, 60) * 1000,
+            first_seen => FirstSeen,
+            observed_by => erlkoenig_threat_actor
+        },
+        labels => [firewall, threat, correlation]
+    }},
+    broadcast(Legacy),
+    broadcast(Canonical).
 
 threat_actor_error(suspicious_transition, Data) ->
     erlkoenig_error:emit(

@@ -197,6 +197,7 @@ defmodule ThreeTierIpvlan do
     # ── Host-Firewall ────────────────────────────────
 
     nft_host do
+      nft_nflog_group 1, name: "host"
       nft_set "ban", :ipv4_addr
       nft_counter "input_drop"
       nft_counter "input_ban"
@@ -224,7 +225,8 @@ defmodule ThreeTierIpvlan do
         # siehe Kapitel 6 "Runtime services".
         nft_rule :accept, ip_saddr: {10, 50, 100, 0, 24}, udp_dport: 53
 
-        nft_rule :drop, counter: "input_drop", log_prefix: "HOST: "
+        nft_rule :drop, counter: "input_drop",
+                        log_prefix: "HOST: ", nflog_group: 1
       end
     end
   end

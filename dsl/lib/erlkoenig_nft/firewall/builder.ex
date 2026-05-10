@@ -22,35 +22,73 @@ defmodule ErlkoenigNft.Firewall.Builder do
   Erlang term compatible with `erlkoenig_nft`.
   """
 
+  defstruct name: nil,
+            owner: false,
+            ban_set: nil,
+            sets: [],
+            vmaps: [],
+            counters: [],
+            quotas: [],
+            chains: [],
+            flowtables: [],
+            meters: [],
+            rules_acc: [],
+            zones: [],
+            zone_inputs: [],
+            zone_forwards: [],
+            zone_masquerades: []
+
+  @type t :: %__MODULE__{
+          name: String.t(),
+          owner: boolean(),
+          ban_set: nil | String.t() | map(),
+          sets: list(),
+          vmaps: list(),
+          counters: [String.t()],
+          quotas: list(),
+          chains: list(),
+          flowtables: list(),
+          meters: list(),
+          rules_acc: list(),
+          zones: list(),
+          zone_inputs: list(),
+          zone_forwards: list(),
+          zone_masquerades: list()
+        }
+
   # --- Constructor ---
 
+  @spec new(String.t(), keyword()) :: t()
   def new(name \\ "default", opts \\ [])
 
   def new(name, opts) when is_binary(name) and is_list(opts) do
     owner = Keyword.get(opts, :owner, false)
-    %{name: name, owner: owner, ban_set: nil, sets: [], vmaps: [], counters: [], quotas: [],
-      chains: [], flowtables: [], meters: [], rules_acc: [],
-      zones: [], zone_inputs: [], zone_forwards: [], zone_masquerades: []}
+    %__MODULE__{name: name, owner: owner}
   end
 
   # --- Sets ---
 
+  @spec add_set(t(), String.t(), :ipv4_addr | :ipv6_addr) :: t()
   def add_set(state, name, type) when is_binary(name) and type in [:ipv4_addr, :ipv6_addr] do
-    update_in(state, [:sets], &(&1 ++ [{name, type}]))
+    %{state | sets: state.sets ++ [{name, type}]}
   end
 
-  def add_set(state, name, type, opts) when is_binary(name) and type in [:ipv4_addr, :ipv6_addr] do
+  @spec add_set(t(), String.t(), :ipv4_addr | :ipv6_addr, keyword()) :: t()
+  def add_set(state, name, type, opts)
+      when is_binary(name) and type in [:ipv4_addr, :ipv6_addr] do
     timeout = Keyword.get(opts, :timeout)
     elements = Keyword.get(opts, :elements)
 
     meta =
       %{}
-      |> then(fn m -> if timeout, do: Map.merge(m, %{flags: [:timeout], timeout: timeout}), else: m end)
+      |> then(fn m ->
+        if timeout, do: Map.merge(m, %{flags: [:timeout], timeout: timeout}), else: m
+      end)
       |> then(fn m -> if elements, do: Map.put(m, :elements, elements), else: m end)
 
     case meta do
-      m when m == %{} -> update_in(state, [:sets], &(&1 ++ [{name, type}]))
-      m -> update_in(state, [:sets], &(&1 ++ [{name, type, m}]))
+      m when m == %{} -> %{state | sets: state.sets ++ [{name, type}]}
+      m -> %{state | sets: state.sets ++ [{name, type, m}]}
     end
   end
 
@@ -60,15 +98,17 @@ defmodule ErlkoenigNft.Firewall.Builder do
   Example:
       add_concat_set(state, "allowpairs", [:ipv4_addr, :inet_service])
   """
+  @spec add_concat_set(t(), String.t(), [atom()]) :: t()
   def add_concat_set(state, name, fields) when is_binary(name) and is_list(fields) do
-    update_in(state, [:sets], &(&1 ++ [{name, :concat, %{fields: fields}}]))
+    %{state | sets: state.sets ++ [{name, :concat, %{fields: fields}}]}
   end
 
+  @spec add_concat_set(t(), String.t(), [atom()], keyword()) :: t()
   def add_concat_set(state, name, fields, opts) when is_binary(name) and is_list(fields) do
     timeout = Keyword.get(opts, :timeout)
     base = %{fields: fields}
     meta = if timeout, do: Map.merge(base, %{flags: [:timeout], timeout: timeout}), else: base
-    update_in(state, [:sets], &(&1 ++ [{name, :concat, meta}]))
+    %{state | sets: state.sets ++ [{name, :concat, meta}]}
   end
 
   # --- Verdict Maps ---
@@ -81,11 +121,12 @@ defmodule ErlkoenigNft.Firewall.Builder do
 
   In the DSL, keyword syntax is used: {80, jump: "http_chain"}
   """
+  @spec add_vmap(t(), String.t(), atom(), keyword()) :: t()
   def add_vmap(state, name, type, opts) when is_binary(name) and is_list(opts) do
     entries = Keyword.fetch!(opts, :entries)
     normalized = Enum.map(entries, &normalize_vmap_entry/1)
     vmap = %{name: name, type: type, entries: normalized}
-    update_in(state, [:vmaps], &(&1 ++ [vmap]))
+    %{state | vmaps: state.vmaps ++ [vmap]}
   end
 
   defp normalize_vmap_entry({key, [jump: chain]}), do: {key, {:jump, chain}}
@@ -96,10 +137,12 @@ defmodule ErlkoenigNft.Firewall.Builder do
 
   # --- Counters ---
 
+  @spec add_counters(t(), list()) :: t()
   def add_counters(state, names) when is_list(names) do
     %{state | counters: state.counters ++ Enum.map(names, &to_string/1)}
   end
 
+  @spec set_ban_set(t(), String.t() | keyword()) :: t()
   def set_ban_set(state, name) when is_binary(name) do
     %{state | ban_set: name}
   end
@@ -118,37 +161,41 @@ defmodule ErlkoenigNft.Firewall.Builder do
 
   # --- Quotas ---
 
+  @spec add_quota(t(), atom() | String.t(), integer(), keyword()) :: t()
   def add_quota(state, name, bytes, opts \\ []) when is_integer(bytes) do
     name = if is_atom(name), do: Atom.to_string(name), else: name
     mode = Keyword.get(opts, :mode, :until)
     flags = if mode == :over, do: 1, else: 0
     quota = %{name: name, bytes: bytes, flags: flags}
-    update_in(state, [:quotas], &(&1 ++ [quota]))
+    %{state | quotas: state.quotas ++ [quota]}
   end
 
   # --- Chains ---
 
+  @spec add_chain(t(), String.t(), keyword(), list()) :: t()
   def add_chain(state, name, opts, rules) when is_binary(name) and is_list(rules) do
-    chain = case Keyword.get(opts, :hook) do
-      nil ->
-        # Regular chain (no hook) — used for jump targets
-        base = %{name: name, rules: rules}
-        if Keyword.has_key?(opts, :policy),
-          do: Map.put(base, :policy, Keyword.get(opts, :policy)),
-          else: base
+    chain =
+      case Keyword.get(opts, :hook) do
+        nil ->
+          # Regular chain (no hook) — used for jump targets
+          base = %{name: name, rules: rules}
 
-      hook ->
-        %{
-          name: name,
-          hook: hook,
-          type: Keyword.get(opts, :type, :filter),
-          priority: Keyword.get(opts, :priority, 0),
-          policy: Keyword.fetch!(opts, :policy),
-          rules: rules
-        }
-    end
+          if Keyword.has_key?(opts, :policy),
+            do: Map.put(base, :policy, Keyword.get(opts, :policy)),
+            else: base
 
-    update_in(state, [:chains], &(&1 ++ [chain]))
+        hook ->
+          %{
+            name: name,
+            hook: hook,
+            type: Keyword.get(opts, :type, :filter),
+            priority: Keyword.get(opts, :priority, 0),
+            policy: Keyword.fetch!(opts, :policy),
+            rules: rules
+          }
+      end
+
+    %{state | chains: state.chains ++ [chain]}
   end
 
   # --- Rule constructors ---
@@ -222,7 +269,9 @@ defmodule ErlkoenigNft.Firewall.Builder do
 
   def nflog_capture_udp(port, prefix, group), do: {:nflog_capture_udp, port, prefix, group}
   def set_lookup_udp_accept(set_name, port), do: {:set_lookup_udp_accept, set_name, port}
-  def log_drop_nflog(prefix, group, counter), do: {:log_drop_nflog, prefix, group, to_string(counter)}
+
+  def log_drop_nflog(prefix, group, counter),
+    do: {:log_drop_nflog, prefix, group, to_string(counter)}
 
   def notrack_rule(port, proto), do: {:notrack, port, proto}
 
@@ -257,19 +306,18 @@ defmodule ErlkoenigNft.Firewall.Builder do
     key: :saddr           — per source IP (default)
     limit: {rate, burst: N}
   """
+  @spec add_meter(t(), String.t(), keyword()) :: t()
   def add_meter(state, name, opts) when is_binary(name) and is_list(opts) do
     key = Keyword.get(opts, :key, :saddr)
     {rate, burst_opts} = Keyword.fetch!(opts, :limit)
     burst = if is_list(burst_opts), do: Keyword.fetch!(burst_opts, :burst), else: burst_opts
     meter = %{name: name, key: key, rate: rate, burst: burst}
-    update_in(state, [:meters], fn
-      nil -> [meter]
-      meters -> meters ++ [meter]
-    end)
+    %{state | meters: state.meters ++ [meter]}
   end
 
   # --- Flowtables ---
 
+  @spec add_flowtable(t(), String.t(), keyword()) :: t()
   def add_flowtable(state, name, opts) when is_binary(name) and is_list(opts) do
     ft = %{
       name: name,
@@ -279,12 +327,13 @@ defmodule ErlkoenigNft.Firewall.Builder do
       flags: Keyword.get(opts, :flags, 0)
     }
 
-    update_in(state, [:flowtables], &(&1 ++ [ft]))
+    %{state | flowtables: state.flowtables ++ [ft]}
   end
 
   def flow_offload(flowtable_name) when is_binary(flowtable_name) do
     {:flow_offload, flowtable_name}
   end
+
   def concat_set_lookup(set_name, fields, verdict),
     do: {:concat_set_lookup, set_name, fields, verdict}
 
@@ -296,21 +345,25 @@ defmodule ErlkoenigNft.Firewall.Builder do
 
   # --- Zone accumulators ---
 
+  @spec add_zone(t(), String.t(), keyword()) :: t()
   def add_zone(state, name, opts) when is_binary(name) do
     interfaces = Keyword.fetch!(opts, :interfaces)
-    update_in(state, [:zones], &(&1 ++ [{name, interfaces}]))
+    %{state | zones: state.zones ++ [{name, interfaces}]}
   end
 
+  @spec add_zone_input(t(), String.t(), atom(), list()) :: t()
   def add_zone_input(state, zone_name, policy, rules) do
-    update_in(state, [:zone_inputs], &(&1 ++ [{zone_name, policy, rules}]))
+    %{state | zone_inputs: state.zone_inputs ++ [{zone_name, policy, rules}]}
   end
 
+  @spec add_zone_forward(t(), String.t(), String.t(), atom(), list()) :: t()
   def add_zone_forward(state, from, to, policy, rules) do
-    update_in(state, [:zone_forwards], &(&1 ++ [{from, to, policy, rules}]))
+    %{state | zone_forwards: state.zone_forwards ++ [{from, to, policy, rules}]}
   end
 
+  @spec add_zone_masquerade(t(), String.t(), String.t()) :: t()
   def add_zone_masquerade(state, from, to) do
-    update_in(state, [:zone_masquerades], &(&1 ++ [{from, to}]))
+    %{state | zone_masquerades: state.zone_masquerades ++ [{from, to}]}
   end
 
   # --- Generic rule builder ---
@@ -336,9 +389,10 @@ defmodule ErlkoenigNft.Firewall.Builder do
   Returns an Erlang term tuple understood by erlkoenig_firewall_nft:compile_rule/1.
   """
   def build_rule(verdict, opts) when is_atom(verdict) and is_list(opts) do
-    {:rule, verdict, Map.new(opts, fn
-      {k, v} when is_atom(k) -> {k, normalize_rule_opt(k, v)}
-    end)}
+    {:rule, verdict,
+     Map.new(opts, fn
+       {k, v} when is_atom(k) -> {k, normalize_rule_opt(k, v)}
+     end)}
   end
 
   # -- Matches (read kernel state) --
@@ -367,12 +421,15 @@ defmodule ErlkoenigNft.Firewall.Builder do
   defp normalize_rule_opt(:log, v), do: to_string(v)
   defp normalize_rule_opt(:nflog, v) when is_integer(v), do: v
   defp normalize_rule_opt(:ct_mark_set, v) when is_integer(v), do: v
+
   defp normalize_rule_opt(:limit, {rate, burst_opts}) when is_list(burst_opts) do
     %{rate: rate, burst: Keyword.fetch!(burst_opts, :burst)}
   end
+
   defp normalize_rule_opt(:limit, {rate, burst}) when is_integer(burst) do
     %{rate: rate, burst: burst}
   end
+
   defp normalize_rule_opt(:flowtable, v), do: to_string(v)
   defp normalize_rule_opt(:chain, v), do: to_string(v)
 
@@ -380,15 +437,19 @@ defmodule ErlkoenigNft.Firewall.Builder do
 
   # --- Rule accumulator (used by chain macro) ---
 
+  @spec push_rule(t(), term()) :: t()
   def push_rule(state, rule) do
-    update_in(state, [:rules_acc], &(&1 ++ [rule]))
+    %{state | rules_acc: state.rules_acc ++ [rule]}
   end
 
   @doc "Push a rule and auto-register any counter it references."
   def push_rule_with_counter(state, rule) do
     state = push_rule(state, rule)
+
     case extract_counter(rule) do
-      nil -> state
+      nil ->
+        state
+
       name ->
         if name in state.counters, do: state, else: add_counters(state, [name])
     end
@@ -398,12 +459,14 @@ defmodule ErlkoenigNft.Firewall.Builder do
   defp extract_counter({_, _, counter}) when is_binary(counter), do: counter
   defp extract_counter(_), do: nil
 
+  @spec take_rules(t()) :: {list(), t()}
   def take_rules(state) do
     {state.rules_acc, %{state | rules_acc: []}}
   end
 
   # --- Serialization ---
 
+  @spec to_term(t()) :: map()
   def to_term(state) do
     state = expand_zones(state)
     validate_jump_targets!(state)
@@ -424,6 +487,7 @@ defmodule ErlkoenigNft.Firewall.Builder do
     base
   end
 
+  @spec write!(t(), Path.t()) :: :ok
   def write!(state, path) do
     term = to_term(state)
     formatted = :io_lib.format(~c"~tp.~n", [term])
@@ -650,6 +714,7 @@ defmodule ErlkoenigNft.Firewall.Builder do
       Enum.each(entries, fn
         {_key, {:jump, target}} ->
           target_str = to_string(target)
+
           unless MapSet.member?(chain_names, target_str) do
             raise "vmap #{inspect(vmap_name)}: jump target #{inspect(target_str)} " <>
                     "is not a defined chain. " <>
@@ -658,6 +723,7 @@ defmodule ErlkoenigNft.Firewall.Builder do
 
         {_key, {:goto, target}} ->
           target_str = to_string(target)
+
           unless MapSet.member?(chain_names, target_str) do
             raise "vmap #{inspect(vmap_name)}: goto target #{inspect(target_str)} " <>
                     "is not a defined chain. " <>
@@ -677,6 +743,7 @@ defmodule ErlkoenigNft.Firewall.Builder do
       Enum.each(rules, fn
         {:jump, target} ->
           target_str = to_string(target)
+
           unless MapSet.member?(chain_names, target_str) do
             raise "chain #{inspect(chain_name)}: jump target #{inspect(target_str)} " <>
                     "is not a defined chain. " <>
@@ -685,6 +752,7 @@ defmodule ErlkoenigNft.Firewall.Builder do
 
         {:goto, target} ->
           target_str = to_string(target)
+
           unless MapSet.member?(chain_names, target_str) do
             raise "chain #{inspect(chain_name)}: goto target #{inspect(target_str)} " <>
                     "is not a defined chain. " <>
@@ -693,6 +761,7 @@ defmodule ErlkoenigNft.Firewall.Builder do
 
         {:iifname_jump, _iface, target} ->
           target_str = to_string(target)
+
           unless MapSet.member?(chain_names, target_str) do
             raise "chain #{inspect(chain_name)}: iifname_jump target #{inspect(target_str)} " <>
                     "is not a defined chain. " <>
@@ -701,6 +770,7 @@ defmodule ErlkoenigNft.Firewall.Builder do
 
         {:iifname_oifname_jump, _in, _out, target} ->
           target_str = to_string(target)
+
           unless MapSet.member?(chain_names, target_str) do
             raise "chain #{inspect(chain_name)}: iifname_oifname_jump target #{inspect(target_str)} " <>
                     "is not a defined chain. " <>

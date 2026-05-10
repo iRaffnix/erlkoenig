@@ -10,7 +10,7 @@
         erlkoenig_node_state,
         %% Firewall engine (merged from erlkoenig_nft)
         erlkoenig_nft_sup, erlkoenig_nft_srv, erlkoenig_nft_firewall,
-        erlkoenig_nft_watch_sup
+        erlkoenig_nft_watch_sup, erlkoenig_firewall_events
     ]},
     {mod, {erlkoenig_app, []}},
     {applications, [

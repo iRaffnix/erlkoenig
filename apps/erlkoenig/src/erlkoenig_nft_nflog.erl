@@ -38,7 +38,7 @@ Events are broadcast via pg group `nflog_events`:
 %% Exposed for fuzzing / property tests.  Pure functions — no side
 %% effects.  Do not call from production code; use the gen_server
 %% interface instead.
--export([parse_packet/1, parse_ip_packet/2, process_messages/1]).
+-export([parse_packet/1, parse_ip_packet/2, process_messages/1, process_messages/2]).
 
 -include("nft_constants.hrl").
 
@@ -100,7 +100,7 @@ init(Group) ->
     case open_nflog_socket(Group) of
         {ok, Sock} ->
             %% Start async recv loop
-            request_recv(Sock),
+            request_recv(Sock, Group),
             {ok, #{socket => Sock, group => Group}};
         {error, Reason} ->
             {stop, {nflog_open_failed, Reason}}
@@ -112,9 +112,9 @@ handle_call(_Req, _From, State) ->
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
-handle_info({'$socket', Sock, select, _Ref}, #{socket := Sock} = State) ->
-    recv_loop(Sock),
-    request_recv(Sock),
+handle_info({'$socket', Sock, select, _Ref}, #{socket := Sock, group := Group} = State) ->
+    recv_loop(Sock, Group),
+    request_recv(Sock, Group),
     {noreply, State};
 handle_info(_Info, State) ->
     {noreply, State}.
@@ -124,12 +124,12 @@ terminate(_Reason, #{socket := Sock}) ->
 
 %% --- Internal: recv ---
 
--spec request_recv(socket:socket()) -> ok.
-request_recv(Sock) ->
+-spec request_recv(socket:socket(), non_neg_integer()) -> ok.
+request_recv(Sock, Group) ->
     case socket:recv(Sock, 0, nowait) of
         {ok, Data} ->
-            process_messages(Data),
-            request_recv(Sock);
+            process_messages(Data, Group),
+            request_recv(Sock, Group);
         {select, _SelectInfo} ->
             ok;
         {error, Reason} ->
@@ -137,12 +137,12 @@ request_recv(Sock) ->
             ok
     end.
 
--spec recv_loop(socket:socket()) -> ok.
-recv_loop(Sock) ->
+-spec recv_loop(socket:socket(), non_neg_integer()) -> ok.
+recv_loop(Sock, Group) ->
     case socket:recv(Sock, 0, nowait) of
         {ok, Data} ->
-            process_messages(Data),
-            recv_loop(Sock);
+            process_messages(Data, Group),
+            recv_loop(Sock, Group);
         {select, _} ->
             ok;
         {error, Reason} ->
@@ -159,39 +159,76 @@ open_nflog_socket(Group) ->
 %% --- Internal: Message processing ---
 
 -spec process_messages(binary()) -> ok.
-process_messages(<<>>) ->
+process_messages(Bin) ->
+    process_messages(Bin, unknown).
+
+-spec process_messages(binary(), non_neg_integer() | unknown) -> ok.
+process_messages(<<>>, _Group) ->
     ok;
-process_messages(
-    <<Len:32/little, Type:16/little, _Flags:16/little, _Seq:32/little, _Pid:32/little, Rest/binary>>
+process_messages(Bin, Group) ->
+    process_messages_loop(Bin, Group).
+
+process_messages_loop(<<>>, _Group) ->
+    ok;
+process_messages_loop(
+    <<Len:32/little, Type:16/little, _Flags:16/little, _Seq:32/little, _Pid:32/little, Rest/binary>>,
+    Group
 ) when
     Len >= 20
 ->
     Subsys = Type bsr 8,
     MsgType = Type band 16#FF,
     PayloadLen = Len - 16,
+    AlignedPayloadLen = align4(Len) - 16,
     case byte_size(Rest) >= PayloadLen of
         true ->
-            <<Payload:PayloadLen/binary, Tail/binary>> = Rest,
+            {Payload, Tail} = split_payload(Rest, PayloadLen, AlignedPayloadLen),
             case {Subsys, MsgType} of
                 {?NFNL_SUBSYS_ULOG, ?NFULNL_MSG_PACKET} ->
-                    <<_:4/binary, AttrBin/binary>> = Payload,
-                    %% nfnl_attr:decode may raise on malformed NLA.
-                    %% Skip the individual message and keep draining.
-                    try
-                        Attrs = nfnl_attr:decode(AttrBin),
-                        Event = parse_packet(Attrs),
-                        erlkoenig_nft_events:notify_nflog({nflog_event, Event})
-                    catch _:_ -> ok
-                    end;
+                    process_nflog_packet(Group, Payload);
                 _ ->
                     ok
             end,
-            process_messages(Tail);
+            process_messages_loop(Tail, Group);
         false ->
             ok
     end;
-process_messages(_) ->
+process_messages_loop(_, _Group) ->
     ok.
+
+split_payload(Rest, PayloadLen, AlignedPayloadLen)
+  when byte_size(Rest) >= AlignedPayloadLen ->
+    PadLen = AlignedPayloadLen - PayloadLen,
+    <<Payload:PayloadLen/binary, _Pad:PadLen/binary, Tail/binary>> = Rest,
+    {Payload, Tail};
+split_payload(Rest, PayloadLen, _AlignedPayloadLen) ->
+    <<Payload:PayloadLen/binary, Tail/binary>> = Rest,
+    {Payload, Tail}.
+
+align4(N) ->
+    (N + 3) band bnot 3.
+
+process_nflog_packet(Group, Payload) when byte_size(Payload) >= 4 ->
+    <<_:4/binary, AttrBin/binary>> = Payload,
+    %% nfnl_attr:decode may raise on malformed NLA. Skip the
+    %% individual message and keep draining the kernel socket.
+    try
+        Attrs = nfnl_attr:decode(AttrBin),
+        Event0 = parse_packet(Attrs),
+        Event = enrich_group_metadata(Group, Event0),
+        erlkoenig_nft_events:notify_nflog({nflog_event, Event})
+    catch _:_ -> ok
+    end;
+process_nflog_packet(_Group, _Payload) ->
+    ok.
+
+enrich_group_metadata(Group, Event) ->
+    case erlkoenig_nft_nflog_registry:lookup(Group) of
+        {ok, Meta} ->
+            maps:merge(Event, Meta);
+        error ->
+            Event
+    end.
 
 -spec parse_packet([{char(), binary()} | {char(), nested, [any()]}]) ->
     #{
@@ -236,10 +273,14 @@ parse_ip_packet(
     M,
     <<4:4, IHL:4, _TOS:8, TotalLen:16/big, _ID:16, _FragOff:16, _TTL:8, Proto:8, _Checksum:16,
         SrcA:8, SrcB:8, SrcC:8, SrcD:8, DstA:8, DstB:8, DstC:8, DstD:8, Rest/binary>>
-) ->
+) when IHL >= 5 ->
+    SrcRaw = <<SrcA, SrcB, SrcC, SrcD>>,
+    DstRaw = <<DstA, DstB, DstC, DstD>>,
     Src = iolist_to_binary(erlkoenig_nft_ip:format(<<SrcA, SrcB, SrcC, SrcD>>)),
     Dst = iolist_to_binary(erlkoenig_nft_ip:format(<<DstA, DstB, DstC, DstD>>)),
-    M1 = M#{src => Src, dst => Dst, len => TotalLen, proto => proto_name(Proto)},
+    M1 = M#{src => Src, dst => Dst,
+            src_raw => SrcRaw, dst_raw => DstRaw,
+            len => TotalLen, proto => proto_name(Proto)},
     HeaderLen = IHL * 4,
     Skip = HeaderLen - 20,
     case {Proto, Rest} of
@@ -260,6 +301,8 @@ parse_ip_packet(
     M1 = M#{
         src => SrcStr,
         dst => DstStr,
+        src_raw => Src,
+        dst_raw => Dst,
         len => 40 + PayloadLen,
         proto => proto_name(NextHeader)
     },

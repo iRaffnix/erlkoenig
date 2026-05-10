@@ -57,25 +57,36 @@ defmodule ErlkoenigNft.Guard.Builder do
   config map via `to_term/1`.
   """
 
+  defstruct detectors: [],
+            honeypot_ports: [],
+            ban_duration: 3600,
+            honeypot_ban_duration: 86400,
+            escalation: [3600, 21600, 86400, 604_800],
+            suspect_after: 3,
+            suspect_by: :distinct_ports,
+            probation: 120,
+            forget_after: 300,
+            allowlist: [{127, 0, 0, 1}],
+            cleanup_interval: 30_000
+
+  @type t :: %__MODULE__{
+          detectors: list(),
+          honeypot_ports: [integer()],
+          ban_duration: pos_integer(),
+          honeypot_ban_duration: pos_integer(),
+          escalation: [pos_integer()],
+          suspect_after: pos_integer(),
+          suspect_by: atom(),
+          probation: pos_integer(),
+          forget_after: pos_integer(),
+          allowlist: [tuple()],
+          cleanup_interval: pos_integer()
+        }
+
   @doc "Create a new builder with default detect/respond/allowlist settings."
+  @spec new() :: t()
   def new do
-    %{
-      # detect block
-      detectors: [],
-      honeypot_ports: [],
-      # respond block
-      ban_duration: 3600,
-      honeypot_ban_duration: 86400,
-      escalation: [3600, 21600, 86400, 604800],
-      suspect_after: 3,
-      suspect_by: :distinct_ports,
-      probation: 120,
-      forget_after: 300,
-      # allowlist
-      allowlist: [{127, 0, 0, 1}],
-      # internal
-      cleanup_interval: 30_000
-    }
+    %__MODULE__{}
   end
 
   # ── detect block ──────────────────────────────
@@ -102,8 +113,12 @@ defmodule ErlkoenigNft.Guard.Builder do
 
   @doc "Legacy: add a detector by type atom (`:conn_flood`, `:port_scan`, `:slow_scan`)."
   def add_detector(state, :conn_flood, threshold, window), do: add_flood(state, threshold, window)
-  def add_detector(state, :port_scan, threshold, window), do: add_port_scan(state, threshold, window)
-  def add_detector(state, :slow_scan, threshold, window), do: add_slow_scan(state, threshold, window)
+
+  def add_detector(state, :port_scan, threshold, window),
+    do: add_port_scan(state, threshold, window)
+
+  def add_detector(state, :slow_scan, threshold, window),
+    do: add_slow_scan(state, threshold, window)
 
   # ── respond block ─────────────────────────────
 
@@ -161,7 +176,11 @@ defmodule ErlkoenigNft.Guard.Builder do
 
   # ── compile ──────────────────────────────────
 
+  @spec validate!(t()) :: t()
+  def validate!(%__MODULE__{} = state), do: state
+
   @doc "Compile the builder state into a flat config map for `ct_guard`."
+  @spec to_term(t()) :: map()
   def to_term(state) do
     base = %{
       ban_duration: state.ban_duration,
@@ -175,11 +194,12 @@ defmodule ErlkoenigNft.Guard.Builder do
       cleanup_interval: state.cleanup_interval
     }
 
-    base = if state.honeypot_ports != [] do
-      Map.put(base, :honeypot_ports, state.honeypot_ports)
-    else
-      base
-    end
+    base =
+      if state.honeypot_ports != [] do
+        Map.put(base, :honeypot_ports, state.honeypot_ports)
+      else
+        base
+      end
 
     Enum.reduce(state.detectors, base, fn
       {type, threshold, window}, acc ->

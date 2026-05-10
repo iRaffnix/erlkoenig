@@ -1387,6 +1387,33 @@ defmodule StackTest do
       assert t.owner == :host
     end
 
+    test "nft_host emits explicit nft_nflog_group metadata" do
+      [{mod, _}] =
+        Code.compile_string(~S"""
+        defmodule TestStack.NftHostNflog do
+          use Erlkoenig.Stack
+
+          nft_host do
+            nft_nflog_group 1, name: "host"
+
+            base_chain "input", hook: :input, type: :filter,
+              priority: :filter, policy: :drop do
+              nft_rule :drop, counter: "input_drop",
+                log_prefix: "HOST: ", nflog_group: 1
+            end
+
+            nft_counter "input_drop"
+          end
+        end
+        """)
+
+      [t] = mod.config().nft_tables
+      assert t.nflog_groups == [%{group: 1, name: "host"}]
+      [chain] = t.chains
+      [{:drop, opts}] = chain.rules
+      assert opts.nflog_group == 1
+    end
+
     test "nft_zone emits table erlkoenig_zone with owner :zone" do
       [{mod, _}] =
         Code.compile_string(~S"""
@@ -1525,6 +1552,49 @@ defmodule StackTest do
         end
         """)
       end
+    end
+  end
+
+  describe "regression: container nft macro context" do
+    test "bare container after nft container resets the compile-time nft context" do
+      [{mod, _}] =
+        Code.compile_string(~S"""
+        defmodule TestStack.ContainerNftContextReset do
+          use Erlkoenig.Stack
+
+          host do
+            ipvlan "net", parent: {:dummy, "ek_net"}, subnet: {10, 9, 0, 0, 24}
+          end
+
+          pod "p", strategy: :one_for_one do
+            container "a", binary: "/opt/a", zone: "net", restart: :permanent do
+              nft do
+                input policy: :drop do
+                  nft_rule :accept
+                end
+              end
+            end
+
+            container "b", binary: "/opt/b", zone: "net", restart: :permanent
+
+            container "c", binary: "/opt/c", zone: "net", restart: :permanent do
+              nft do
+                output policy: :drop do
+                  nft_rule :drop
+                end
+              end
+            end
+          end
+        end
+        """)
+
+      [pod] = mod.config().pods
+      [a, b, c] = pod.containers
+
+      assert a.nft.owner == :in_container
+      refute Map.has_key?(b, :nft)
+      assert c.nft.owner == :in_container
+      assert [%{rules: [{:drop, %{}}]}] = c.nft.chains
     end
   end
 end

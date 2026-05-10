@@ -295,7 +295,7 @@ defmodule Erlkoenig.Nft.DslTest do
         |> TableBuilder.add_counter("ok_ctr")
         |> TableBuilder.add_chain(c)
 
-      assert :ok = TableBuilder.validate!(t)
+      assert TableBuilder.validate!(t) == t
     end
 
     test "rejects vmap :jump to undeclared chain" do
@@ -346,7 +346,7 @@ defmodule Erlkoenig.Nft.DslTest do
           {<<10, 0, 0, 1>>, {:jump, "target"}}
         ])
 
-      assert :ok = TableBuilder.validate!(t)
+      assert TableBuilder.validate!(t) == t
     end
 
     test "rejects duplicate set names" do
@@ -436,7 +436,7 @@ defmodule Erlkoenig.Nft.DslTest do
           {<<10, 0, 0, 1>>, :accept}
         ])
 
-      assert :ok = TableBuilder.validate!(t)
+      assert TableBuilder.validate!(t) == t
     end
   end
 
@@ -481,6 +481,19 @@ defmodule Erlkoenig.Nft.DslTest do
       assert term.maps != nil
       assert term.vmaps != nil
       assert term.flowtables != nil
+    end
+
+    test "nflog groups surface when populated" do
+      c = ChainBuilder.new_base("input", hook: :input, type: :filter, priority: 0, policy: :drop)
+
+      t =
+        TableBuilder.new(:inet, "t", owner: :host)
+        |> TableBuilder.add_nflog_group(1, name: "host")
+        |> TableBuilder.add_chain(c)
+
+      term = TableBuilder.to_term(t)
+
+      assert term.nflog_groups == [%{group: 1, name: "host"}]
     end
   end
 
@@ -595,6 +608,58 @@ defmodule Erlkoenig.Nft.DslTest do
       end
     end
 
+    test "logged rules must reference declared nflog groups" do
+      c =
+        ChainBuilder.new_base("input", hook: :input, type: :filter, priority: 0, policy: :drop)
+        |> ChainBuilder.add_rule(:drop, counter: "input_drop", log_prefix: "HOST: ")
+
+      t =
+        TableBuilder.new(:inet, "t", owner: :host)
+        |> TableBuilder.add_counter("input_drop")
+        |> TableBuilder.add_chain(c)
+
+      assert_raise CompileError, ~r/logged nft_rule must declare nflog_group/, fn ->
+        TableBuilder.validate!(t)
+      end
+    end
+
+    test "nflog group references must be declared in the table" do
+      c =
+        ChainBuilder.new_base("input", hook: :input, type: :filter, priority: 0, policy: :drop)
+        |> ChainBuilder.add_rule(:drop,
+          counter: "input_drop",
+          log_prefix: "HOST: ",
+          nflog_group: 1
+        )
+
+      t =
+        TableBuilder.new(:inet, "t", owner: :host)
+        |> TableBuilder.add_counter("input_drop")
+        |> TableBuilder.add_chain(c)
+
+      assert_raise CompileError, ~r/nft_nflog_group 1/, fn ->
+        TableBuilder.validate!(t)
+      end
+    end
+
+    test "declared nflog groups satisfy logged rules" do
+      c =
+        ChainBuilder.new_base("input", hook: :input, type: :filter, priority: 0, policy: :drop)
+        |> ChainBuilder.add_rule(:drop,
+          counter: "input_drop",
+          log_prefix: "HOST: ",
+          nflog_group: 1
+        )
+
+      t =
+        TableBuilder.new(:inet, "t", owner: :host)
+        |> TableBuilder.add_counter("input_drop")
+        |> TableBuilder.add_nflog_group(1, name: "host")
+        |> TableBuilder.add_chain(c)
+
+      assert TableBuilder.validate!(t) == t
+    end
+
     test "validate! raises on mixed ownership inside one table" do
       base = %{
         ChainBuilder.new_base("a", hook: :input, type: :filter, priority: 0, policy: :drop)
@@ -637,7 +702,7 @@ defmodule Erlkoenig.Nft.DslTest do
         |> TableBuilder.add_chain(base)
         |> TableBuilder.add_chain(reg)
 
-      assert TableBuilder.validate!(t) == :ok
+      assert TableBuilder.validate!(t) == t
     end
 
     test "jump rule whose target is missing raises with §4.4 reference" do
@@ -684,7 +749,7 @@ defmodule Erlkoenig.Nft.DslTest do
         |> TableBuilder.add_chain(block_b_jumper)
 
       # Block A on its own is fine.
-      assert TableBuilder.validate!(block_a) == :ok
+      assert TableBuilder.validate!(block_a) == block_a
 
       # Block B on its own fails — same-owner different-block does
       # not share the pool. The diagnostic must spell that out so

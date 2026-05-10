@@ -29,6 +29,8 @@ Events broadcast to the `counter_events` pg group:
 
     {counter_event, Name, #{
         name     => <<"ssh">>,
+        table    => <<"erlkoenig_host">>,
+        table_owner => host,
         packets  => 42,         %% delta since last poll
         bytes    => 3360,       %% delta since last poll
         total_packets => 1000,  %% cumulative kernel value
@@ -44,6 +46,8 @@ Threshold alerts:
 """.
 
 -behaviour(gen_server).
+
+-include("nft_tables.hrl").
 
 -export([start_link/1]).
 
@@ -121,6 +125,8 @@ init(Config) ->
         prev_bytes => PrevBytes,
         last_rate => #{
             name => Name,
+            table => Table,
+            table_owner => table_owner(Table),
             packets => 0,
             bytes => 0,
             total_packets => PrevPkts,
@@ -168,6 +174,8 @@ handle_info(
             NewHistory = lists:sublist([Pps | History], ?HISTORY_LEN),
             Rate = #{
                 name => Name,
+                table => Table,
+                table_owner => table_owner(Table),
                 packets => DeltaPkts,
                 bytes => DeltaBytes,
                 total_packets => CurPkts,
@@ -207,6 +215,11 @@ terminate(_Reason, #{timer_ref := Ref}) ->
     ok.
 
 %% --- Internal ---
+
+table_owner(?EK_NFT_TABLE_HOST) -> host;
+table_owner(?EK_NFT_TABLE_ZONE) -> zone;
+table_owner(?EK_NFT_TABLE_CT) -> ct;
+table_owner(_) -> unknown.
 
 -spec check_thresholds(binary(), [threshold()], map()) -> ok.
 check_thresholds(_Name, [], _Rate) ->

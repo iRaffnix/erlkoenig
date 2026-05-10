@@ -13,11 +13,15 @@ defmodule Erlkoenig.Nft.ChainBuilder do
   """
 
   defstruct name: nil,
-            type: :regular,   # :base or :regular
+            # :base or :regular
+            type: :regular,
             hook: nil,
-            chain_type: nil,  # :filter, :nat, :route
-            priority: nil,    # :filter, :dstnat, :srcnat, or integer
-            policy: nil,      # :accept, :drop
+            # :filter, :nat, :route
+            chain_type: nil,
+            # :filter, :dstnat, :srcnat, or integer
+            priority: nil,
+            # :accept, :drop
+            policy: nil,
             rules: [],
             # Spec §7 owner-model: chains do not accept an owner
             # argument from the operator. The TableBuilder stamps
@@ -28,11 +32,39 @@ defmodule Erlkoenig.Nft.ChainBuilder do
   @valid_types [:filter, :nat, :route]
   @valid_priorities [:filter, :dstnat, :srcnat, :mangle, :security, :raw]
   @valid_policies [:accept, :drop]
-  @valid_actions [:accept, :drop, :return, :jump, :masquerade, :reject,
-                  :notrack, :ct_mark_set, :ct_mark_match, :snat, :dnat,
-                  :dnat_lb, :dnat_jhash, :flow_offload,
-                  :fib_rpf, :connlimit_drop, :vmap_dispatch, :vmap_lookup]
+  @valid_actions [
+    :accept,
+    :drop,
+    :return,
+    :jump,
+    :masquerade,
+    :reject,
+    :notrack,
+    :ct_mark_set,
+    :ct_mark_match,
+    :snat,
+    :dnat,
+    :dnat_lb,
+    :dnat_jhash,
+    :flow_offload,
+    :fib_rpf,
+    :connlimit_drop,
+    :vmap_dispatch,
+    :vmap_lookup
+  ]
 
+  @type t :: %__MODULE__{
+          name: String.t() | atom() | nil,
+          type: :base | :regular,
+          hook: atom() | nil,
+          chain_type: atom() | nil,
+          priority: atom() | integer() | nil,
+          policy: atom() | nil,
+          rules: list(),
+          owner: atom() | nil
+        }
+
+  @spec new_base(String.t() | atom(), keyword()) :: t()
   def new_base(name, opts) do
     hook = Keyword.fetch!(opts, :hook)
     type = Keyword.fetch!(opts, :type)
@@ -40,16 +72,23 @@ defmodule Erlkoenig.Nft.ChainBuilder do
     policy = Keyword.fetch!(opts, :policy)
 
     unless hook in @valid_hooks do
-      raise CompileError, description: "base_chain #{inspect(name)}: invalid hook #{inspect(hook)}"
+      raise CompileError,
+        description: "base_chain #{inspect(name)}: invalid hook #{inspect(hook)}"
     end
+
     unless type in @valid_types do
-      raise CompileError, description: "base_chain #{inspect(name)}: invalid type #{inspect(type)}"
+      raise CompileError,
+        description: "base_chain #{inspect(name)}: invalid type #{inspect(type)}"
     end
+
     unless priority in @valid_priorities or is_integer(priority) do
-      raise CompileError, description: "base_chain #{inspect(name)}: invalid priority #{inspect(priority)}"
+      raise CompileError,
+        description: "base_chain #{inspect(name)}: invalid priority #{inspect(priority)}"
     end
+
     unless policy in @valid_policies do
-      raise CompileError, description: "base_chain #{inspect(name)}: invalid policy #{inspect(policy)}"
+      raise CompileError,
+        description: "base_chain #{inspect(name)}: invalid policy #{inspect(policy)}"
     end
 
     %__MODULE__{
@@ -62,13 +101,16 @@ defmodule Erlkoenig.Nft.ChainBuilder do
     }
   end
 
+  @spec new_regular(String.t() | atom()) :: t()
   def new_regular(name) do
     %__MODULE__{name: name, type: :regular}
   end
 
+  @spec add_rule(t(), atom(), keyword()) :: t()
   def add_rule(%__MODULE__{rules: rs} = c, action, opts) when is_list(opts) do
     unless action in @valid_actions do
-      raise CompileError, description: "chain #{inspect(c.name)}: invalid action #{inspect(action)}"
+      raise CompileError,
+        description: "chain #{inspect(c.name)}: invalid action #{inspect(action)}"
     end
 
     if action == :jump and not Keyword.has_key?(opts, :to) do
@@ -89,6 +131,30 @@ defmodule Erlkoenig.Nft.ChainBuilder do
   def add_conn_limit(%__MODULE__{} = chain, opts) when is_list(opts) do
     {action, rule_opts} = compile_conn_limit!(opts)
     add_rule(chain, action, rule_opts)
+  end
+
+  @spec validate!(t()) :: t()
+  def validate!(%__MODULE__{} = chain), do: chain
+
+  @spec to_term(t()) :: map()
+  def to_term(%__MODULE__{type: :base} = chain) do
+    %{
+      name: chain.name,
+      owner: chain.owner,
+      hook: chain.hook,
+      type: chain.chain_type,
+      priority: chain.priority,
+      policy: chain.policy,
+      rules: chain.rules
+    }
+  end
+
+  def to_term(%__MODULE__{} = chain) do
+    %{
+      name: chain.name,
+      owner: chain.owner,
+      rules: chain.rules
+    }
   end
 
   @doc false

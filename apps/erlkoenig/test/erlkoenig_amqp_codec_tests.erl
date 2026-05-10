@@ -70,6 +70,40 @@ ct_guard_unban_failed_test() ->
     ?assertEqual(<<"EK_THREAT_KERNEL_UNBAN_REJECTED">>,
                  maps:get(<<"code">>, Payload)).
 
+canonical_firewall_event_routes_to_packet_family_test() ->
+    {ok, Key, Payload} =
+        erlkoenig_amqp_codec:encode_payload(
+          {firewall_event, #{kind => firewall_packet,
+                             source => nflog,
+                             chain => <<"input">>,
+                             src_ip => {203, 0, 113, 44},
+                             dst_port => 22,
+                             evidence => #{len => 60,
+                                           src_raw => <<203, 0, 113, 44>>,
+                                           dst_raw => <<10, 0, 0, 1>>}}}),
+
+    ?assertEqual(<<"firewall.input.packet">>, Key),
+    ?assertEqual(<<"firewall_packet">>, maps:get(<<"kind">>, Payload)),
+    ?assertEqual(<<"nflog">>, maps:get(<<"source">>, Payload)),
+    ?assertEqual(<<"203.0.113.44">>, maps:get(<<"src_ip">>, Payload)),
+    ?assertEqual(22, maps:get(<<"dst_port">>, Payload)),
+    Evidence = maps:get(<<"evidence">>, Payload),
+    ?assertEqual(60, maps:get(<<"len">>, Evidence)),
+    ?assertEqual(<<"203.0.113.44">>, maps:get(<<"src_raw">>, Evidence)),
+    ?assertEqual(<<"10.0.0.1">>, maps:get(<<"dst_raw">>, Evidence)).
+
+canonical_firewall_event_routes_to_guard_family_test() ->
+    {ok, Key, Payload} =
+        erlkoenig_amqp_codec:encode_payload(
+          {firewall_event, #{kind => scan_suspect,
+                             source => threat,
+                             src_ip => <<"203.0.113.44">>,
+                             evidence => #{ports => [22, 80]}}}),
+
+    ?assertEqual(<<"guard.threat.suspect">>, Key),
+    ?assertEqual(<<"scan_suspect">>, maps:get(<<"kind">>, Payload)),
+    ?assertEqual(<<"threat">>, maps:get(<<"source">>, Payload)).
+
 %% Sanity: the full encode/1 path (envelope + JSON) wraps these
 %% correctly. We just check it produces an iolist that decodes back
 %% to a map containing our routing key — anything else means the

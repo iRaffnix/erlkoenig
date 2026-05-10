@@ -74,6 +74,33 @@ normalize_config_inserts_table_when_missing_test() ->
     Effective = erlkoenig_nft_firewall:normalize_config(Original),
     ?assertEqual(<<"erlkoenig_host">>, maps:get(table, Effective)).
 
+normalize_config_adds_host_observability_counters_test() ->
+    Original = #{chains => [
+        #{name => <<"input">>, hook => input, type => filter,
+          priority => 0, policy => drop, rules => []},
+        #{name => <<"output">>, hook => output, type => filter,
+          priority => 0, policy => accept, rules => []}
+    ]},
+    Effective = erlkoenig_nft_firewall:normalize_config(Original),
+    Counters = maps:get(counters, Effective),
+    ?assert(lists:member(<<"input">>, Counters)),
+    ?assert(lists:member(<<"output">>, Counters)),
+    ?assert(lists:member(<<"dropped">>, Counters)).
+
+observe_drop_exprs_adds_host_nflog_before_drop_test() ->
+    Exprs = [
+        nft_expr_ir:ip_saddr(1),
+        nft_expr_ir:objref_counter(<<"banned">>),
+        nft_expr_ir:drop()
+    ],
+    Observed = erlkoenig_nft_firewall:observe_drop_exprs(Exprs, <<"banned">>),
+    ?assertMatch([
+        {payload, _},
+        {objref, #{type := counter, name := <<"banned">>}},
+        {log, #{group := 1, prefix := <<"banned">>}},
+        {immediate, #{verdict := drop}}
+    ], Observed).
+
 %% Validator: ban chain must NOT carry established,related accept.
 %% The audit returns issues as a list — empty list = clean.
 audit_returns_issue_for_established_in_ban_chain_test() ->

@@ -74,6 +74,7 @@ defmodule Tutorial.MultiTier do
                        subnet: {10, 61, 0, 0, 24}
 
     nft_host do
+      nft_nflog_group 1, name: "host"
       nft_set "ban", :ipv4_addr
       nft_counter "input_drop"
       nft_counter "forward_drop"
@@ -103,7 +104,8 @@ defmodule Tutorial.MultiTier do
         nft_rule :accept, tcp_dport: 80
         nft_rule :accept, tcp_dport: 8443
 
-        nft_rule :drop, counter: "input_drop", log_prefix: "HOST: "
+        nft_rule :drop, counter: "input_drop",
+                        log_prefix: "HOST: ", nflog_group: 1
       end
 
       # ── FORWARD chain — cross-container L4 policy ───────────────
@@ -141,7 +143,8 @@ defmodule Tutorial.MultiTier do
                  ip_daddr: {:replica_ips, "backend", "metrics"},
                  tcp_dport: 9100
 
-        nft_rule :drop, counter: "forward_drop", log_prefix: "FWD: "
+        nft_rule :drop, counter: "forward_drop",
+                        log_prefix: "FWD: ", nflog_group: 1
       end
 
       # ── Prerouting DNAT für jhash-LB ──

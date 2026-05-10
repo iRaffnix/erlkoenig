@@ -26,6 +26,7 @@ defmodule Tutorial.Firewall do
                  subnet: {10, 30, 0, 0, 24}
 
     nft_host do
+      nft_nflog_group 1, name: "host"
 
       # ══════════════════════════════════════════════════════════
       # SETS — Runtime-mutable Listen von Werten
@@ -152,7 +153,7 @@ defmodule Tutorial.Firewall do
         nft_rule :vmap_dispatch, vmap: "port_dispatch"
 
         nft_rule :drop, counter: "input_drop",
-                        log_prefix: "host/drop: "
+                        log_prefix: "host/drop: ", nflog_group: 1
       end
 
       # ── FORWARD — Pakete die weiter geroutet werden ──

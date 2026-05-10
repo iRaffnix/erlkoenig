@@ -28,6 +28,7 @@ defmodule PodSupervision do
     ipvlan "compute", parent: {:dummy, "ek_compute"}, subnet: {10, 0, 0, 0, 24}
 
     nft_host do
+      nft_nflog_group 1, name: "host"
       nft_set "ban", :ipv4_addr
       nft_counter "input_drop"
       nft_counter "input_ban"
@@ -55,7 +56,8 @@ defmodule PodSupervision do
         # schreibt die Regel selbst (Kapitel 6 Service-Catalogue).
         nft_rule :accept, ip_saddr: {10, 0, 0, 0, 24}, udp_dport: 53
 
-        nft_rule :drop, counter: "input_drop", log_prefix: "HOST: "
+        nft_rule :drop, counter: "input_drop",
+                        log_prefix: "HOST: ", nflog_group: 1
       end
     end
   end

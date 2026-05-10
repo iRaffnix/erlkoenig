@@ -22,36 +22,67 @@ defmodule Erlkoenig.Container.Builder do
   compatible with `erlkoenig:spawn/2` SpawnOpts.
   """
 
+  defstruct name: nil,
+            binary: nil,
+            ip: nil,
+            ports: [],
+            args: [],
+            env: %{},
+            firewall: %{},
+            limits: %{},
+            seccomp: nil,
+            caps: [],
+            fw_rules: nil,
+            fw_counters: [],
+            fw_sets: [],
+            guard: nil,
+            watch: nil,
+            observe: nil,
+            policy: nil,
+            restart: nil,
+            volumes: [],
+            files: %{},
+            dns_name: nil,
+            health_check: nil,
+            zone: nil,
+            signature: nil,
+            rootfs: nil,
+            requires: [],
+            socket_mounts: []
+
+  @type t :: %__MODULE__{
+          name: String.t() | nil,
+          binary: String.t() | nil,
+          ip: tuple() | nil,
+          ports: list(),
+          args: [String.t()],
+          env: map(),
+          firewall: map(),
+          limits: map(),
+          seccomp: term(),
+          caps: list(),
+          fw_rules: list() | nil,
+          fw_counters: [String.t()],
+          fw_sets: list(),
+          guard: map() | nil,
+          watch: map() | nil,
+          observe: list() | nil,
+          policy: map() | nil,
+          restart: atom() | nil,
+          volumes: list(),
+          files: map(),
+          dns_name: String.t() | nil,
+          health_check: map() | nil,
+          zone: atom() | nil,
+          signature: term(),
+          rootfs: map() | nil,
+          requires: [atom()],
+          socket_mounts: list()
+        }
+
+  @spec new(atom()) :: t()
   def new(name) when is_atom(name) do
-    %{
-      name: Atom.to_string(name),
-      binary: nil,
-      ip: nil,
-      ports: [],
-      args: [],
-      env: %{},
-      firewall: %{},
-      limits: %{},
-      seccomp: nil,
-      caps: [],
-      fw_rules: nil,
-      fw_counters: [],
-      fw_sets: [],
-      guard: nil,
-      watch: nil,
-      observe: nil,
-      policy: nil,
-      restart: nil,
-      volumes: [],
-      files: %{},
-      dns_name: nil,
-      health_check: nil,
-      zone: nil,
-      signature: nil,
-      rootfs: nil,
-      requires: [],
-      socket_mounts: []
-    }
+    %__MODULE__{name: Atom.to_string(name)}
   end
 
   # NOTE: conn_limit deliberately not exposed here. In Stack DSL it
@@ -238,8 +269,12 @@ defmodule Erlkoenig.Container.Builder do
       case Keyword.fetch(opts, :hosts) do
         {:ok, list} when is_list(list) and list != [] ->
           Enum.map(list, fn
-            h when is_binary(h) and byte_size(h) > 0 -> h
-            h when is_atom(h) -> Atom.to_string(h)
+            h when is_binary(h) and byte_size(h) > 0 ->
+              h
+
+            h when is_atom(h) ->
+              Atom.to_string(h)
+
             other ->
               raise CompileError,
                 description:
@@ -249,36 +284,51 @@ defmodule Erlkoenig.Container.Builder do
 
         _ ->
           raise CompileError,
-            description:
-              "requires :\"dns.allowlist\" needs a non-empty :hosts list"
+            description: "requires :\"dns.allowlist\" needs a non-empty :hosts list"
       end
 
     Map.put(state, :dns_allowlist, hosts)
   end
 
+  @spec validate!(t()) :: t()
+  def validate!(%__MODULE__{} = state), do: state
+
+  @spec to_spawn_opts(t()) :: map()
   def to_spawn_opts(state) do
     opts = %{}
     opts = if state.ip, do: Map.put(opts, :ip, state.ip), else: opts
     opts = if state.ports != [], do: Map.put(opts, :ports, state.ports), else: opts
     opts = if state.args != [], do: Map.put(opts, :args, state.args), else: opts
     opts = if state.env != %{}, do: Map.put(opts, :env, state.env), else: opts
-    opts = if state.fw_rules do
-      fw_term = %{
-        chains: [%{
-          name: "inbound",
-          hook: :input,
-          type: :filter,
-          priority: 0,
-          policy: :drop,
-          rules: state.fw_rules
-        }]
-      }
-      fw_term = if state.fw_counters != [], do: Map.put(fw_term, :counters, state.fw_counters), else: fw_term
-      fw_term = if state.fw_sets != [], do: Map.put(fw_term, :sets, state.fw_sets), else: fw_term
-      Map.put(opts, :firewall, fw_term)
-    else
-      opts
-    end
+
+    opts =
+      if state.fw_rules do
+        fw_term = %{
+          chains: [
+            %{
+              name: "inbound",
+              hook: :input,
+              type: :filter,
+              priority: 0,
+              policy: :drop,
+              rules: state.fw_rules
+            }
+          ]
+        }
+
+        fw_term =
+          if state.fw_counters != [],
+            do: Map.put(fw_term, :counters, state.fw_counters),
+            else: fw_term
+
+        fw_term =
+          if state.fw_sets != [], do: Map.put(fw_term, :sets, state.fw_sets), else: fw_term
+
+        Map.put(opts, :firewall, fw_term)
+      else
+        opts
+      end
+
     opts = if state.guard, do: Map.put(opts, :guard, state.guard), else: opts
     opts = if state.watch, do: Map.put(opts, :watch, state.watch), else: opts
     opts = if state.observe, do: Map.put(opts, :observe, state.observe), else: opts
@@ -293,19 +343,24 @@ defmodule Erlkoenig.Container.Builder do
     opts = if state.zone, do: Map.put(opts, :zone, state.zone), else: opts
     opts = if state.rootfs, do: Map.put(opts, :rootfs, state.rootfs), else: opts
     opts = if state.requires != [], do: Map.put(opts, :requires, state.requires), else: opts
-    opts = case Map.get(state, :dns_allowlist) do
-      nil -> opts
-      hosts -> Map.put(opts, :dns_allowlist, hosts)
-    end
-    opts = if state.socket_mounts != [],
-              do: Map.put(opts, :socket_mounts, state.socket_mounts),
-              else: opts
 
-    opts = case state.signature do
-      nil       -> opts
-      :required -> Map.put(opts, :signature_required, true)
-      path      -> Map.put(opts, :sig_path, path)
-    end
+    opts =
+      case Map.get(state, :dns_allowlist) do
+        nil -> opts
+        hosts -> Map.put(opts, :dns_allowlist, hosts)
+      end
+
+    opts =
+      if state.socket_mounts != [],
+        do: Map.put(opts, :socket_mounts, state.socket_mounts),
+        else: opts
+
+    opts =
+      case state.signature do
+        nil -> opts
+        :required -> Map.put(opts, :signature_required, true)
+        path -> Map.put(opts, :sig_path, path)
+      end
 
     # DNS name: use explicit dns_name, or fall back to container definition name
     name = state.dns_name || state.name
@@ -314,6 +369,7 @@ defmodule Erlkoenig.Container.Builder do
     opts
   end
 
+  @spec to_term(t()) :: map()
   def to_term(state) do
     base = %{
       name: state.name,

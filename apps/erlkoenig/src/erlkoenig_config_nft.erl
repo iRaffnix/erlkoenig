@@ -374,25 +374,34 @@ apply_nft_table(#{name := TableName, chains := Chains} = Table, VethMap, Replica
     case AllMsgs of
         [] ->
             logger:info("erlkoenig_config: nft_table ~s: empty (no chains)", [TableName]),
-            register_ban_sets(TableBin, Table);
+            register_ban_sets(TableBin, Table),
+            register_nflog_groups(Table);
         _ ->
-            case nfnl_server:apply_msgs(erlkoenig_nft_srv, AllMsgs) of
+            case ensure_nflog_receivers(Table) of
                 ok ->
-                    %% Commit the new DSL-object inventory AFTER the
-                    %% kernel confirmed the batch. If we had done this
-                    %% before the batch and the batch failed, the next
-                    %% reload would compute stale-set diffs against a
-                    %% lie and either orphan old objects or try to
-                    %% delete nonexistent ones.
-                    persistent_term:put({erlkoenig_dsl_maps, TableBin},
-                                        NewMapNames),
-                    persistent_term:put({erlkoenig_dsl_sets, TableBin},
-                                        NewSetNames),
-                    register_ban_sets(TableBin, Table),
-                    logger:notice("erlkoenig_config: nft_table ~s applied ok", [TableName]),
-                    erlkoenig_events:notify({firewall_applied, TableName});
+                    case nfnl_server:apply_msgs(erlkoenig_nft_srv, AllMsgs) of
+                        ok ->
+                            %% Commit the new DSL-object inventory AFTER the
+                            %% kernel confirmed the batch. If we had done this
+                            %% before the batch and the batch failed, the next
+                            %% reload would compute stale-set diffs against a
+                            %% lie and either orphan old objects or try to
+                            %% delete nonexistent ones.
+                            persistent_term:put({erlkoenig_dsl_maps, TableBin},
+                                                NewMapNames),
+                            persistent_term:put({erlkoenig_dsl_sets, TableBin},
+                                                NewSetNames),
+                            register_ban_sets(TableBin, Table),
+                            register_nflog_groups(Table),
+                            logger:notice("erlkoenig_config: nft_table ~s applied ok", [TableName]),
+                            erlkoenig_events:notify({firewall_applied, TableName});
+                        {error, Reason} ->
+                            logger:warning("erlkoenig_config: nft_table ~s batch failed: ~p",
+                                           [TableName, Reason]),
+                            erlkoenig_events:notify({firewall_failed, TableName, Reason})
+                    end;
                 {error, Reason} ->
-                    logger:warning("erlkoenig_config: nft_table ~s batch failed: ~p",
+                    logger:warning("erlkoenig_config: nft_table ~s nflog setup failed: ~p",
                                    [TableName, Reason]),
                     erlkoenig_events:notify({firewall_failed, TableName, Reason})
             end
@@ -424,6 +433,24 @@ register_ban_sets(TableBin, Table) ->
         _ -> Current#{TableBin => Entries}
     end,
     persistent_term:put(?DSL_BAN_SETS_KEY, Next).
+
+ensure_nflog_receivers(Table) ->
+    ensure_nflog_receivers_list(maps:get(nflog_groups, Table, [])).
+
+ensure_nflog_receivers_list([]) ->
+    ok;
+ensure_nflog_receivers_list([#{group := Group} | Rest]) ->
+    case erlkoenig_nft_nflog:ensure_started(Group) of
+        {ok, _Pid} ->
+            ensure_nflog_receivers_list(Rest);
+        {error, Reason} ->
+            {error, {nflog_start_failed, Group, Reason}}
+    end;
+ensure_nflog_receivers_list([_Other | Rest]) ->
+    ensure_nflog_receivers_list(Rest).
+
+register_nflog_groups(Table) ->
+    erlkoenig_nft_nflog_registry:register_table(Table).
 
 -spec ban_set_entries(binary(), map()) -> [map()].
 ban_set_entries(TableBin, Table) ->
@@ -1002,6 +1029,7 @@ expand_nft_rule(Action, Opts, _VethMap, ReplicaIpMap) ->
                      hint => <<"ct_state must be a non-empty list">>}});
         (log_prefix, Prefix, Acc) -> Acc#{log => Prefix};
         (log, Prefix, Acc) -> Acc#{log => Prefix};
+        (nflog_group, Group, Acc) -> Acc#{nflog_group => Group};
         (counter, Name, Acc) -> Acc#{counter => iolist_to_binary(Name)};
         %% Named-object references (set/map/vmap/flowtable) pass
         %% through with the operator-given name.  The downstream
@@ -1088,10 +1116,17 @@ expand_nft_rule(Action, Opts, _VethMap, ReplicaIpMap) ->
         error -> [undefined]
     end,
 
-    BaseOpts = maps:without([saddr, daddr], Resolved),
+    BaseOpts = attach_nflog_group(maps:without([saddr, daddr], Resolved)),
 
     [{rule, Action, build_rule_opts(BaseOpts, S, D)}
      || S <- SaddrExpand, D <- DaddrExpand].
+
+attach_nflog_group(#{log := #{prefix := _Prefix, group := _Group}} = Opts) ->
+    maps:remove(nflog_group, Opts);
+attach_nflog_group(#{log := Prefix, nflog_group := Group} = Opts) ->
+    maps:remove(nflog_group, Opts#{log := #{prefix => Prefix, group => Group}});
+attach_nflog_group(Opts) ->
+    maps:remove(nflog_group, Opts).
 
 build_rule_opts(Base, undefined, undefined) -> Base;
 build_rule_opts(Base, Saddr, undefined) ->
@@ -1596,7 +1631,7 @@ resolve_and_compile_rule({rule, Verdict, Opts}, RefMap, PodName,
         %% through to compile_generic_rule.
         (K, V, Acc) when K =:= saddr; K =:= daddr; K =:= tcp;
                           K =:= udp; K =:= ct; K =:= protocol;
-                          K =:= counter; K =:= log;
+                          K =:= counter; K =:= log; K =:= nflog_group;
                           K =:= iif; K =:= oif; K =:= oif_neq ->
             Acc#{K => V};
         (K, V, Acc) ->
@@ -1615,7 +1650,8 @@ resolve_and_compile_rule({rule, Verdict, Opts}, RefMap, PodName,
             false;
         false ->
             try
-                Compiled = erlkoenig_ct_firewall:compile_generic_rule(Verdict, Resolved),
+                Compiled = erlkoenig_ct_firewall:compile_generic_rule(
+                    Verdict, attach_nflog_group(Resolved)),
                 {true, nft_encode:rule_fun(inet, FwdTable,
                     ChainName, Compiled)}
             catch _:Err ->

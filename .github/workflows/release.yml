@@ -30,7 +30,7 @@ jobs:
           - name: x86_64-musl
             runner: ubuntu-22.04
             image: hexpm/elixir:1.18.4-erlang-28.4.1-alpine-3.21.6
-            deps: apk add --no-cache git make gcc g++ musl-dev curl bash openssl
+            deps: apk add --no-cache git make gcc g++ musl-dev curl bash grep openssl
           - name: aarch64-linux
             runner: ubuntu-22.04-arm
             image: hexpm/elixir:1.18.4-erlang-28.4.1-debian-bookworm-20260316-slim

@@ -683,7 +683,7 @@ escript_doctor_json_uses_catalog_codes_test() ->
         [{"ERLKOENIG_PROTOCOL_VECTORS", "/tmp/erlkoenig_missing_vectors"}]),
     ?assert(string:find(Output, "doctor: ") =/= nomatch),
     ?assert(string:find(Output, "blocking issue") =/= nomatch),
-    Rows = json:decode(unicode:characters_to_binary(first_line(Output))),
+    Rows = json:decode(unicode:characters_to_binary(first_json_line(Output))),
     ?assert(is_list(Rows)),
     Protocol = lists:filter(
         fun(#{<<"check">> := <<"protocol_vectors">>}) -> true;
@@ -704,7 +704,7 @@ escript_doctor_flags_weak_cookie_permissions_test() ->
     ok = file:change_mode(Cookie, 8#0644),
     {1, Output} = run_ek_escript(
         ["--cookie-file", Cookie, "--format", "json", "doctor"], []),
-    Rows = json:decode(unicode:characters_to_binary(first_line(Output))),
+    Rows = json:decode(unicode:characters_to_binary(first_json_line(Output))),
     Row = doctor_row(<<"cookie_permissions">>, Rows),
     ?assertEqual(<<"fail">>, maps:get(<<"status">>, Row)),
     ?assertEqual(<<"EK_HOST_COOKIE_PERMISSIONS_WEAK">>, maps:get(<<"code">>, Row)),
@@ -762,8 +762,21 @@ assert_cli_version(Args) ->
     {0, Output} = run_ek_escript(Args),
     ?assertMatch({match, _}, re:run(Output, "^ek [0-9]+\\.[0-9]+\\.[0-9]+\\n$")).
 
-first_line(Output) ->
-    hd(string:split(Output, "\n")).
+first_json_line(Output) ->
+    Lines = string:split(Output, "\n", all),
+    case [Line || Line <- Lines, is_json_line(Line)] of
+        [Line | _] -> Line;
+        [] -> error({no_json_line, Output})
+    end.
+
+is_json_line([]) ->
+    false;
+is_json_line([${ | _]) ->
+    true;
+is_json_line([$[ | _]) ->
+    true;
+is_json_line(_) ->
+    false.
 
 collect_port(Port, Acc) ->
     receive

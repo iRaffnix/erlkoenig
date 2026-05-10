@@ -18,7 +18,13 @@ jobs:
         uses: erlef/setup-beam@v1
         with:
           otp-version: '28'
+          elixir-version: '1.18'
           rebar3-version: '3.24'
+
+      - name: Install hex + rebar for mix
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
 
       - name: Cache rebar3
         uses: actions/cache@v4

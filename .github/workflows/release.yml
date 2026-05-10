@@ -50,6 +50,11 @@ jobs:
           curl -fsSL https://s3.amazonaws.com/rebar3/rebar3 -o /usr/local/bin/rebar3
           chmod +x /usr/local/bin/rebar3
 
+      - name: Install hex + rebar for mix
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
+
       - name: Verify toolchain
         run: |
           erl -noshell -eval 'io:format("OTP ~s~n", [erlang:system_info(otp_release)]), halt().'

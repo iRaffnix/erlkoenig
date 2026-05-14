@@ -60,7 +60,15 @@ start_link() ->
 -doc "Send an event to all handlers.".
 -spec notify(term()) -> ok.
 notify(Event) ->
-    gen_event:notify(?MODULE, Event).
+    try gen_event:notify(?MODULE, Event) of
+        ok ->
+            ok
+    catch
+        Class:Reason ->
+            logger:warning("erlkoenig_events: event bus unavailable, dropped ~p: ~p:~p",
+                           [Event, Class, Reason]),
+            ok
+    end.
 
 -doc "Add an event handler.".
 -spec subscribe(module(), term()) -> ok | {error, term()}.

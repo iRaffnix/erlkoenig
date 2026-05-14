@@ -46,6 +46,7 @@ States:
          stop_container/1,
          kill/2,
          get_info/1,
+         get_info/2,
          dns_filter_state/1,
          list/0,
          attach/2,
@@ -59,6 +60,10 @@ States:
 -export([creating/3, namespace_ready/3, starting/3,
          running/3, stopping/3, stopped/3, restarting/3,
          recovering/3, disconnected/3, failed/3]).
+
+-ifdef(TEST).
+-export([should_record_terminal_crash/2, restart_cleanup_result/3]).
+-endif.
 
 %% Restart policy: controls if and how a container is restarted
 %% after exit or failure.
@@ -114,6 +119,10 @@ kill(Pid, Signal) ->
 -spec get_info(pid()) -> map().
 get_info(Pid) ->
     gen_statem:call(Pid, get_info).
+
+-spec get_info(pid(), timeout()) -> map().
+get_info(Pid, Timeout) ->
+    gen_statem:call(Pid, get_info, Timeout).
 
 %% Narrow recovery read: returns the container's IP + declared
 %% dns_allowlist, or `undefined` if the container does not have
@@ -357,6 +366,10 @@ creating(state_timeout, spawn_timeout, Data) ->
                                           "container spawn timed out",
                                           #{timeout_ms => ?SPAWN_TIMEOUT})}};
 
+creating({call, From}, get_info, Data) ->
+    {keep_state_and_data,
+     [{reply, From, erlkoenig_ct_info:build_info(creating, Data)}]};
+
 creating({call, _From}, _, _Data) ->
     {keep_state_and_data, [postpone]};
 
@@ -365,32 +378,97 @@ creating(info, check_restart, _Data) -> keep_state_and_data.
 
 creating_do_spawn(#ct_data{id = ContainerId,
                             binary_path = BinaryPath,
+                            limits = Limits,
                             zone = Zone} = Data) ->
     %% Pre-spawn gates — both must pass before any expensive work
     %% (socket creation, namespace setup, nft installation).
-    case erlkoenig_ct_security:admission_then_quarantine(Zone, BinaryPath) of
+    case erlkoenig_ct_security:resource_then_admission_then_quarantine(
+           ContainerId, Limits, Zone, BinaryPath) of
         {ok, AdmissionToken} ->
             creating_do_spawn_gated(Data#ct_data{admission_token = AdmissionToken});
+        {error, {resource_admission_denied, Reason}} ->
+            logger:warning("container ~s: resource admission denied: ~p",
+                           [ContainerId, Reason]),
+            Err0 = ct_error(resource_admission_denied,
+                            "resource admission denied",
+                            #{zone => Zone, reason => Reason, limits => Limits}),
+            Err = attach_container(Err0, ContainerId),
+            erlkoenig_error:emit(Err),
+            %% Hot path: keep the denial in the ETS ring so `ek
+            %% admission denial <id>` can answer immediately without
+            %% reading the audit file.
+            erlkoenig_denial_log:record_denial(#{
+                container_id => ContainerId,
+                container_name => Data#ct_data.name,
+                ts_ms => erlang:system_time(millisecond),
+                zone => Zone,
+                reason => Reason,
+                limits => Limits
+            }),
+            %% Cold path: persist full evidence so the same lookup can
+            %% replay denials after restart, when the ETS ring is gone.
+            %% Include container_name so the audit-fallback lookup in
+            %% `ek:admission_denial/1` can resolve the operator-typed
+            %% friendly name (DSL-declared) as well as the generated
+            %% container id.
+            AuditDetails0 = #{zone => Zone,
+                              reason => Reason,
+                              limits => Limits},
+            AuditDetails = case Data#ct_data.name of
+                undefined -> AuditDetails0;
+                CtName    -> AuditDetails0#{container_name => CtName}
+            end,
+            erlkoenig_audit:log(#{type => resource_admission_denied,
+                                  subject => ContainerId,
+                                  result => denied,
+                                  details => AuditDetails}),
+            {next_state, failed,
+             Data#ct_data{error_reason = Err}};
         {error, admission_timeout} ->
             logger:warning("container ~s: admission gate timed out", [ContainerId]),
+            Err0 = ct_error(admission_timeout,
+                            "admission gate timed out",
+                            #{zone => Zone}),
+            Err = attach_container(Err0, ContainerId),
+            erlkoenig_error:emit(Err),
             {next_state, failed,
-             Data#ct_data{error_reason = ct_error(admission_timeout,
-                                                  "admission gate timed out",
-                                                  #{zone => Zone})}};
+             Data#ct_data{error_reason = Err}};
         {error, admission_queue_full} ->
             logger:warning("container ~s: admission queue full", [ContainerId]),
+            Err0 = ct_error(admission_queue_full,
+                            "admission queue is full",
+                            #{zone => Zone}),
+            Err = attach_container(Err0, ContainerId),
+            erlkoenig_error:emit(Err),
             {next_state, failed,
-             Data#ct_data{error_reason = ct_error(admission_queue_full,
-                                                  "admission queue is full",
-                                                  #{zone => Zone})}};
+             Data#ct_data{error_reason = Err}};
+        {error, admission_unavailable} ->
+            logger:error("container ~s: admission gate unavailable", [ContainerId]),
+            Err0 = ct_error(admission_unavailable,
+                            "admission gate unavailable",
+                            #{zone => Zone}),
+            Err = attach_container(Err0, ContainerId),
+            erlkoenig_error:emit(Err),
+            {next_state, failed,
+             Data#ct_data{error_reason = Err}};
+        {error, quarantine_unavailable} ->
+            logger:error("container ~s: quarantine gate unavailable", [ContainerId]),
+            Err0 = ct_error(quarantine_unavailable,
+                            "quarantine gate unavailable",
+                            #{zone => Zone}),
+            Err = attach_container(Err0, ContainerId),
+            erlkoenig_error:emit(Err),
+            {next_state, failed,
+             Data#ct_data{error_reason = Err}};
         {error, {quarantined, Hash, Since}} ->
             logger:warning("container ~s: binary quarantined (~s since ~p)",
                            [ContainerId, erlkoenig_ct_security:format_hash_prefix(Hash), Since]),
-            Err = ?EK_ERROR(runtime, binary_quarantined,
-                            "spawn refused by quarantine",
-                            #{hash_prefix => erlkoenig_ct_security:format_hash_prefix(Hash),
-                              since_ms => Since}),
-            erlkoenig_error:emit(Err, ContainerId),
+            Err0 = ?EK_ERROR(runtime, binary_quarantined,
+                             "spawn refused by quarantine",
+                             #{hash_prefix => erlkoenig_ct_security:format_hash_prefix(Hash),
+                               since_ms => Since}),
+            Err = attach_container(Err0, ContainerId),
+            erlkoenig_error:emit(Err),
             {next_state, failed,
              Data#ct_data{error_reason = Err}}
     end.
@@ -401,22 +479,37 @@ creating_do_spawn_gated(#ct_data{id = ContainerId} = Data) ->
     %% Pre-create the container cgroup so the C runtime starts in it
     %% instead of the beam cgroup. This prevents erlkoenig_rt processes
     %% from counting against beam_memory_max.
-    %%
-    %% The fallback to `undefined' (rt runs in beam cgroup instead)
-    %% is intentional — a cgroup setup failure shouldn't block spawn
-    %% outright. But it used to be silent: operators had no way to
-    %% see that beam_memory_max was being depleted by spawn traffic,
-    %% and cgroup-setup issues (permission drifts, missing controllers,
-    %% persistent_term not yet populated) were invisible. Log on the
-    %% fallback so the drift is at least auditable.
     CgroupProcs = case erlkoenig_cgroup:ensure_container_dir(ContainerId) of
         {ok, ProcsPath} -> ProcsPath;
         {error, CgroupReason} ->
-            logger:warning("container ~s: cgroup dir setup failed (~p), "
-                           "rt will start in beam cgroup",
-                           [ContainerId, CgroupReason]),
-            undefined
+            case erlkoenig_cgroup:production_mode() of
+                true ->
+                    logger:error("container ~s: cgroup dir setup failed in "
+                                 "production mode: ~p",
+                                 [ContainerId, CgroupReason]),
+                    Err = ct_error(cgroup_setup_failed,
+                                   "container cgroup pre-spawn setup failed",
+                                   #{reason => CgroupReason}),
+                    erlkoenig_error:emit(Err, ContainerId),
+                    {next_state, failed,
+                     Data#ct_data{error_reason = Err}};
+                false ->
+                    logger:warning("container ~s: cgroup dir setup failed (~p), "
+                                   "development mode: rt will start in beam cgroup",
+                                   [ContainerId, CgroupReason]),
+                    undefined
+            end
     end,
+    case CgroupProcs of
+        {next_state, failed, _} = Failed ->
+            Failed;
+        _ ->
+            creating_do_spawn_with_cgroup(Data, SocketPath, CgroupProcs)
+    end.
+
+creating_do_spawn_with_cgroup(#ct_data{id = ContainerId} = Data,
+                              SocketPath,
+                              CgroupProcs) ->
     %% Start C runtime via setsid in a background Erlang process.
     %% If cgroup is available, write the shell's PID into the container
     %% cgroup before exec — so erlkoenig_rt inherits it.
@@ -437,9 +530,11 @@ creating_do_spawn_gated(#ct_data{id = ContainerId} = Data) ->
             ok = inet:setopts(Sock, [binary, {packet, 4}, {active, true}]),
             %% Protocol handshake via socket
             ok = gen_tcp:send(Sock, erlkoenig_proto:encode_handshake()),
+            RtPid = erlkoenig_ct_rt:runtime_pid_from_cgroup(CgroupProcs),
             {keep_state, Data#ct_data{
                 sock = Sock,
-                socket_path = SocketPath
+                socket_path = SocketPath,
+                rt_pid = RtPid
             }, [{state_timeout, ?SPAWN_TIMEOUT, spawn_timeout}]};
         {error, Err} ->
             Err2 = ?EK_ERROR(runtime, socket_connect_failed,
@@ -572,6 +667,8 @@ namespace_ready(info, check_restart, _Data) -> keep_state_and_data.
 
 namespace_ready_handle_data(Reply, Data) ->
     case erlkoenig_proto:decode(Reply) of
+        {ok, reply_runtime_event, Event} ->
+            {keep_state, append_runtime_event(Event, Data)};
         {ok, reply_exited, ExitInfo} ->
             {next_state, stopped, Data#ct_data{exit_info = ExitInfo}};
         _Other ->
@@ -610,6 +707,10 @@ starting(state_timeout, go_timeout, Data) ->
                    #{timeout_ms => ?GO_TIMEOUT}),
     Data2 = maybe_reply_go_error(Data, Err),
     {next_state, failed, Data2#ct_data{error_reason = Err}};
+
+starting({call, From}, get_info, Data) ->
+    {keep_state_and_data,
+     [{reply, From, erlkoenig_ct_info:build_info(starting, Data)}]};
 
 starting({call, _From}, _, _Data) ->
     {keep_state_and_data, [postpone]};
@@ -723,6 +824,11 @@ running(cast, {send_input, InputData}, Data) ->
 %% container. `first_running_entry_done` is set so same-session
 %% reconnects take the refresh-only clause.
 running_first_entry(Data) ->
+    %% Confirm the Phase-B reservation before joining the running-set used by
+    %% node_resources snapshots. confirm_running/1 publishes a snapshot; if
+    %% this process is already in erlkoenig_cts, the snapshot calls back into
+    %% us with get_info while we are still waiting on confirm_running -> timeout.
+    erlkoenig_ct_security:confirm_resource_admission(Data),
     pg:join(erlkoenig_pg, erlkoenig_cts, self()),
     erlkoenig_events:notify({container_started, Data#ct_data.id,
                              Data#ct_data.name, self()}),
@@ -759,12 +865,14 @@ stopping(info, {tcp, Sock, Reply}, #ct_data{sock = Sock} = Data) ->
     stopping_handle_data(Reply, Data);
 
 stopping(info, {tcp_closed, Sock}, #ct_data{sock = Sock} = Data) ->
-    Data2 = maybe_reply_stop(Data, ok),
-    {next_state, stopped, Data2#ct_data{sock = undefined}};
+    {next_state, stopped, Data#ct_data{sock = undefined}};
 
 stopping(info, {tcp_error, Sock, _Reason}, #ct_data{sock = Sock} = Data) ->
-    Data2 = maybe_reply_stop(Data, ok),
-    {next_state, stopped, Data2#ct_data{sock = undefined}};
+    {next_state, stopped, Data#ct_data{sock = undefined}};
+
+stopping({call, From}, get_info, Data) ->
+    {keep_state_and_data,
+     [{reply, From, erlkoenig_ct_info:build_info(stopping, Data)}]};
 
 stopping(state_timeout, force_kill, Data) when Data#ct_data.sock =/= undefined ->
     %% Best effort — if the socket went away between the guard and
@@ -789,6 +897,8 @@ starting_handle_data(Reply, Data) ->
         {ok, reply_ok, _} ->
             Data2 = maybe_reply_go(Data),
             {next_state, running, Data2};
+        {ok, reply_runtime_event, Event} ->
+            {keep_state, append_runtime_event(Event, Data)};
         {ok, reply_exited, ExitInfo} ->
             %% Child exited before we got reply_ok
             Data2 = maybe_reply_go(Data),
@@ -817,6 +927,8 @@ starting_handle_data(Reply, Data) ->
 
 running_handle_data(Reply, Data) ->
     case erlkoenig_proto:decode(Reply) of
+        {ok, reply_runtime_event, Event} ->
+            {keep_state, append_runtime_event(Event, Data)};
         {ok, reply_exited, ExitInfo} ->
             {next_state, stopped, Data#ct_data{exit_info = ExitInfo}};
         {ok, reply_stdout, #{data := Chunk}} ->
@@ -836,9 +948,10 @@ running_handle_data(Reply, Data) ->
 
 stopping_handle_data(Reply, Data) ->
     case erlkoenig_proto:decode(Reply) of
+        {ok, reply_runtime_event, Event} ->
+            {keep_state, append_runtime_event(Event, Data)};
         {ok, reply_exited, ExitInfo} ->
-            Data2 = maybe_reply_stop(Data, ok),
-            {next_state, stopped, Data2#ct_data{exit_info = ExitInfo}};
+            {next_state, stopped, Data#ct_data{exit_info = ExitInfo}};
         {ok, reply_stdout, #{data := Chunk}} ->
             erlkoenig_ct_observe:forward_output(stdout, Chunk, Data),
             keep_state_and_data;
@@ -848,6 +961,14 @@ stopping_handle_data(Reply, Data) ->
         _Other ->
             keep_state_and_data
     end.
+
+append_runtime_event(Event, Data) ->
+    Step0 = Event#{
+        source => runtime,
+        observed_at_ms => erlang:system_time(millisecond)
+    },
+    Step = maps:filter(fun(_Key, Value) -> Value =/= <<>> end, Step0),
+    Data#ct_data{runtime_timeline = Data#ct_data.runtime_timeline ++ [Step]}.
 
 %% =================================================================
 %% stopped - Container exited, check restart policy
@@ -860,6 +981,7 @@ stopped(enter, _OldState, Data) ->
     erlkoenig_ct_net:firewall_remove(Data#ct_data.id),
     erlkoenig_ct_volume:cleanup_fuse(Data),
 
+    erlkoenig_ct_rt:terminate_os_pid(Data#ct_data.rt_pid),
     erlkoenig_ct_resources:safe_sock_close(Data#ct_data.sock),
     erlkoenig_ct_resources:cleanup_socket_file(Data#ct_data.socket_path),
     erlkoenig_ct_resources:dns_unregister(Data),
@@ -871,34 +993,37 @@ stopped(enter, _OldState, Data) ->
     %% fired (early failure path). No-op if the token was already
     %% returned.
     erlkoenig_ct_security:release_admission_token(Data),
+    erlkoenig_ct_security:release_resource_admission(Data),
     erlkoenig_ct_observe:notify_stopped(Data),
-    Data2 = Data#ct_data{sock = undefined, fuse_mount = undefined,
-                         stats_timers = [], log_publisher = undefined},
+    Data2 = maybe_reply_stop(
+              Data#ct_data{sock = undefined, fuse_mount = undefined,
+                           stats_timers = [], log_publisher = undefined},
+              ok),
     case Data2#ct_data.pod_supervised of
         true ->
             %% Pod supervisor handles restart — propagate exit reason.
-            %% Full cleanup: veth, cgroup, IP — so fresh resources
+            %% Full cleanup: IPVLAN slave, cgroup, IP — so fresh resources
             %% are allocated on supervisor restart.
-            _ = erlkoenig_ct_net:teardown_veth(Data2),
-            _ = erlkoenig_ct_cgroup:destroy_cgroup(Data2),
-            Data3 = erlkoenig_ct_resources:release_ip(Data2#ct_data{net_info = undefined}),
-            %% Pod-supervised cycle never enters `restarting` (the
-            %% gen_statem stops here and the OTP supervisor respawns
-            %% it from scratch), so the quarantine circuit breaker
-            %% would never see a crashloop without this hook. Record
-            %% the crash now, but only for actual failure exits and
-            %% only when the cause is NOT quarantine itself.
-            case erlkoenig_ct_opts:is_failure_exit(Data3) of
-                true ->
-                    case error_code(Data3#ct_data.error_reason) of
-                        'EK_RUNTIME_BINARY_QUARANTINED' -> ok;
-                        _ -> _ = erlkoenig_ct_security:safe_record_crash(
-                                  Data3#ct_data.binary_path)
-                    end;
-                false -> ok
-            end,
-            ExitReason = erlkoenig_ct_opts:pod_exit_reason(Data3),
-            {stop, ExitReason, Data3};
+            case pod_supervised_cleanup(Data2, stopped) of
+                {ok, Data3} ->
+                    %% Pod-supervised cycle never enters `restarting` (the
+                    %% gen_statem stops here and the OTP supervisor respawns
+                    %% it from scratch), so the quarantine circuit breaker
+                    %% would never see a crashloop without this hook. Record
+                    %% the crash now, but only for actual failure exits and
+                    %% only when the cause is NOT quarantine itself.
+                    case should_record_terminal_crash(Data3, false) of
+                        true ->
+                            _ = erlkoenig_ct_security:safe_record_crash(
+                                  Data3#ct_data.binary_path);
+                        false ->
+                            ok
+                    end,
+                    ExitReason = erlkoenig_ct_opts:pod_exit_reason(Data3),
+                    {stop, ExitReason, Data3};
+                {error, CleanupReason, Data3} ->
+                    {stop, {shutdown, {container_cleanup_failed, CleanupReason}}, Data3}
+            end;
         false ->
             self() ! check_restart,
             {keep_state, Data2}
@@ -970,6 +1095,7 @@ restarting(state_timeout, do_restart, Data) ->
     %% audit `volume_mounted', no pg membership for broadcasts.
     {next_state, creating, Data#ct_data{
         os_pid       = undefined,
+        rt_pid       = undefined,
         netns_path   = undefined,
         net_info     = undefined,
         exit_info    = undefined,
@@ -1027,6 +1153,7 @@ failed(enter, _OldState, Data) ->
     erlkoenig_ct_net:firewall_remove(Data#ct_data.id),
     erlkoenig_ct_volume:cleanup_fuse(Data),
 
+    erlkoenig_ct_rt:terminate_os_pid(Data#ct_data.rt_pid),
     erlkoenig_ct_resources:safe_sock_close(Data#ct_data.sock),
     erlkoenig_ct_resources:cleanup_socket_file(Data#ct_data.socket_path),
     erlkoenig_ct_resources:dns_unregister(Data),
@@ -1040,6 +1167,7 @@ failed(enter, _OldState, Data) ->
     erlkoenig_ct_resources:audit_volumes_released(Data),
     erlkoenig_ct_resources:cleanup_ephemeral_volumes(Data),
     erlkoenig_ct_security:release_admission_token(Data),
+    erlkoenig_ct_security:release_resource_admission(Data),
     %% Record the crash against the binary's hash so the quarantine
     %% circuit breaker can spot crashloops. Quarantine failures caused
     %% by quarantine itself don't feed back into the counter — otherwise
@@ -1057,13 +1185,16 @@ failed(enter, _OldState, Data) ->
                          stats_timers = [], log_publisher = undefined},
     case Data2#ct_data.pod_supervised of
         true ->
-            _ = erlkoenig_ct_net:teardown_veth(Data2),
-            _ = erlkoenig_ct_cgroup:destroy_cgroup(Data2),
-            Reason = case Data2#ct_data.error_reason of
-                undefined -> {container_failed, unknown, 0};
-                R -> {container_failed, R, 0}
-            end,
-            {stop, Reason, Data2};
+            case pod_supervised_cleanup(Data2, failed) of
+                {ok, Data3} ->
+                    Reason = case Data3#ct_data.error_reason of
+                        undefined -> {container_failed, unknown, 0};
+                        R -> {container_failed, R, 0}
+                    end,
+                    {stop, Reason, Data3};
+                {error, CleanupReason, Data3} ->
+                    {stop, {shutdown, {container_cleanup_failed, CleanupReason}}, Data3}
+            end;
         false ->
             self() ! check_restart,
             {keep_state, Data2}
@@ -1266,18 +1397,77 @@ disconnected(info, check_restart, _Data) -> keep_state_and_data.
 -spec handle_check_restart(#ct_data{}) ->
     {next_state, atom(), #ct_data{}} | {keep_state, #ct_data{}}.
 handle_check_restart(Data) ->
-    _ = erlkoenig_ct_net:teardown_veth(Data),
-    _ = erlkoenig_ct_cgroup:destroy_cgroup(Data),
-    Data2 = Data#ct_data{net_info = undefined},
-    case erlkoenig_ct_opts:should_restart(Data2) of
-        true ->
-            NewCount = Data2#ct_data.restart_count + 1,
-            persist_restart_count(Data2#ct_data.name, NewCount),
-            {next_state, restarting,
-             Data2#ct_data{restart_count = NewCount}};
+    case restart_cleanup(Data) of
+        {ok, Data2} ->
+            case erlkoenig_ct_opts:should_restart(Data2) of
+                true ->
+                    NewCount = Data2#ct_data.restart_count + 1,
+                    persist_restart_count(Data2#ct_data.name, NewCount),
+                    {next_state, restarting,
+                     Data2#ct_data{restart_count = NewCount}};
+                false ->
+                    case should_record_terminal_crash(Data2, false) of
+                        true ->
+                            _ = erlkoenig_ct_security:safe_record_crash(
+                                  Data2#ct_data.binary_path);
+                        false ->
+                            ok
+                    end,
+                    Data3 = erlkoenig_ct_resources:release_ip(Data2),
+                    {keep_state, Data3}
+            end;
+        {error, CleanupReason, Data2} ->
+            Err = ct_error(cleanup_failed,
+                           "container cleanup before restart failed",
+                           #{reason => CleanupReason}),
+            erlkoenig_error:emit(Err, Data2#ct_data.id),
+            logger:error("container ~s cleanup before restart failed: ~p",
+                         [Data2#ct_data.id, CleanupReason]),
+            {keep_state, Data2#ct_data{error_reason = Err}}
+    end.
+
+restart_cleanup(Data) ->
+    restart_cleanup_result(
+      Data,
+      erlkoenig_ct_net:teardown_link(Data),
+      erlkoenig_ct_cgroup:destroy_cgroup(Data)).
+
+restart_cleanup_result(Data, ok, ok) ->
+    {ok, Data#ct_data{net_info = undefined}};
+restart_cleanup_result(Data, {error, Reason}, _CgroupResult) ->
+    {error, {network_teardown_failed, Reason}, Data};
+restart_cleanup_result(Data, NetResult, _CgroupResult) when NetResult =/= ok ->
+    {error, {network_teardown_failed, NetResult}, Data};
+restart_cleanup_result(Data, ok, {error, Reason}) ->
+    {error, {cgroup_destroy_failed, Reason}, Data};
+restart_cleanup_result(Data, ok, CgroupResult) ->
+    {error, {cgroup_destroy_failed, CgroupResult}, Data}.
+
+pod_supervised_cleanup(Data, State) ->
+    case restart_cleanup(Data) of
+        {ok, Data2} ->
+            {ok, erlkoenig_ct_resources:release_ip(Data2)};
+        {error, CleanupReason, Data2} ->
+            Err = ct_error(cleanup_failed,
+                           "pod-supervised container cleanup failed",
+                           #{state => State, reason => CleanupReason}),
+            erlkoenig_error:emit(Err, Data2#ct_data.id),
+            logger:error("pod-supervised container ~s cleanup failed in ~p: ~p",
+                         [Data2#ct_data.id, State, CleanupReason]),
+            {error, CleanupReason, Data2#ct_data{error_reason = Err}}
+    end.
+
+-spec should_record_terminal_crash(#ct_data{}, boolean()) -> boolean().
+should_record_terminal_crash(_Data, true) ->
+    %% Restarting paths record in `restarting(enter, ...)`; recording here too
+    %% would count one crash twice and trip quarantine too early.
+    false;
+should_record_terminal_crash(Data, false) ->
+    case erlkoenig_ct_opts:is_failure_exit(Data) of
         false ->
-            Data3 = erlkoenig_ct_resources:release_ip(Data2),
-            {keep_state, Data3}
+            false;
+        true ->
+            error_code(Data#ct_data.error_reason) =/= 'EK_RUNTIME_BINARY_QUARANTINED'
     end.
 
 %% Restart policy (validate_restart/1, normalize_restart/1,
@@ -1292,7 +1482,7 @@ handle_check_restart(Data) ->
 
 %% DNS register/unregister, DNS egress allowlist register/unregister,
 %% DETS register/unregister, topology helpers (netns_path,
-%% zone_bridge_name, cgroup_path_for_id), and socket cleanup
+%% cgroup_path_for_id), and socket cleanup
 %% (safe_sock_close, cleanup_socket_file) live in
 %% erlkoenig_ct_resources — they are the counterpart of the setup
 %% flow and are all called from `stopped(enter, _)' /
@@ -1304,7 +1494,7 @@ handle_check_restart(Data) ->
 %% handle_setup_reply/3) lives in erlkoenig_ct_rt.
 
 %% firewall_add/4, firewall_remove/1, maybe_apply_container_nft/1,
-%% teardown_veth/1, try_net_setup_with_retry/7, try_net_setup_loop/3,
+%% teardown_link/1, try_net_setup_with_retry/7, try_net_setup_loop/3,
 %% zone_dns_ip/1, ip4_to_u32/1, and effective_dns_ip/1 live in
 %% erlkoenig_ct_net — grouped as the create/teardown pair of the
 %% container-side network + firewall lifecycle.
@@ -1362,6 +1552,16 @@ ct_error(admission_timeout, Context, Data) ->
     ?EK_ERROR(ct, admission_timeout, Context, Data);
 ct_error(admission_queue_full, Context, Data) ->
     ?EK_ERROR(ct, admission_queue_full, Context, Data);
+ct_error(resource_admission_denied, Context, Data) ->
+    ?EK_ERROR(ct, resource_admission_denied, Context, Data);
+ct_error(admission_unavailable, Context, Data) ->
+    ?EK_ERROR_S(critical, ct, admission_unavailable, Context, Data);
+ct_error(quarantine_unavailable, Context, Data) ->
+    ?EK_ERROR_S(critical, ct, quarantine_unavailable, Context, Data);
+ct_error(cgroup_setup_failed, Context, Data) ->
+    ?EK_ERROR_S(critical, ct, cgroup_setup_failed, Context, Data);
+ct_error(cleanup_failed, Context, Data) ->
+    ?EK_ERROR_S(critical, ct, cleanup_failed, Context, Data);
 ct_error(signature_rejected, Context, Data) ->
     ?EK_ERROR(ct, signature_rejected, Context, Data);
 ct_error(handshake_failed, Context, Data) ->
@@ -1382,6 +1582,11 @@ ct_error(recovery_timeout, Context, Data) ->
     ?EK_ERROR(ct, recovery_timeout, Context, Data);
 ct_error(reconnect_exhausted, Context, Data) ->
     ?EK_ERROR(ct, reconnect_exhausted, Context, Data).
+
+attach_container(#{type := _, reason := _} = Err, ContainerId) ->
+    Err#{container => ContainerId};
+attach_container(Err, _ContainerId) ->
+    Err.
 
 error_code(#{code := Code}) -> Code;
 error_code(_) -> undefined.

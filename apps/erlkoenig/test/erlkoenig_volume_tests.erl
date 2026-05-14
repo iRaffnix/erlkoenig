@@ -73,6 +73,7 @@ setup() ->
     %% The DETS index file lives inside Root; its dir is created for us
     %% by erlkoenig_volume_store:init/1 via filelib:ensure_dir/1.
     ok = application:set_env(erlkoenig, volumes_root, Root),
+    ok = application:set_env(erlkoenig, volume_quota_mode, advisory),
     case erlkoenig_volume_store:start_link() of
         {ok, _Pid} -> ok;
         {error, {already_started, _}} -> ok
@@ -86,6 +87,7 @@ cleanup(Root) ->
             gen_server:stop(Pid, normal, 5000)
     end,
     _ = application:unset_env(erlkoenig, volumes_root),
+    _ = application:unset_env(erlkoenig, volume_quota_mode),
     _ = file:del_dir_r(binary_to_list(Root)),
     ok.
 

@@ -42,15 +42,32 @@ The state machine orchestrates both.
 do_container_setup(#ct_data{id = Id, os_pid = OsPid,
                             limits = Limits} = Data) ->
     %% Step 1: cgroup (before GO so the app process inherits it).
-    HasCgroup = case setup_cgroup(Id, OsPid, Limits) of
+    case setup_cgroup(Id, OsPid, Limits) of
         ok ->
-            true;
+            do_container_setup_after_cgroup(true, Data);
         {error, CgReason} ->
-            logger:warning("container ~s: cgroup setup failed: ~p "
-                           "(continuing without limits)",
-                           [Id, CgReason]),
-            false
-    end,
+            case erlkoenig_cgroup:production_mode() of
+                true ->
+                    logger:error("container ~s: cgroup setup failed in "
+                                 "production mode: ~p",
+                                 [Id, CgReason]),
+                    Err = ?EK_ERROR_S(critical, ct, cgroup_setup_failed,
+                                      "container cgroup setup failed",
+                                      #{reason => CgReason}),
+                    erlkoenig_error:emit(Err, Id),
+                    {next_state, failed,
+                     Data#ct_data{error_reason = Err}};
+                false ->
+                    logger:warning("container ~s: cgroup setup failed: ~p "
+                                   "(development mode: continuing without limits)",
+                                   [Id, CgReason]),
+                    do_container_setup_after_cgroup(false, Data)
+            end
+    end.
+
+-spec do_container_setup_after_cgroup(boolean(), #ct_data{}) ->
+    {next_state, atom(), #ct_data{}}.
+do_container_setup_after_cgroup(HasCgroup, #ct_data{id = Id} = Data) ->
     %% Step 1b: eBPF device filter (defense-in-depth).
     %% Restricts which devices the container can access at kernel level,
     %% even if it somehow escapes the filesystem isolation.

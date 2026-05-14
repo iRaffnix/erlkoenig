@@ -59,7 +59,8 @@ recovery_test_() ->
       fun recover_no_comm_mode/1,
       fun recover_multiple_mixed/1,
       fun recovery_results_format/1,
-      fun cleanup_dead_tries_destroy/1
+      fun cleanup_dead_tries_destroy/1,
+      fun recover_alive_with_cgroup_without_cgroup_service/1
      ]}.
 
 %% Standalone tests: is_process_alive_os is not exported,
@@ -228,6 +229,27 @@ cleanup_dead_tries_destroy({_Pid, TmpDir, _DetsPath}) ->
                      erlkoenig_node_state:get_container(<<"cgroup-dead">>)),
         %% Socket file cleaned up
         ?assertNot(filelib:is_file(FakeSock))
+    end.
+
+recover_alive_with_cgroup_without_cgroup_service({_Pid, _TmpDir, _DetsPath}) ->
+    fun() ->
+        %% Unit tests do not start erlkoenig_sup/erlkoenig_cgroup. Recovery
+        %% must not turn an otherwise recoverable alive entry into a noproc
+        %% infrastructure error just because the service is absent here.
+        {Port, OsPid} = start_alive_process(),
+        try
+            ok = erlkoenig_node_state:register_container(<<"alive-cgroup">>,
+                     #{os_pid => OsPid,
+                       socket_path => <<"/tmp/nonexistent_for_test.sock">>,
+                       cgroup => <<"/sys/fs/cgroup/erlkoenig/old/alive-cgroup">>,
+                       comm_mode => socket}),
+            {ok, Results} = erlkoenig_recovery:recover(),
+            ?assertEqual(1, length(Results)),
+            {<<"alive-cgroup">>, Status} = hd(Results),
+            ?assertNotMatch({error, {exit, {noproc, _}}}, Status)
+        after
+            stop_alive_process({Port, OsPid})
+        end
     end.
 
 %% Test with an ALIVE process — recovery will detect it as alive, but

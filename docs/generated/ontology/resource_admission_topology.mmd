@@ -1,0 +1,190 @@
+Compiling 1 file (.ex)
+Generated erlkoenig_dsl app
+graph TD
+  stack__ResourceAdmissionLab_d3a33bdb4f8b["stack: ResourceAdmissionLab"]
+  host__host_4740ae6347b0["host: host"]
+  zone__admission_6a6ba702490a["zone: admission"]
+  pod__frontdoor_f4421e66d3e1["pod: frontdoor"]
+  container__frontdoor_edge_0_373a49e50793["container: frontdoor.edge-0"]
+  capability__frontdoor_edge_0_dns_local_8e8434c1716d["capability: frontdoor.edge-0.dns.local"]
+  capability__frontdoor_edge_0_journal_local_0e96f6386b27["capability: frontdoor.edge-0.journal.local"]
+  publish__frontdoor_edge_0_publish_65d990de13c1["publish: frontdoor.edge-0.publish"]
+  stream__frontdoor_edge_0_stream_fec45cdd58bd["stream: frontdoor.edge-0.stream"]
+  nft_chain__frontdoor_edge_0_input_5be4aa07c633["nft_chain: frontdoor.edge-0.input"]
+  nft_rule__frontdoor_edge_0_input_rule_1_1e581bfc6e1a["nft_rule: frontdoor.edge-0.input.rule_1"]
+  nft_rule__frontdoor_edge_0_input_rule_2_0792bad6e2c4["nft_rule: frontdoor.edge-0.input.rule_2"]
+  nft_rule__frontdoor_edge_0_input_rule_3_262b2a0f02e8["nft_rule: frontdoor.edge-0.input.rule_3"]
+  nft_chain__frontdoor_edge_0_output_a55e1a900f65["nft_chain: frontdoor.edge-0.output"]
+  nft_rule__frontdoor_edge_0_output_rule_1_01268090eda4["nft_rule: frontdoor.edge-0.output.rule_1"]
+  nft_rule__frontdoor_edge_0_output_rule_2_6eee6619d332["nft_rule: frontdoor.edge-0.output.rule_2"]
+  nft_rule__frontdoor_edge_0_output_rule_3_229015d56849["nft_rule: frontdoor.edge-0.output.rule_3"]
+  nft_rule__frontdoor_edge_0_output_rule_4_88159216a979["nft_rule: frontdoor.edge-0.output.rule_4"]
+  container__frontdoor_edge_1_e94e591867a3["container: frontdoor.edge-1"]
+  capability__frontdoor_edge_1_dns_local_ece1c2dc59a8["capability: frontdoor.edge-1.dns.local"]
+  capability__frontdoor_edge_1_journal_local_272be451a588["capability: frontdoor.edge-1.journal.local"]
+  publish__frontdoor_edge_1_publish_8d8f9f58ad3e["publish: frontdoor.edge-1.publish"]
+  stream__frontdoor_edge_1_stream_dc2440f96a0f["stream: frontdoor.edge-1.stream"]
+  nft_chain__frontdoor_edge_1_input_afbc500e287f["nft_chain: frontdoor.edge-1.input"]
+  nft_rule__frontdoor_edge_1_input_rule_1_e92a5ca94da1["nft_rule: frontdoor.edge-1.input.rule_1"]
+  nft_rule__frontdoor_edge_1_input_rule_2_0b99247083d4["nft_rule: frontdoor.edge-1.input.rule_2"]
+  nft_rule__frontdoor_edge_1_input_rule_3_55ecb43c299d["nft_rule: frontdoor.edge-1.input.rule_3"]
+  nft_chain__frontdoor_edge_1_output_83cd4d67642f["nft_chain: frontdoor.edge-1.output"]
+  nft_rule__frontdoor_edge_1_output_rule_1_fd375fcd72f0["nft_rule: frontdoor.edge-1.output.rule_1"]
+  nft_rule__frontdoor_edge_1_output_rule_2_f637a101a35b["nft_rule: frontdoor.edge-1.output.rule_2"]
+  nft_rule__frontdoor_edge_1_output_rule_3_f02635d97784["nft_rule: frontdoor.edge-1.output.rule_3"]
+  nft_rule__frontdoor_edge_1_output_rule_4_b7dfc8edb794["nft_rule: frontdoor.edge-1.output.rule_4"]
+  pod__workers_ed574aa71eb8["pod: workers"]
+  container__workers_worker_0_1d618327958a["container: workers.worker-0"]
+  capability__workers_worker_0_dns_local_0d017b90a0a6["capability: workers.worker-0.dns.local"]
+  capability__workers_worker_0_journal_local_96df604b73d4["capability: workers.worker-0.journal.local"]
+  publish__workers_worker_0_publish_f529ab7ad1c0["publish: workers.worker-0.publish"]
+  nft_chain__workers_worker_0_input_0f45c950e0d0["nft_chain: workers.worker-0.input"]
+  nft_rule__workers_worker_0_input_rule_1_ce9b8b6b8e17["nft_rule: workers.worker-0.input.rule_1"]
+  nft_rule__workers_worker_0_input_rule_2_21c60a0e063e["nft_rule: workers.worker-0.input.rule_2"]
+  nft_rule__workers_worker_0_input_rule_3_95295d525a69["nft_rule: workers.worker-0.input.rule_3"]
+  nft_chain__workers_worker_0_output_2d4d73d857f5["nft_chain: workers.worker-0.output"]
+  nft_rule__workers_worker_0_output_rule_1_8c58d9db5ac7["nft_rule: workers.worker-0.output.rule_1"]
+  nft_rule__workers_worker_0_output_rule_2_53ec3ef0158d["nft_rule: workers.worker-0.output.rule_2"]
+  nft_rule__workers_worker_0_output_rule_3_4fe27a6d760b["nft_rule: workers.worker-0.output.rule_3"]
+  container__workers_worker_1_b40bf70589b8["container: workers.worker-1"]
+  capability__workers_worker_1_dns_local_ef9d118b3be8["capability: workers.worker-1.dns.local"]
+  capability__workers_worker_1_journal_local_5eb4512de74a["capability: workers.worker-1.journal.local"]
+  publish__workers_worker_1_publish_49cc219ab340["publish: workers.worker-1.publish"]
+  nft_chain__workers_worker_1_input_e9dbbb7115f3["nft_chain: workers.worker-1.input"]
+  nft_rule__workers_worker_1_input_rule_1_97b4ec6d61f1["nft_rule: workers.worker-1.input.rule_1"]
+  nft_rule__workers_worker_1_input_rule_2_3510e193907f["nft_rule: workers.worker-1.input.rule_2"]
+  nft_rule__workers_worker_1_input_rule_3_92617efc1b94["nft_rule: workers.worker-1.input.rule_3"]
+  nft_chain__workers_worker_1_output_39210c8fa21d["nft_chain: workers.worker-1.output"]
+  nft_rule__workers_worker_1_output_rule_1_003555954b62["nft_rule: workers.worker-1.output.rule_1"]
+  nft_rule__workers_worker_1_output_rule_2_369a984cd66d["nft_rule: workers.worker-1.output.rule_2"]
+  nft_rule__workers_worker_1_output_rule_3_5619bbaa9090["nft_rule: workers.worker-1.output.rule_3"]
+  nft_table__erlkoenig_host_3fe20590cdae["nft_table: erlkoenig_host"]
+  nft_counter__erlkoenig_host_admission_input_drop_359dbc964165["nft_counter: erlkoenig_host.admission_input_drop"]
+  nft_counter__erlkoenig_host_admission_forward_drop_5c79ff3ac1fd["nft_counter: erlkoenig_host.admission_forward_drop"]
+  nflog_group__erlkoenig_host_72_9cc04de97941["nflog_group: erlkoenig_host.72"]
+  nft_chain__erlkoenig_host_input_60ea165fbf83["nft_chain: erlkoenig_host.input"]
+  nft_rule__erlkoenig_host_input_rule_1_5a5f5686d937["nft_rule: erlkoenig_host.input.rule_1"]
+  nft_rule__erlkoenig_host_input_rule_2_0c898a058e78["nft_rule: erlkoenig_host.input.rule_2"]
+  nft_rule__erlkoenig_host_input_rule_3_09049975640f["nft_rule: erlkoenig_host.input.rule_3"]
+  nft_rule__erlkoenig_host_input_rule_4_e9aa6a2b9895["nft_rule: erlkoenig_host.input.rule_4"]
+  nft_rule__erlkoenig_host_input_rule_5_1bcdb6a572fe["nft_rule: erlkoenig_host.input.rule_5"]
+  nft_chain__erlkoenig_host_forward_d6af369731f5["nft_chain: erlkoenig_host.forward"]
+  nft_rule__erlkoenig_host_forward_rule_1_ce7d2bf75dce["nft_rule: erlkoenig_host.forward.rule_1"]
+  nft_rule__erlkoenig_host_forward_rule_2_ed9e0d83ed70["nft_rule: erlkoenig_host.forward.rule_2"]
+  nft_rule__erlkoenig_host_forward_rule_3_b39bb70567d9["nft_rule: erlkoenig_host.forward.rule_3"]
+  nft_rule__erlkoenig_host_forward_rule_4_3068a6b082d3["nft_rule: erlkoenig_host.forward.rule_4"]
+  host__host_4740ae6347b0 -->|has_host| stack__ResourceAdmissionLab_d3a33bdb4f8b
+  zone__admission_6a6ba702490a -->|has_zone| host__host_4740ae6347b0
+  pod__frontdoor_f4421e66d3e1 -->|has_pod| stack__ResourceAdmissionLab_d3a33bdb4f8b
+  container__frontdoor_edge_0_373a49e50793 -->|has_container| pod__frontdoor_f4421e66d3e1
+  container__frontdoor_edge_0_373a49e50793 -->|runs_in_zone| zone__admission_6a6ba702490a
+  capability__frontdoor_edge_0_dns_local_8e8434c1716d -->|requires_capability| container__frontdoor_edge_0_373a49e50793
+  capability__frontdoor_edge_0_journal_local_0e96f6386b27 -->|requires_capability| container__frontdoor_edge_0_373a49e50793
+  publish__frontdoor_edge_0_publish_65d990de13c1 -->|publishes_metric| container__frontdoor_edge_0_373a49e50793
+  stream__frontdoor_edge_0_stream_fec45cdd58bd -->|streams_channel| container__frontdoor_edge_0_373a49e50793
+  nft_chain__frontdoor_edge_0_input_5be4aa07c633 -->|has_chain| container__frontdoor_edge_0_373a49e50793
+  nft_rule__frontdoor_edge_0_input_rule_1_1e581bfc6e1a -->|has_rule| nft_chain__frontdoor_edge_0_input_5be4aa07c633
+  nft_rule__frontdoor_edge_0_input_rule_1_1e581bfc6e1a -->|performs_action| nft_chain__frontdoor_edge_0_input_5be4aa07c633
+  nft_rule__frontdoor_edge_0_input_rule_2_0792bad6e2c4 -->|has_rule| nft_chain__frontdoor_edge_0_input_5be4aa07c633
+  nft_rule__frontdoor_edge_0_input_rule_2_0792bad6e2c4 -->|performs_action| nft_chain__frontdoor_edge_0_input_5be4aa07c633
+  nft_rule__frontdoor_edge_0_input_rule_3_262b2a0f02e8 -->|has_rule| nft_chain__frontdoor_edge_0_input_5be4aa07c633
+  nft_rule__frontdoor_edge_0_input_rule_3_262b2a0f02e8 -->|performs_action| nft_chain__frontdoor_edge_0_input_5be4aa07c633
+  nft_chain__frontdoor_edge_0_output_a55e1a900f65 -->|has_chain| container__frontdoor_edge_0_373a49e50793
+  nft_rule__frontdoor_edge_0_output_rule_1_01268090eda4 -->|has_rule| nft_chain__frontdoor_edge_0_output_a55e1a900f65
+  nft_rule__frontdoor_edge_0_output_rule_1_01268090eda4 -->|performs_action| nft_chain__frontdoor_edge_0_output_a55e1a900f65
+  nft_rule__frontdoor_edge_0_output_rule_2_6eee6619d332 -->|has_rule| nft_chain__frontdoor_edge_0_output_a55e1a900f65
+  nft_rule__frontdoor_edge_0_output_rule_2_6eee6619d332 -->|performs_action| nft_chain__frontdoor_edge_0_output_a55e1a900f65
+  nft_rule__frontdoor_edge_0_output_rule_3_229015d56849 -->|has_rule| nft_chain__frontdoor_edge_0_output_a55e1a900f65
+  nft_rule__frontdoor_edge_0_output_rule_3_229015d56849 -->|performs_action| nft_chain__frontdoor_edge_0_output_a55e1a900f65
+  nft_rule__frontdoor_edge_0_output_rule_4_88159216a979 -->|has_rule| nft_chain__frontdoor_edge_0_output_a55e1a900f65
+  nft_rule__frontdoor_edge_0_output_rule_4_88159216a979 -->|performs_action| nft_chain__frontdoor_edge_0_output_a55e1a900f65
+  container__frontdoor_edge_1_e94e591867a3 -->|has_container| pod__frontdoor_f4421e66d3e1
+  container__frontdoor_edge_1_e94e591867a3 -->|runs_in_zone| zone__admission_6a6ba702490a
+  capability__frontdoor_edge_1_dns_local_ece1c2dc59a8 -->|requires_capability| container__frontdoor_edge_1_e94e591867a3
+  capability__frontdoor_edge_1_journal_local_272be451a588 -->|requires_capability| container__frontdoor_edge_1_e94e591867a3
+  publish__frontdoor_edge_1_publish_8d8f9f58ad3e -->|publishes_metric| container__frontdoor_edge_1_e94e591867a3
+  stream__frontdoor_edge_1_stream_dc2440f96a0f -->|streams_channel| container__frontdoor_edge_1_e94e591867a3
+  nft_chain__frontdoor_edge_1_input_afbc500e287f -->|has_chain| container__frontdoor_edge_1_e94e591867a3
+  nft_rule__frontdoor_edge_1_input_rule_1_e92a5ca94da1 -->|has_rule| nft_chain__frontdoor_edge_1_input_afbc500e287f
+  nft_rule__frontdoor_edge_1_input_rule_1_e92a5ca94da1 -->|performs_action| nft_chain__frontdoor_edge_1_input_afbc500e287f
+  nft_rule__frontdoor_edge_1_input_rule_2_0b99247083d4 -->|has_rule| nft_chain__frontdoor_edge_1_input_afbc500e287f
+  nft_rule__frontdoor_edge_1_input_rule_2_0b99247083d4 -->|performs_action| nft_chain__frontdoor_edge_1_input_afbc500e287f
+  nft_rule__frontdoor_edge_1_input_rule_3_55ecb43c299d -->|has_rule| nft_chain__frontdoor_edge_1_input_afbc500e287f
+  nft_rule__frontdoor_edge_1_input_rule_3_55ecb43c299d -->|performs_action| nft_chain__frontdoor_edge_1_input_afbc500e287f
+  nft_chain__frontdoor_edge_1_output_83cd4d67642f -->|has_chain| container__frontdoor_edge_1_e94e591867a3
+  nft_rule__frontdoor_edge_1_output_rule_1_fd375fcd72f0 -->|has_rule| nft_chain__frontdoor_edge_1_output_83cd4d67642f
+  nft_rule__frontdoor_edge_1_output_rule_1_fd375fcd72f0 -->|performs_action| nft_chain__frontdoor_edge_1_output_83cd4d67642f
+  nft_rule__frontdoor_edge_1_output_rule_2_f637a101a35b -->|has_rule| nft_chain__frontdoor_edge_1_output_83cd4d67642f
+  nft_rule__frontdoor_edge_1_output_rule_2_f637a101a35b -->|performs_action| nft_chain__frontdoor_edge_1_output_83cd4d67642f
+  nft_rule__frontdoor_edge_1_output_rule_3_f02635d97784 -->|has_rule| nft_chain__frontdoor_edge_1_output_83cd4d67642f
+  nft_rule__frontdoor_edge_1_output_rule_3_f02635d97784 -->|performs_action| nft_chain__frontdoor_edge_1_output_83cd4d67642f
+  nft_rule__frontdoor_edge_1_output_rule_4_b7dfc8edb794 -->|has_rule| nft_chain__frontdoor_edge_1_output_83cd4d67642f
+  nft_rule__frontdoor_edge_1_output_rule_4_b7dfc8edb794 -->|performs_action| nft_chain__frontdoor_edge_1_output_83cd4d67642f
+  pod__workers_ed574aa71eb8 -->|has_pod| stack__ResourceAdmissionLab_d3a33bdb4f8b
+  container__workers_worker_0_1d618327958a -->|has_container| pod__workers_ed574aa71eb8
+  container__workers_worker_0_1d618327958a -->|runs_in_zone| zone__admission_6a6ba702490a
+  capability__workers_worker_0_dns_local_0d017b90a0a6 -->|requires_capability| container__workers_worker_0_1d618327958a
+  capability__workers_worker_0_journal_local_96df604b73d4 -->|requires_capability| container__workers_worker_0_1d618327958a
+  publish__workers_worker_0_publish_f529ab7ad1c0 -->|publishes_metric| container__workers_worker_0_1d618327958a
+  nft_chain__workers_worker_0_input_0f45c950e0d0 -->|has_chain| container__workers_worker_0_1d618327958a
+  nft_rule__workers_worker_0_input_rule_1_ce9b8b6b8e17 -->|has_rule| nft_chain__workers_worker_0_input_0f45c950e0d0
+  nft_rule__workers_worker_0_input_rule_1_ce9b8b6b8e17 -->|performs_action| nft_chain__workers_worker_0_input_0f45c950e0d0
+  nft_rule__workers_worker_0_input_rule_2_21c60a0e063e -->|has_rule| nft_chain__workers_worker_0_input_0f45c950e0d0
+  nft_rule__workers_worker_0_input_rule_2_21c60a0e063e -->|performs_action| nft_chain__workers_worker_0_input_0f45c950e0d0
+  nft_rule__workers_worker_0_input_rule_3_95295d525a69 -->|has_rule| nft_chain__workers_worker_0_input_0f45c950e0d0
+  nft_rule__workers_worker_0_input_rule_3_95295d525a69 -->|performs_action| nft_chain__workers_worker_0_input_0f45c950e0d0
+  nft_chain__workers_worker_0_output_2d4d73d857f5 -->|has_chain| container__workers_worker_0_1d618327958a
+  nft_rule__workers_worker_0_output_rule_1_8c58d9db5ac7 -->|has_rule| nft_chain__workers_worker_0_output_2d4d73d857f5
+  nft_rule__workers_worker_0_output_rule_1_8c58d9db5ac7 -->|performs_action| nft_chain__workers_worker_0_output_2d4d73d857f5
+  nft_rule__workers_worker_0_output_rule_2_53ec3ef0158d -->|has_rule| nft_chain__workers_worker_0_output_2d4d73d857f5
+  nft_rule__workers_worker_0_output_rule_2_53ec3ef0158d -->|performs_action| nft_chain__workers_worker_0_output_2d4d73d857f5
+  nft_rule__workers_worker_0_output_rule_3_4fe27a6d760b -->|has_rule| nft_chain__workers_worker_0_output_2d4d73d857f5
+  nft_rule__workers_worker_0_output_rule_3_4fe27a6d760b -->|performs_action| nft_chain__workers_worker_0_output_2d4d73d857f5
+  container__workers_worker_1_b40bf70589b8 -->|has_container| pod__workers_ed574aa71eb8
+  container__workers_worker_1_b40bf70589b8 -->|runs_in_zone| zone__admission_6a6ba702490a
+  capability__workers_worker_1_dns_local_ef9d118b3be8 -->|requires_capability| container__workers_worker_1_b40bf70589b8
+  capability__workers_worker_1_journal_local_5eb4512de74a -->|requires_capability| container__workers_worker_1_b40bf70589b8
+  publish__workers_worker_1_publish_49cc219ab340 -->|publishes_metric| container__workers_worker_1_b40bf70589b8
+  nft_chain__workers_worker_1_input_e9dbbb7115f3 -->|has_chain| container__workers_worker_1_b40bf70589b8
+  nft_rule__workers_worker_1_input_rule_1_97b4ec6d61f1 -->|has_rule| nft_chain__workers_worker_1_input_e9dbbb7115f3
+  nft_rule__workers_worker_1_input_rule_1_97b4ec6d61f1 -->|performs_action| nft_chain__workers_worker_1_input_e9dbbb7115f3
+  nft_rule__workers_worker_1_input_rule_2_3510e193907f -->|has_rule| nft_chain__workers_worker_1_input_e9dbbb7115f3
+  nft_rule__workers_worker_1_input_rule_2_3510e193907f -->|performs_action| nft_chain__workers_worker_1_input_e9dbbb7115f3
+  nft_rule__workers_worker_1_input_rule_3_92617efc1b94 -->|has_rule| nft_chain__workers_worker_1_input_e9dbbb7115f3
+  nft_rule__workers_worker_1_input_rule_3_92617efc1b94 -->|performs_action| nft_chain__workers_worker_1_input_e9dbbb7115f3
+  nft_chain__workers_worker_1_output_39210c8fa21d -->|has_chain| container__workers_worker_1_b40bf70589b8
+  nft_rule__workers_worker_1_output_rule_1_003555954b62 -->|has_rule| nft_chain__workers_worker_1_output_39210c8fa21d
+  nft_rule__workers_worker_1_output_rule_1_003555954b62 -->|performs_action| nft_chain__workers_worker_1_output_39210c8fa21d
+  nft_rule__workers_worker_1_output_rule_2_369a984cd66d -->|has_rule| nft_chain__workers_worker_1_output_39210c8fa21d
+  nft_rule__workers_worker_1_output_rule_2_369a984cd66d -->|performs_action| nft_chain__workers_worker_1_output_39210c8fa21d
+  nft_rule__workers_worker_1_output_rule_3_5619bbaa9090 -->|has_rule| nft_chain__workers_worker_1_output_39210c8fa21d
+  nft_rule__workers_worker_1_output_rule_3_5619bbaa9090 -->|performs_action| nft_chain__workers_worker_1_output_39210c8fa21d
+  nft_table__erlkoenig_host_3fe20590cdae -->|has_nft_table| stack__ResourceAdmissionLab_d3a33bdb4f8b
+  nft_counter__erlkoenig_host_admission_input_drop_359dbc964165 -->|uses_counter| nft_table__erlkoenig_host_3fe20590cdae
+  nft_counter__erlkoenig_host_admission_forward_drop_5c79ff3ac1fd -->|uses_counter| nft_table__erlkoenig_host_3fe20590cdae
+  nflog_group__erlkoenig_host_72_9cc04de97941 -->|logs_to_nflog_group| nft_table__erlkoenig_host_3fe20590cdae
+  nft_chain__erlkoenig_host_input_60ea165fbf83 -->|has_chain| nft_table__erlkoenig_host_3fe20590cdae
+  nft_rule__erlkoenig_host_input_rule_1_5a5f5686d937 -->|has_rule| nft_chain__erlkoenig_host_input_60ea165fbf83
+  nft_rule__erlkoenig_host_input_rule_1_5a5f5686d937 -->|performs_action| nft_chain__erlkoenig_host_input_60ea165fbf83
+  nft_rule__erlkoenig_host_input_rule_2_0c898a058e78 -->|has_rule| nft_chain__erlkoenig_host_input_60ea165fbf83
+  nft_rule__erlkoenig_host_input_rule_2_0c898a058e78 -->|performs_action| nft_chain__erlkoenig_host_input_60ea165fbf83
+  nft_rule__erlkoenig_host_input_rule_3_09049975640f -->|has_rule| nft_chain__erlkoenig_host_input_60ea165fbf83
+  nft_rule__erlkoenig_host_input_rule_3_09049975640f -->|performs_action| nft_chain__erlkoenig_host_input_60ea165fbf83
+  nft_rule__erlkoenig_host_input_rule_4_e9aa6a2b9895 -->|has_rule| nft_chain__erlkoenig_host_input_60ea165fbf83
+  nft_rule__erlkoenig_host_input_rule_4_e9aa6a2b9895 -->|performs_action| nft_chain__erlkoenig_host_input_60ea165fbf83
+  nft_rule__erlkoenig_host_input_rule_5_1bcdb6a572fe -->|has_rule| nft_chain__erlkoenig_host_input_60ea165fbf83
+  nft_rule__erlkoenig_host_input_rule_5_1bcdb6a572fe -->|performs_action| nft_chain__erlkoenig_host_input_60ea165fbf83
+  nft_rule__erlkoenig_host_input_rule_5_1bcdb6a572fe -->|logs_to_nflog_group| ext__nflog_group__72_872261620421
+  nft_rule__erlkoenig_host_input_rule_5_1bcdb6a572fe -->|uses_counter| ext__nft_counter__admission_input_drop_c86b24ea34b9
+  nft_chain__erlkoenig_host_forward_d6af369731f5 -->|has_chain| nft_table__erlkoenig_host_3fe20590cdae
+  nft_rule__erlkoenig_host_forward_rule_1_ce7d2bf75dce -->|has_rule| nft_chain__erlkoenig_host_forward_d6af369731f5
+  nft_rule__erlkoenig_host_forward_rule_1_ce7d2bf75dce -->|performs_action| nft_chain__erlkoenig_host_forward_d6af369731f5
+  nft_rule__erlkoenig_host_forward_rule_2_ed9e0d83ed70 -->|has_rule| nft_chain__erlkoenig_host_forward_d6af369731f5
+  nft_rule__erlkoenig_host_forward_rule_2_ed9e0d83ed70 -->|performs_action| nft_chain__erlkoenig_host_forward_d6af369731f5
+  nft_rule__erlkoenig_host_forward_rule_3_b39bb70567d9 -->|has_rule| nft_chain__erlkoenig_host_forward_d6af369731f5
+  nft_rule__erlkoenig_host_forward_rule_3_b39bb70567d9 -->|performs_action| nft_chain__erlkoenig_host_forward_d6af369731f5
+  nft_rule__erlkoenig_host_forward_rule_4_3068a6b082d3 -->|has_rule| nft_chain__erlkoenig_host_forward_d6af369731f5
+  nft_rule__erlkoenig_host_forward_rule_4_3068a6b082d3 -->|performs_action| nft_chain__erlkoenig_host_forward_d6af369731f5
+  nft_rule__erlkoenig_host_forward_rule_4_3068a6b082d3 -->|logs_to_nflog_group| ext__nflog_group__72_872261620421
+  nft_rule__erlkoenig_host_forward_rule_4_3068a6b082d3 -->|uses_counter| ext__nft_counter__admission_forward_drop_d425e512329a
+

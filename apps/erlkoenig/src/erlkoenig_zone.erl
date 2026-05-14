@@ -202,6 +202,7 @@ handle_call({destroy_zone, Name}, _From, State) ->
                 false ->
                     case erlkoenig_zone_sup:stop_zone(Name) of
                         ok ->
+                            destroy_link_state(Name),
                             %% link_state is lazy-inserted on first
                             %% link_state/1 call and was leaked on
                             %% destroy before this cleanup. A recreate
@@ -252,6 +253,32 @@ preprovision_link(#{network := #{mode := ipvlan}} = Cfg) ->
     end;
 preprovision_link(_) -> ok.
 
+-spec destroy_link_state(zone_name()) -> ok.
+destroy_link_state(Name) ->
+    LinkRef = case ets:lookup(?TAB, {Name, link_state}) of
+        [{{Name, link_state}, Cached}] ->
+            {ok, Cached};
+        [] ->
+            %% create_zone preprovisions dummy/IPVLAN host links before any
+            %% container attach. If a later apply/down destroys the zone before
+            %% link_state/1 was called, no cached LinkRef exists even though
+            %% the host links do. Reconstruct the link state from the zone
+            %% config so destroy still tears down the preprovisioned links.
+            case ets:lookup(?TAB, Name) of
+                [{Name, Cfg}] when is_map(Cfg) ->
+                    erlkoenig_zone_link:init(maps:put(zone, Name, Cfg));
+                _ ->
+                    {error, unknown_zone}
+            end
+    end,
+    case LinkRef of
+        {ok, Ref} ->
+            erlkoenig_zone_link:destroy(Ref);
+        {error, Reason} ->
+            logger:warning("zone ~s link destroy skipped: ~p", [Name, Reason]),
+            ok
+    end.
+
 -doc "Load zone configs from app env. Falls back to a single default zone.".
 -spec load_zones() -> [{zone_name(), zone_config()}].
 load_zones() ->
@@ -280,10 +307,8 @@ build_default_zone() ->
 -doc """
 Ensure all required keys are present, fill in defaults.
 
-Handles two input formats:
-  1. Full IPVLAN format: `#{network => #{mode => ipvlan, parent => ..., ...}, ...}`
-  2. Legacy flat format: `#{bridge => ..., subnet => ..., ...}` —
-     the `bridge' key (if present) is used as a dummy parent name.
+Configured zones must use the explicit IPVLAN format:
+`#{network => #{mode => ipvlan, parent => ..., ...}, ...}`.
 """.
 -spec normalize_config(map()) -> zone_config().
 normalize_config(#{network := #{mode := ipvlan} = Net} = Cfg) ->
@@ -296,16 +321,13 @@ normalize_config(#{network := #{mode := ipvlan} = Net} = Cfg) ->
                    gateway     => first_of(gateway, [Net, Cfg], undefined),
                    netmask     => first_of(netmask, [Net, Cfg], 24)},
       policy  => maps:get(policy, Cfg, allow_outbound)};
+normalize_config(#{network := Net}) when is_map(Net) ->
+    error({unsupported_zone_network, maps:get(mode, Net, undefined)});
 normalize_config(Cfg) when is_map(Cfg) ->
-    %% Legacy flat format → wrap into IPVLAN with dummy parent
-    #{network => #{mode        => ipvlan,
-                   parent      => maps:get(bridge, Cfg, <<"ek_default">>),
-                   parent_type => dummy,
-                   ipvlan_mode => l3s,
-                   subnet      => maps:get(subnet, Cfg, {10, 0, 0, 0}),
-                   gateway     => maps:get(gateway, Cfg, undefined),
-                   netmask     => maps:get(netmask, Cfg, 24)},
-      policy  => maps:get(policy, Cfg, allow_outbound)}.
+    error({legacy_zone_config_refused,
+           #{fields => maps:keys(Cfg),
+             hint => <<"zones must declare network => #{mode => ipvlan, "
+                       "parent => ...}; flat bridge/subnet zone config was removed">>}}).
 
 -doc "Look up a service PID by zone + type. Returns {ok, Pid} or error.".
 -spec lookup_service(zone_name(), service_type()) -> {ok, pid()} | {error, not_registered}.

@@ -93,6 +93,24 @@ amqp_routes_packet_events_to_firewall_chain_packet_test() ->
     ?assertEqual(<<"firewall.input.packet">>, RoutingKey),
     ?assertEqual(firewall_packet, maps:get(kind, Payload)).
 
+amqp_routes_drop_counters_to_drop_test() ->
+    {ok, RoutingKey, Payload} =
+        erlkoenig_firewall_event:amqp(
+          {counter_event, <<"input_drop">>,
+           #{packets => 3, bytes => 180}}),
+
+    ?assertEqual(<<"firewall.input.drop">>, RoutingKey),
+    ?assertEqual(<<"input_drop">>, maps:get(counter, Payload)).
+
+amqp_routes_non_drop_counters_to_counter_test() ->
+    {ok, RoutingKey, Payload} =
+        erlkoenig_firewall_event:amqp(
+          {counter_event, <<"live_ssh_accept">>,
+           #{packets => 1, bytes => 60}}),
+
+    ?assertEqual(<<"firewall.live_ssh_accept.counter">>, RoutingKey),
+    ?assertEqual(<<"live_ssh_accept">>, maps:get(counter, Payload)).
+
 amqp_routes_suspect_events_to_guard_family_test() ->
     {ok, RoutingKey, Payload} =
         erlkoenig_firewall_event:amqp(

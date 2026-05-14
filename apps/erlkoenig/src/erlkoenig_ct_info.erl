@@ -71,10 +71,12 @@ operator_state(State, _Data) ->
 maybe_add_optional_fields(State, Data, Info0) ->
     Info1 = maybe_put(net_info,    Data#ct_data.net_info,     Info0),
     Info2 = maybe_put(exit_info,   Data#ct_data.exit_info,    Info1),
-    Info3 = maybe_put(error,       Data#ct_data.error_reason, Info2),
-    Info4 = maybe_put(socket_path, Data#ct_data.socket_path,  Info3),
-    erlkoenig_ct_observe:maybe_add_stats(State, Data#ct_data.id, Info4).
+    Info3 = maybe_put(runtime_timeline, Data#ct_data.runtime_timeline, Info2),
+    Info4 = maybe_put(error,       Data#ct_data.error_reason, Info3),
+    Info5 = maybe_put(socket_path, Data#ct_data.socket_path,  Info4),
+    erlkoenig_ct_observe:maybe_add_stats(State, Data#ct_data.id, Info5).
 
 -spec maybe_put(atom(), term(), map()) -> map().
 maybe_put(_Key, undefined, Map) -> Map;
+maybe_put(_Key, [], Map)        -> Map;
 maybe_put(Key, Value, Map)      -> Map#{Key => Value}.

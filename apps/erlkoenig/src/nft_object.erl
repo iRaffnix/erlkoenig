@@ -44,7 +44,12 @@ Usage:
     get_all_counters/3, get_all_counters/4
 ]).
 %% Exposed for fuzzing — pure parsers of kernel responses.
--export([parse_obj_response/1, parse_dump/2]).
+-export([
+    counter_get_msg/4,
+    counter_get_reset_msg/4,
+    parse_obj_response/1,
+    parse_dump/2
+]).
 
 -include("nft_constants.hrl").
 
@@ -101,6 +106,11 @@ get_counter(Sock, Family, Table, Name) ->
 get_counter(Sock, Family, Table, Name, Seq) ->
     query_counter(Sock, ?NFT_MSG_GETOBJ, Family, Table, Name, Seq).
 
+-spec counter_get_msg(0..255, binary(), binary(), non_neg_integer()) ->
+    nfnl_msg:nl_msg().
+counter_get_msg(Family, Table, Name, Seq) ->
+    counter_query_msg(?NFT_MSG_GETOBJ, Family, Table, Name, Seq).
+
 -doc """
 Read a named counter and atomically reset it to zero.
 
@@ -116,6 +126,11 @@ get_counter_reset(Sock, Family, Table, Name) ->
 %% @doc get_counter_reset with explicit sequence number.
 get_counter_reset(Sock, Family, Table, Name, Seq) ->
     query_counter(Sock, ?NFT_MSG_GETOBJ_RESET, Family, Table, Name, Seq).
+
+-spec counter_get_reset_msg(0..255, binary(), binary(), non_neg_integer()) ->
+    nfnl_msg:nl_msg().
+counter_get_reset_msg(Family, Table, Name, Seq) ->
+    counter_query_msg(?NFT_MSG_GETOBJ_RESET, Family, Table, Name, Seq).
 
 -doc """
 Get all named counters in a table.
@@ -162,29 +177,30 @@ query_counter(Sock, MsgType, Family, Table, Name) ->
     query_counter(Sock, MsgType, Family, Table, Name, seq()).
 
 query_counter(Sock, MsgType, Family, Table, Name, Seq) ->
+    Msg = counter_query_msg(MsgType, Family, Table, Name, Seq),
+    maybe
+        ok ?= nfnl_socket:send(Sock, Msg),
+        {ok, Data} ?= nfnl_socket:recv(Sock),
+        parse_obj_response(Data)
+    else
+        {error, _} = Err -> Err
+    end.
+
+-spec counter_query_msg(0..255, 0..255, binary(), binary(), non_neg_integer()) ->
+    nfnl_msg:nl_msg().
+counter_query_msg(MsgType, Family, Table, Name, Seq) ->
     Attrs = iolist_to_binary([
         nfnl_attr:encode_str(?NFTA_OBJ_TABLE, Table),
         nfnl_attr:encode_str(?NFTA_OBJ_NAME, Name),
         nfnl_attr:encode_u32(?NFTA_OBJ_TYPE, ?NFT_OBJECT_COUNTER)
     ]),
-    Msg = nfnl_msg:build_hdr(
+    nfnl_msg:build_hdr(
         MsgType,
         Family,
-        ?NLM_F_REQUEST bor ?NLM_F_ACK,
+        ?NLM_F_REQUEST,
         Seq,
         Attrs
-    ),
-    maybe
-        ok ?= nfnl_socket:send(Sock, Msg),
-        %% First response: the object data
-        {ok, Data} ?= nfnl_socket:recv(Sock),
-        Result = parse_obj_response(Data),
-        %% Second response: the ACK — drain it
-        _ = nfnl_socket:recv(Sock),
-        Result
-    else
-        {error, _} = Err -> Err
-    end.
+    ).
 
 -spec parse_obj_response(binary()) ->
     {ok, #{bytes => non_neg_integer(), name => binary(), packets => non_neg_integer()}}

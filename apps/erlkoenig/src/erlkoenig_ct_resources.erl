@@ -30,8 +30,7 @@ Functions:
   DNS:              dns_register/1,   dns_unregister/1
   DNS filter:       dns_filter_register/1, dns_filter_unregister/1
   DETS state:       dets_register/1,  dets_unregister/1
-  Topology derived: netns_path/1, zone_bridge_name/1,
-                    cgroup_path_for_id/1
+  Topology derived: netns_path/1, cgroup_path_for_id/1
   Socket cleanup:   safe_sock_close/1, cleanup_socket_file/1
   Volume audit:     audit_volumes_mounted/1, audit_volumes_released/1
   Volume cleanup:   cleanup_ephemeral_volumes/1
@@ -52,7 +51,6 @@ Functions:
     dets_unregister/1,
     %% Topology helpers (kept here because dets_register uses them)
     netns_path/1,
-    zone_bridge_name/1,
     cgroup_path_for_id/1,
     %% Socket cleanup
     safe_sock_close/1,
@@ -146,15 +144,14 @@ dets_register(#ct_data{id = Id, os_pid = OsPid, socket_path = SocketPath,
     case whereis(erlkoenig_node_state) of
         undefined -> ok;
         _ ->
-            VethHost = case NetInfo of
-                #{host_veth := VH} -> VH;
+            Iface = case NetInfo of
+                #{iface := I} -> I;
                 _ -> undefined
             end,
-            VethContainer = case NetInfo of
-                #{container_veth := VC} -> VC;
+            Attach = case NetInfo of
+                #{attach := A} -> A;
                 _ -> undefined
             end,
-            Bridge = zone_bridge_name(Zone),
             CgroupPath = cgroup_path_for_id(Id),
             Config = #{
                 args => Args,
@@ -177,9 +174,8 @@ dets_register(#ct_data{id = Id, os_pid = OsPid, socket_path = SocketPath,
                 ip => Ip,
                 netns => netns_path(OsPid),
                 cgroup => CgroupPath,
-                veth_host => VethHost,
-                veth_container => VethContainer,
-                bridge => Bridge,
+                iface => Iface,
+                attach => Attach,
                 zone => Zone,
                 binary_path => BinaryPath,
                 config => Config,
@@ -207,16 +203,6 @@ netns_path(undefined) -> undefined;
 netns_path(Pid) when is_integer(Pid), Pid > 0 ->
     list_to_binary("/proc/" ++ integer_to_list(Pid) ++ "/ns/net");
 netns_path(_) -> undefined.
-
--spec zone_bridge_name(atom()) -> binary() | undefined.
-zone_bridge_name(default) ->
-    case application:get_env(erlkoenig, bridge_name, <<"erlkoenig_br0">>) of
-        Bin when is_binary(Bin) -> Bin;
-        Str when is_list(Str) -> list_to_binary(Str)
-    end;
-zone_bridge_name(_ZoneName) ->
-    %% ADR-0020: IPVLAN-only, no bridges. Kept for DETS compat.
-    undefined.
 
 -spec cgroup_path_for_id(binary()) -> binary().
 cgroup_path_for_id(Id) ->

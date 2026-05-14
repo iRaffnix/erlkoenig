@@ -42,11 +42,16 @@ Use erlkoenig:* for programmatic access.
          load/1, reload/1,
          dns/1, health/0, zones/0, events/0, events/1,
          limits/0, limits/1,
+         admission_denial/1, admission_denial/2,
          export/0, export/1]).
 
 %% capture/1 — Run a fun that uses io:format, return output as string.
 %% Useful for eval/rpc where io:format goes to a remote group_leader.
 -export([capture/1]).
+
+-ifdef(TEST).
+-export([print_event/1]).
+-endif.
 
 %% ANSI colors
 -define(GREEN,  "\e[32m").
@@ -87,6 +92,12 @@ help() ->
       ?BOLD "  Monitoring" ?RESET "~n"
       "    ek:events()          Stream lifecycle events~n"
       "    ek:events(N)         Show last N events~n"
+      "    ek:admission_denial(Name)~n"
+      "                         Latest resource-admission denial for a container~n"
+      "                         (JSON output by default - for the pipe to~n"
+      "                         `mix erlkoenig.explain admission`)~n"
+      "    ek:admission_denial(Name, #{format => text})~n"
+      "                         Quick-look text rendering~n"
       "~n"
       ?DIM "  Name = atom | binary | string. Examples: web, <<\"web\">>, \"web\"" ?RESET "~n"
       ?DIM "  For raw data: erlkoenig:list(), erlkoenig:inspect(Pid)" ?RESET "~n"
@@ -204,29 +215,8 @@ inspect(Name) ->
                         undefined -> "-";
                         _ -> format_ip4(GwVal)
                     end),
-                    Veth = maps:get(host_veth, Net, undefined),
-                    Iface = maps:get(iface, Net, maps:get(container_veth, Net, "-")),
-                    print_kv("Interface", Iface),
-                    case Veth of
-                        undefined -> ok;
-                        _ -> print_kv("Host veth", Veth)
-                    end,
-                    case State of
-                        running when is_binary(Veth) ->
-                            VethStats = read_all_veth_stats(Veth),
-                            io:format("~n  ~s--- Traffic (container perspective) ---~s~n",
-                                      [?DIM, ?RESET]),
-                            %% Host veth RX = Container TX, swap for display
-                            print_kv("RX bytes", format_bytes(maps:get(tx_bytes, VethStats, 0))),
-                            print_kv("RX packets", format_int(maps:get(tx_packets, VethStats, 0))),
-                            print_kv("RX dropped", format_int_warn(maps:get(tx_dropped, VethStats, 0))),
-                            print_kv("RX errors", format_int_warn(maps:get(tx_errors, VethStats, 0))),
-                            print_kv("TX bytes", format_bytes(maps:get(rx_bytes, VethStats, 0))),
-                            print_kv("TX packets", format_int(maps:get(rx_packets, VethStats, 0))),
-                            print_kv("TX dropped", format_int_warn(maps:get(rx_dropped, VethStats, 0))),
-                            print_kv("TX errors", format_int_warn(maps:get(rx_errors, VethStats, 0)));
-                        _ -> ok
-                    end
+                    Iface = maps:get(iface, Net, "-"),
+                    print_kv("Interface", Iface)
             end,
             case maps:get(limits, Ct, #{}) of
                 Limits when map_size(Limits) > 0 ->
@@ -577,7 +567,7 @@ load(File) ->
     Path = to_str(File),
     case erlkoenig_config:load(Path) of
         {ok, Pids} ->
-            io:format("  ~sLoaded ~s — ~p container(s) spawned~s~n",
+            io:format("  ~sLoaded ~s - ~p container(s) spawned~s~n",
                       [?GREEN, Path, length(Pids), ?RESET]),
             ok;
         {error, Reason} ->
@@ -604,7 +594,7 @@ dns(Name) ->
     Bin = to_bin(Name),
     case erlkoenig_dns:lookup(Bin) of
         {ok, Ip} ->
-            io:format("  ~s → ~s~n", [Bin, format_ip4(Ip)]),
+            io:format("  ~s -> ~s~n", [Bin, format_ip4(Ip)]),
             ok;
         not_found ->
             print_error("DNS: '~s' not found", [to_str(Name)])
@@ -701,7 +691,7 @@ events() ->
 
 -spec events(pos_integer()) -> ok.
 events(N) when is_integer(N), N > 0 ->
-    io:format("~n  ~sLast ~p event(s) — use ek:events() to stream live~s~n~n",
+    io:format("~n  ~sLast ~p event(s) - use ek:events() to stream live~s~n~n",
               [?DIM, N, ?RESET]),
     %% Event log does not store history; just start streaming
     _ = erlkoenig_events:subscribe(ek_event_printer, self()),
@@ -728,6 +718,17 @@ events_loop_n(N) ->
         events_loop_n(N)
     end.
 
+print_event({container_started, Id, Name, Pid}) ->
+    io:format("  ~s[started]~s  ~s/~s (pid=~p)~n", [?GREEN, ?RESET, Id, Name, Pid]);
+print_event({container_stopped, Id, Name, ExitInfo}) ->
+    Code = maps:get(exit_code, ExitInfo, "?"),
+    io:format("  ~s[stopped]~s  ~s/~s (exit=~p)~n", [?RED, ?RESET, Id, Name, Code]);
+print_event({container_failed, Id, Name, Reason}) ->
+    io:format("  ~s[failed]~s   ~s/~s (~p)~n", [?RED, ?RESET, Id, Name, Reason]);
+print_event({container_restarting, Id, Name, Attempt}) ->
+    io:format("  ~s[restart]~s  ~s/~s (attempt #~p)~n", [?YELLOW, ?RESET, Id, Name, Attempt]);
+print_event({container_oom, Id, Name}) ->
+    io:format("  ~s[oom]~s     ~s/~s~n", [?RED, ?RESET, Id, Name]);
 print_event({container_started, Id, Pid}) ->
     io:format("  ~s[started]~s  ~s (pid=~p)~n", [?GREEN, ?RESET, Id, Pid]);
 print_event({container_stopped, Id, ExitInfo}) ->
@@ -741,6 +742,238 @@ print_event({container_oom, Id}) ->
     io:format("  ~s[oom]~s     ~s~n", [?RED, ?RESET, Id]);
 print_event(Other) ->
     io:format("  [event]   ~p~n", [Other]).
+
+%%====================================================================
+%% admission_denial — explain why a container was rejected at admission
+%%====================================================================
+%%
+%% Hot path: in-memory ring (`erlkoenig_denial_log`).
+%% Cold path: audit log query (`erlkoenig_audit:query/1`), used when
+%%            the ring has been wiped by a restart.
+%%
+%% JSON output mirrors the shape `erlkoenig_error:to_map/1` produces
+%% for AMQP, so the same payload can be consumed by
+%% `Erlkoenig.Ontology.Admission.from_emit_event/1` on the workstation
+%% via `mix erlkoenig.explain admission`.
+
+-spec admission_denial(atom() | binary() | string()) -> ok.
+admission_denial(Name) ->
+    admission_denial(Name, #{}).
+
+-spec admission_denial(atom() | binary() | string(), map()) -> ok.
+admission_denial(Name, Opts) when is_map(Opts) ->
+    Key = to_bin(Name),
+    %% Default JSON: the primary workflow is the pipe
+    %% `ssh ... | mix erlkoenig.explain admission`. Interactive
+    %% quick-look is opt-in via `#{format => text}`.
+    Format = maps:get(format, Opts, json),
+    Mode = case maps:get(all, Opts, false) of
+        true -> all;
+        false -> latest
+    end,
+    Denials = find_admission_denials(Key, Mode),
+    print_admission_denials(Denials, Key, Format).
+
+%% --- lookup ---
+
+find_admission_denials(Key, Mode) ->
+    HotMatches = denial_log_matches(Key),
+    Result = case HotMatches of
+        [] -> audit_denial_matches(Key);
+        _  -> HotMatches
+    end,
+    case Mode of
+        latest -> lists:sublist(Result, 1);
+        all    -> Result
+    end.
+
+denial_log_matches(Key) ->
+    case erlkoenig_denial_log:list_for(Key) of
+        [] ->
+            %% Operator may have given the friendly name (the DSL-declared
+            %% container name) rather than the generated container_id.
+            %% Scan the ring for a matching name field.
+            [D || D <- erlkoenig_denial_log:all(),
+                  maps:get(container_name, D, undefined) =:= Key];
+        Hits ->
+            Hits
+    end.
+
+audit_denial_matches(Key) ->
+    %% Fail-open: a lookup tool that crashes when the audit gen_server
+    %% is missing (eunit, early boot, audit-disabled deployments) is
+    %% worse than one that returns "no older denials". The operator
+    %% sees the empty result and goes back to the live AMQP stream.
+    try
+        SubjectLines = audit_query_lines(#{subject => Key}),
+        NameLines = audit_query_lines(#{container_name => Key}),
+        Decoded = [D || L <- dedupe_lines(SubjectLines ++ NameLines),
+                        D <- safe_decode_audit(L)],
+        [audit_to_denial(E) || E <- Decoded]
+    catch
+        exit:{noproc, _} -> [];
+        exit:{timeout, _} -> [];
+        _:_ -> []
+    end.
+
+audit_query_lines(Filter) ->
+    Opts = maps:merge(#{type => resource_admission_denied,
+                        reverse => true,
+                        limit => 1000},
+                      Filter),
+    case erlkoenig_audit:query(Opts) of
+        {ok, Lines} -> Lines;
+        _ -> []
+    end.
+
+dedupe_lines(Lines) ->
+    dedupe_lines(Lines, #{}, []).
+
+dedupe_lines([], _Seen, Acc) ->
+    lists:reverse(Acc);
+dedupe_lines([Line | Rest], Seen, Acc) ->
+    case maps:is_key(Line, Seen) of
+        true -> dedupe_lines(Rest, Seen, Acc);
+        false -> dedupe_lines(Rest, Seen#{Line => true}, [Line | Acc])
+    end.
+
+safe_decode_audit(<<>>) -> [];
+safe_decode_audit(Line) when is_binary(Line) ->
+    try [json:decode(Line)]
+    catch _:_ -> []
+    end.
+
+%% `erlkoenig_audit:encode_event/4' flattens the caller's `details'
+%% map onto the top level of the recorded event (Base wins on
+%% reserved-key conflict). Read fields off the top level — the
+%% `<<"details">>' key never exists in the persisted JSON.
+audit_to_denial(E) when is_map(E) ->
+    #{
+        container_id   => maps:get(<<"subject">>, E, <<"unknown">>),
+        container_name => maps:get(<<"container_name">>, E, undefined),
+        ts_ms          => iso8601_to_ms(maps:get(<<"ts">>, E, undefined)),
+        zone           => maps:get(<<"zone">>, E, undefined),
+        reason         => maps:get(<<"reason">>, E, #{}),
+        limits         => maps:get(<<"limits">>, E, #{}),
+        source         => audit
+    }.
+
+iso8601_to_ms(undefined) -> undefined;
+iso8601_to_ms(Bin) when is_binary(Bin) ->
+    try calendar:rfc3339_to_system_time(binary_to_list(Bin),
+                                        [{unit, millisecond}])
+    catch _:_ -> undefined
+    end;
+iso8601_to_ms(_) -> undefined.
+
+%% --- output ---
+
+print_admission_denials([], Key, text) ->
+    io:format("~n  ~sNo admission denials found for ~s.~s~n"
+              "  ~sETS ring is wiped on restart; older denials may live in the audit log only.~s~n~n",
+              [?DIM, binary_to_list(Key), ?RESET, ?DIM, ?RESET]),
+    ok;
+print_admission_denials([], _Key, json) ->
+    io:format("[]~n"),
+    ok;
+print_admission_denials(Denials, _Key, json) ->
+    EmitEvents = [denial_to_emit_event(D) || D <- Denials],
+    Payload = case EmitEvents of
+        [Single] -> Single;
+        Many     -> Many
+    end,
+    io:format("~s~n", [json:encode(Payload)]),
+    ok;
+print_admission_denials(Denials, Key, text) ->
+    io:format("~n  ~s~s~s - ~p denial(s)~n",
+              [?BOLD, binary_to_list(Key), ?RESET, length(Denials)]),
+    lists:foreach(fun(D) -> print_denial_text(D) end, Denials),
+    io:format("~n"),
+    ok.
+
+print_denial_text(D) ->
+    Ts = maps:get(ts_ms, D, undefined),
+    TsStr = case Ts of
+        undefined -> "?";
+        Ms when is_integer(Ms) ->
+            calendar:system_time_to_rfc3339(Ms,
+                [{unit, millisecond}, {offset, "Z"}])
+    end,
+    Origin = case maps:get(source, D, denial_log) of
+        audit -> " (from audit)";
+        _     -> ""
+    end,
+    io:format("~n  ~s[~s]~s~s~n", [?DIM, TsStr, ?RESET, Origin]),
+    io:format("    Container : ~s~n",
+              [to_str_safe(maps:get(container_id, D, <<"unknown">>))]),
+    case maps:get(container_name, D, undefined) of
+        undefined -> ok;
+        Name      -> io:format("    Name      : ~s~n", [to_str_safe(Name)])
+    end,
+    case maps:get(zone, D, undefined) of
+        undefined -> ok;
+        Zone      -> io:format("    Zone      : ~p~n", [Zone])
+    end,
+    Reason = case maps:get(reason, D, #{}) of
+        R when is_map(R) -> R;
+        _ -> #{}
+    end,
+    io:format("    Reason    : ~p~n",
+              [map_get_any(reason, Reason, unknown)]),
+    [print_optional(F, Reason) ||
+        F <- [{kind, "Kind"}, {ceiling, "Ceiling"},
+              {allocated, "Allocated"}, {committed, "Committed"}]],
+    Limits = maps:get(limits, D, #{}),
+    case map_size(Limits) of
+        0 -> ok;
+        _ ->
+            io:format("    Limits    :~n"),
+            %% Hot-path Limits keys are atoms (DSL-declared map);
+            %% audit-fallback Limits keys are binaries (JSON-decoded).
+            %% `to_str_safe/1' handles both — atom_to_list/1 would
+            %% crash on the audit-fallback path.
+            maps:foreach(fun(K, V) ->
+                io:format("      ~s = ~p~n", [to_str_safe(K), V])
+            end, Limits)
+    end,
+    ok.
+
+print_optional({Key, Label}, Map) ->
+    case map_get_any(Key, Map, undefined) of
+        undefined -> ok;
+        V         -> io:format("    ~-10s: ~p~n", [Label, V])
+    end.
+
+map_get_any(Key, Map, Default) when is_atom(Key), is_map(Map) ->
+    case maps:find(Key, Map) of
+        {ok, V} -> V;
+        error -> maps:get(atom_to_binary(Key), Map, Default)
+    end;
+map_get_any(Key, Map, Default) when is_map(Map) ->
+    maps:get(Key, Map, Default);
+map_get_any(_Key, _Map, Default) ->
+    Default.
+
+denial_to_emit_event(Denial) ->
+    Container = maps:get(container_id, Denial),
+    Zone      = maps:get(zone, Denial, undefined),
+    Reason    = maps:get(reason, Denial, #{}),
+    Limits    = maps:get(limits, Denial, #{}),
+    Ts        = maps:get(ts_ms, Denial, erlang:system_time(millisecond)),
+    Err = erlkoenig_error:make(ct, resource_admission_denied,
+                                <<"resource admission denied">>,
+                                #{zone => Zone,
+                                  reason => Reason,
+                                  limits => Limits},
+                                #{container => Container}),
+    %% Override ts so the JSON carries the *original* denial time, not
+    %% "now". This is the field `from_emit_event/1` should treat as
+    %% authoritative.
+    Err2 = Err#{ts := case Ts of
+                     undefined -> erlang:system_time(millisecond);
+                     N -> N
+                 end},
+    erlkoenig_error:to_map(Err2).
 
 %%====================================================================
 %% Internal — name resolution
@@ -802,51 +1035,21 @@ format_ip4({A, B, C, D}) ->
 format_int(undefined) -> "-";
 format_int(N) when is_integer(N) -> integer_to_list(N).
 
-format_int_warn(0) -> "0";
-format_int_warn(N) when is_integer(N) ->
-    ?RED ++ integer_to_list(N) ++ ?RESET.
-
 format_traffic(Ct) ->
     case maps:get(state, Ct) of
         running ->
-            %% Host veth RX = Container TX, Host veth TX = Container RX
-            case maps:get(net_info, Ct, undefined) of
-                #{host_veth := Veth} ->
-                    Rx = read_veth_stat(Veth, "tx_bytes"),
-                    Tx = read_veth_stat(Veth, "rx_bytes"),
-                    {format_bytes(Rx), format_bytes(Tx)};
-                _ -> {"-", "-"}
-            end;
+            %% IPVLAN slaves live in the container netns; there is no host-side
+            %% interface statistics file to read from /sys/class/net.
+            {"-", "-"};
         _ -> {"-", "-"}
     end.
 
 format_traffic_pkts(Ct) ->
     case maps:get(state, Ct) of
         running ->
-            case maps:get(net_info, Ct, undefined) of
-                #{host_veth := Veth} ->
-                    Rx = read_veth_stat(Veth, "tx_packets"),
-                    Tx = read_veth_stat(Veth, "rx_packets"),
-                    {integer_to_list(Rx), integer_to_list(Tx)};
-                _ -> {"-", "-"}
-            end;
+            {"-", "-"};
         _ -> {"-", "-"}
     end.
-
-read_veth_stat(Veth, Stat) ->
-    Path = "/sys/class/net/" ++ binary_to_list(Veth) ++ "/statistics/" ++ Stat,
-    case file:read_file(list_to_binary(Path)) of
-        {ok, Bin} ->
-            try list_to_integer(string:trim(binary_to_list(Bin)))
-            catch _:_ -> 0
-            end;
-        _ -> 0
-    end.
-
-read_all_veth_stats(Veth) ->
-    Stats = [rx_bytes, rx_packets, rx_dropped, rx_errors,
-             tx_bytes, tx_packets, tx_dropped, tx_errors],
-    maps:from_list([{S, read_veth_stat(Veth, atom_to_list(S))} || S <- Stats]).
 
 format_cpu(Usec) when is_integer(Usec) ->
     %% Show as seconds with 1 decimal

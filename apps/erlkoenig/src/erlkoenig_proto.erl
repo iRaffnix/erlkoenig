@@ -84,6 +84,7 @@ runtime forwards child output without framing overhead.
 -define(TAG_REPLY_STDOUT,        16#07).
 -define(TAG_REPLY_STDERR,        16#08).
 -define(TAG_REPLY_METRICS_EVENT, 16#09).
+-define(TAG_REPLY_RUNTIME_EVENT, 16#0A).
 
 -define(TAG_CMD_SPAWN,           16#10).
 -define(TAG_CMD_GO,              16#11).
@@ -137,6 +138,7 @@ runtime forwards child output without framing overhead.
 -type tag_name() :: reply_ok | reply_error | reply_container_pid
                   | reply_ready | reply_exited | reply_status
                   | reply_stdout | reply_stderr | reply_metrics_event
+                  | reply_runtime_event
                   | cmd_spawn | cmd_go | cmd_kill | cmd_cgroup_set
                   | cmd_query_status | cmd_net_setup | cmd_write_file
                   | cmd_stdin | cmd_resize | cmd_device_filter
@@ -154,6 +156,7 @@ tag_name(?TAG_REPLY_STATUS)        -> reply_status;
 tag_name(?TAG_REPLY_STDOUT)        -> reply_stdout;
 tag_name(?TAG_REPLY_STDERR)        -> reply_stderr;
 tag_name(?TAG_REPLY_METRICS_EVENT) -> reply_metrics_event;
+tag_name(?TAG_REPLY_RUNTIME_EVENT) -> reply_runtime_event;
 tag_name(?TAG_CMD_SPAWN)           -> cmd_spawn;
 tag_name(?TAG_CMD_GO)              -> cmd_go;
 tag_name(?TAG_CMD_KILL)            -> cmd_kill;
@@ -455,24 +458,35 @@ encode_cmd_resize(Rows, Cols) ->
 
 -spec encode_cmd_device_filter(binary()) -> binary().
 encode_cmd_device_filter(CgroupPath) ->
-    msg(?TAG_CMD_DEVICE_FILTER, [
-        tlv_str(1, CgroupPath)
-    ]).
+    encode_cmd_device_filter(CgroupPath, []).
 
 -spec encode_cmd_device_filter(binary(), [{integer(), integer(), integer(), integer()}]) -> binary().
 encode_cmd_device_filter(CgroupPath, Rules) ->
+    %% Wire (must match C runtime handle_cmd_device_filter):
+    %%     <<CgroupPath:str16, RuleCount:u8, Rules/binary>>
+    %% This command is positional, not TLV. A previous TLV encoder made
+    %% the runtime read the attr type/length bytes as path/rule data,
+    %% surfacing as "too many device rules" for the default allowlist.
+    PathBin = iolist_to_binary(CgroupPath),
+    PathLen = byte_size(PathBin),
+    RuleCount = length(Rules),
+    PathLen =< 65535 orelse error({cgroup_path_too_long, PathLen}),
+    RuleCount =< 255 orelse error({device_rule_count_out_of_range, RuleCount}),
     RulesBin = << <<Type:8, Major:32/big-signed, Minor:32/big-signed, Access:8>>
                   || {Type, Major, Minor, Access} <- Rules >>,
-    msg(?TAG_CMD_DEVICE_FILTER, [
-        tlv_str(1, CgroupPath),
-        tlv_str(2, RulesBin)
-    ]).
+    <<?TAG_CMD_DEVICE_FILTER:8, ?PROTOCOL_VERSION:8,
+      PathLen:16/big, PathBin/binary,
+      RuleCount:8, RulesBin/binary>>.
 
 -spec encode_cmd_metrics_start(binary()) -> binary().
 encode_cmd_metrics_start(CgroupPath) ->
-    msg(?TAG_CMD_METRICS_START, [
-        tlv_str(1, CgroupPath)
-    ]).
+    %% Wire (must match C runtime handle_cmd_metrics_start):
+    %%     <<CgroupPath:str16>>
+    PathBin = iolist_to_binary(CgroupPath),
+    PathLen = byte_size(PathBin),
+    PathLen =< 65535 orelse error({cgroup_path_too_long, PathLen}),
+    <<?TAG_CMD_METRICS_START:8, ?PROTOCOL_VERSION:8,
+      PathLen:16/big, PathBin/binary>>.
 
 -spec encode_cmd_metrics_stop() -> binary().
 encode_cmd_metrics_stop() ->
@@ -587,6 +601,34 @@ decode_tag(?TAG_REPLY_METRICS_EVENT,
                                      timestamp_ns => Ts}};
 decode_tag(?TAG_REPLY_METRICS_EVENT, _) ->
     {error, {malformed, reply_metrics_event}};
+
+decode_tag(?TAG_REPLY_RUNTIME_EVENT, Bin) ->
+    Attrs = decode_tlv_attrs(Bin),
+    Event = case maps:find(1, Attrs) of
+        {ok, E} when is_binary(E) -> E;
+        _ -> <<"unknown">>
+    end,
+    Phase = case maps:find(2, Attrs) of
+        {ok, P} when is_binary(P) -> P;
+        _ -> <<>>
+    end,
+    Pid = case maps:find(3, Attrs) of
+        {ok, <<Pid0:32/big>>} -> Pid0;
+        _ -> 0
+    end,
+    ExitCode = case maps:find(4, Attrs) of
+        {ok, <<EC:32/big-signed>>} -> EC;
+        _ -> 0
+    end,
+    Signal = case maps:find(5, Attrs) of
+        {ok, <<S:8>>} -> S;
+        _ -> 0
+    end,
+    {ok, reply_runtime_event, #{event => Event,
+                                phase => Phase,
+                                pid => Pid,
+                                exit_code => ExitCode,
+                                term_signal => Signal}};
 
 decode_tag(Tag, _) ->
     {error, {unknown_tag, Tag}}.

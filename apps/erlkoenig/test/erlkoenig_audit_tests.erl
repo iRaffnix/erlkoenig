@@ -117,6 +117,45 @@ query_filter_test_() ->
           end]
      end}.
 
+query_field_filter_reverse_limit_test_() ->
+    {setup, fun setup/0, fun cleanup/1,
+     fun({_Pid, _Path}) ->
+         [fun() ->
+              erlkoenig_audit:log(#{type => resource_admission_denied,
+                                    subject => <<"target">>,
+                                    result => denied,
+                                    details => #{container_name => <<"api">>,
+                                                 marker => 1}}),
+              erlkoenig_audit:log(#{type => resource_admission_denied,
+                                    subject => <<"noise">>,
+                                    result => denied,
+                                    details => #{container_name => <<"other">>,
+                                                 marker => 2}}),
+              erlkoenig_audit:log(#{type => resource_admission_denied,
+                                    subject => <<"target">>,
+                                    result => denied,
+                                    details => #{container_name => <<"api">>,
+                                                 marker => 3}}),
+              flush(),
+              {ok, SubjectHit} =
+                  erlkoenig_audit:query(#{type => resource_admission_denied,
+                                          subject => <<"target">>,
+                                          reverse => true,
+                                          limit => 1}),
+              ?assertEqual(1, length(SubjectHit)),
+              ?assertNotEqual(nomatch,
+                              binary:match(hd(SubjectHit), <<"\"marker\":3">>)),
+              {ok, NameHits} =
+                  erlkoenig_audit:query(#{type => resource_admission_denied,
+                                          container_name => <<"api">>,
+                                          reverse => true,
+                                          limit => 10}),
+              ?assertEqual(2, length(NameHits)),
+              ?assertNotEqual(nomatch,
+                              binary:match(hd(NameHits), <<"\"marker\":3">>))
+          end]
+     end}.
+
 query_limit_test_() ->
     {setup, fun setup/0, fun cleanup/1,
      fun({_Pid, _Path}) ->

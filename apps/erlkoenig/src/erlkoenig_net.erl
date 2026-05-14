@@ -44,7 +44,7 @@ netns. The C runtime is link-agnostic.
          setup_container_net/5,
          setup_container_net/6,
          teardown_container_net/1,
-         teardown_container_veth/1]).
+         teardown_container_link/1]).
 
 -include("erlkoenig_error.hrl").
 
@@ -135,10 +135,7 @@ setup_container_net(Port, ContainerId, OsPid, Ip, ZoneName, Name) ->
                netmask => Mask,
                zone => ZoneName,
                iface => IfName,
-               attach => AttachInfo,
-               %% Backward compat: existing code reads host_veth/container_veth
-               host_veth => maps:get(host_veth, AttachInfo, undefined),
-               container_veth => maps:get(peer_veth, AttachInfo, IfName)}}
+               attach => AttachInfo}}
     else
         {error, Reason} ->
             _ = erlkoenig_zone_link:detach_container(LinkRef, #{slave => IfName}),
@@ -162,12 +159,11 @@ Used during container restart: the link is removed (network goes
 down), but the IP stays allocated so the container keeps the same
 address after restart.
 """.
--spec teardown_container_veth(map()) -> ok.
-teardown_container_veth(#{zone := ZoneName, attach := AttachInfo}) ->
+-spec teardown_container_link(map()) -> ok | {error, term()}.
+teardown_container_link(#{zone := ZoneName, attach := AttachInfo}) ->
     LinkRef = erlkoenig_zone:link_state(ZoneName),
-    _ = erlkoenig_zone_link:detach_container(LinkRef, AttachInfo),
-    ok;
-teardown_container_veth(_) ->
+    erlkoenig_zone_link:detach_container(LinkRef, AttachInfo);
+teardown_container_link(_) ->
     ok.
 
 %%%===================================================================

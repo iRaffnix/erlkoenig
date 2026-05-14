@@ -88,7 +88,7 @@ lookup(Name) ->
 %% =================================================================
 
 init([]) ->
-    %% ADR-0020: IPVLAN-only, no bridge. Bind on loopback for default zone.
+    %% ADR-0020: IPVLAN-only. Bind on loopback for the default zone.
     do_init(default, {127, 0, 0, 1});
 
 init({zone, #{zone := ZoneName, network := #{gateway := Gateway}} = _Config})

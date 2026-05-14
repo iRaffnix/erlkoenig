@@ -100,12 +100,12 @@ render_entry({Code, Meta}, More) ->
     io:format("### `~s`~n~n", [Code]),
     io:format("- **Severity:** `~s`~n",
               [atom_to_list(maps:get(severity, Meta, error))]),
-    io:format("- **Since:** `~s`~n", [maps:get(since, Meta, "unknown")]),
-    io:format("- **Description:** ~s~n",
-              [maps:get(description, Meta, "(none)")]),
+    io:format("- **Since:** `~ts`~n", [text(maps:get(since, Meta, "unknown"))]),
+    io:format("- **Description:** ~ts~n",
+              [text(maps:get(description, Meta, "(none)"))]),
     io:format("~n", []),
-    io:format("**Operator action:** ~s~n~n",
-              [maps:get(operator_action, Meta, "(none documented)")]),
+    io:format("**Operator action:** ~ts~n~n",
+              [text(maps:get(operator_action, Meta, "(none documented)"))]),
     case maps:get(evidence_fields, Meta, []) of
         [] -> ok;
         Fields ->
@@ -130,3 +130,10 @@ render_entry({Code, Meta}, More) ->
 
 anchor(Atom) when is_atom(Atom) ->
     atom_to_list(Atom).
+
+text(Value) when is_binary(Value) ->
+    unicode:characters_to_list(Value);
+text(Value) when is_atom(Value) ->
+    atom_to_list(Value);
+text(Value) ->
+    Value.

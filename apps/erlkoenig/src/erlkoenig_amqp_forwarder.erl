@@ -33,11 +33,16 @@ init(PublisherPid) ->
     {ok, PublisherPid}.
 
 handle_event(Event, PublisherPid) ->
-    case erlkoenig_amqp_codec:encode(Event) of
+    try erlkoenig_amqp_codec:encode(Event) of
         {ok, RoutingKey, JsonBin} ->
             gen_server:cast(PublisherPid, {publish, RoutingKey, JsonBin});
         skip ->
             ok
+    catch
+        Class:Reason:Stack ->
+            logger:warning("erlkoenig_amqp_forwarder: dropping event after "
+                           "encode failure ~p:~p event=~p stack=~p",
+                           [Class, Reason, Event, Stack])
     end,
     {ok, PublisherPid}.
 

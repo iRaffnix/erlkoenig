@@ -102,12 +102,12 @@ The `limits:` map is passed straight through to the cgroup controller:
 container "api", binary: "...", zone: "dmz", restart: :permanent,
   limits: %{memory: 256 * 1024 * 1024,    # 256 MB hard ceiling
             pids: 256,                      # fork bomb limit
-            cpu: 50}                        # 50% of one core (weight-based)
+            cpu: 50}                        # 50% of one CPU core hard quota
 ```
 
 Memory and pids are *kill factors*: the kernel OOMs or blocks `fork()` at
-those limits. CPU is a weight, not a cap — a container with `cpu: 50`
-under contention gets half a core, under idle conditions it can burn more.
+those limits. CPU is a `cpu.max` hard quota: `cpu: 50` writes
+`500000 1000000`, meaning 50% of one CPU core, not 50% of the whole host.
 
 Capabilities default to *none*. Adding `caps: [:net_raw]` keeps the
 single bit you need for raw sockets; anything you don't list is dropped

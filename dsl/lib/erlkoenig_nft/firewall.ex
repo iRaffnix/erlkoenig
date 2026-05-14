@@ -165,8 +165,8 @@ defmodule ErlkoenigNft.Firewall do
   Options:
     ct: :established         — conntrack state match
     icmp: true               — ICMP protocol match
-    iif: "name"              — input interface (wildcard: "vh_*")
-    oif: "name"              — output interface (wildcard ok)
+    iif: "name"              — exact input host interface
+    oif: "name"              — exact output host interface
     oif_neq: "name"          — output interface NOT equal
     tcp: port                — TCP destination port
     udp: port                — UDP destination port

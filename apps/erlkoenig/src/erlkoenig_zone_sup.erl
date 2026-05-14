@@ -74,7 +74,7 @@ init(top) ->
              period => 30}, Children}};
 
 %% Per-zone: ip_pool -> dns (rest_for_one ordering).
-%% IPVLAN-only (ADR-0020): no bridge child.
+%% IPVLAN-only (ADR-0020): no separate L2 link child.
 init({zone, ZoneName, Config}) ->
     CommonChildren = [
         #{id       => {erlkoenig_ip_pool, ZoneName},

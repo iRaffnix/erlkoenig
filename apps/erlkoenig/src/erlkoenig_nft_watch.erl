@@ -66,6 +66,10 @@ Threshold events:
     terminate/2
 ]).
 
+-ifdef(TEST).
+-export([resolve_server/1]).
+-endif.
+
 %% --- Types ---
 
 -type threshold_id() :: term().
@@ -79,7 +83,7 @@ Threshold events:
 
 -type state() :: #{
     config := config(),
-    socket := socket:socket(),
+    server := nfnl_server:server_ref(),
     rates := #{binary() => map()},
     thresholds := [map()],
     timer_ref := reference() | undefined
@@ -168,19 +172,20 @@ init(Config) ->
             exit:{already_started, _} -> ok
         end),
 
-    case nfnl_socket:open() of
-        {ok, Sock} ->
+    case resolve_server(maps:get(server, Config, erlkoenig_nft_srv)) of
+        {ok, Server} ->
             Interval = maps:get(interval, Config, ?DEFAULT_INTERVAL),
             TimerRef = erlang:send_after(Interval, self(), poll),
             {ok, #{
                 config => Config,
-                socket => Sock,
+                server => Server,
                 rates => #{},
                 thresholds => [],
                 timer_ref => TimerRef
             }};
-        {error, Reason} ->
-            {stop, {socket_open_failed, Reason}}
+        unavailable ->
+            {stop, {shared_netlink_server_unavailable,
+                    maps:get(server, Config, erlkoenig_nft_srv)}}
     end.
 
 -spec handle_call(term(), {pid(), term()}, state()) ->
@@ -206,7 +211,7 @@ handle_info(
     poll,
     #{
         config := Config,
-        socket := Sock,
+        server := Server,
         thresholds := Ts
     } = State
 ) ->
@@ -217,7 +222,7 @@ handle_info(
 
     NewRates = lists:foldl(
         fun(Name, Acc) ->
-            case nft_object:get_counter_reset(Sock, Family, Table, Name) of
+            case nfnl_server:get_counter_reset(Server, Family, Table, Name) of
                 {ok, #{packets := Pkts, bytes := Bytes}} ->
                     IntervalSec = Interval / 1000.0,
                     Rate = #{
@@ -246,15 +251,26 @@ handle_info(_Info, State) ->
     {noreply, State}.
 
 -spec terminate(term(), state()) -> ok.
-terminate(_Reason, #{socket := Sock, timer_ref := Ref}) ->
+terminate(_Reason, #{timer_ref := Ref}) ->
     _ =
         case Ref of
             undefined -> ok;
             _ -> _ = erlang:cancel_timer(Ref)
         end,
-    nfnl_socket:close(Sock).
+    ok.
 
 %% --- Internal ---
+
+-spec resolve_server(term()) -> {ok, nfnl_server:server_ref()} | unavailable.
+resolve_server(Server) when is_pid(Server) ->
+    {ok, Server};
+resolve_server(Server) when is_atom(Server) ->
+    case whereis(Server) of
+        Pid when is_pid(Pid) -> {ok, Server};
+        undefined -> unavailable
+    end;
+resolve_server(_) ->
+    unavailable.
 
 -spec check_thresholds([map()], #{binary() => map()}) -> ok.
 check_thresholds([], _Rates) ->

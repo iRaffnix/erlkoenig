@@ -158,6 +158,23 @@ container_path_not_under_base_test() ->
 %% Configuration — pure functions (A2)
 %% =================================================================
 
+protection_mode_defaults_to_development_test() ->
+    application:unset_env(erlkoenig, resource_protection),
+    ?assertEqual(development, erlkoenig_cgroup:protection_mode()),
+    ?assertEqual(false, erlkoenig_cgroup:production_mode()).
+
+protection_mode_production_override_test() ->
+    application:set_env(erlkoenig, resource_protection, #{mode => production}),
+    ?assertEqual(production, erlkoenig_cgroup:protection_mode()),
+    ?assertEqual(true, erlkoenig_cgroup:production_mode()),
+    application:unset_env(erlkoenig, resource_protection).
+
+protection_mode_rejects_unknown_mode_test() ->
+    application:set_env(erlkoenig, resource_protection, #{mode => planned}),
+    ?assertError({invalid_config, resource_protection_mode, planned},
+                 erlkoenig_cgroup:protection_mode()),
+    application:unset_env(erlkoenig, resource_protection).
+
 beam_config_defaults_test() ->
     %% Ensure no resource_protection is set so we get defaults
     application:unset_env(erlkoenig, resource_protection),

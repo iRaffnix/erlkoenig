@@ -103,35 +103,29 @@ register_unknown_zone_test_() ->
 %% normalize_config (tested through zone loading)
 %% =================================================================
 
-normalize_fills_defaults_test_() ->
-    %% A zone defined with minimal config should get all defaults
-    {setup,
-     fun() ->
-         application:set_env(erlkoenig, zones,
-             [{minimal, #{}}]),
-         cleanup_zone_ets(),
-         {ok, Pid} = erlkoenig_zone:start_link(),
-         Pid
-     end,
-     fun cleanup/1,
-     fun(_Pid) -> [
-        fun() ->
-            Cfg = erlkoenig_zone:zone_config(minimal),
-            #{network := Net} = Cfg,
-            ?assertEqual(ipvlan, maps:get(mode, Net)),
-            ?assertEqual({10, 0, 0, 0}, maps:get(subnet, Net)),
-            ?assertEqual(undefined, maps:get(gateway, Net)),
-            ?assertEqual(24, maps:get(netmask, Net)),
-            ?assertEqual(allow_outbound, maps:get(policy, Cfg))
-        end
-     ] end}.
+legacy_flat_zone_config_refused_test() ->
+    cleanup_zone_ets(),
+    {ok, Pid} = erlkoenig_zone:start_link(),
+    try
+        ?assertError({legacy_zone_config_refused, #{fields := []}},
+                     erlkoenig_zone:create(minimal, #{})),
+        ?assertError({legacy_zone_config_refused, #{fields := _}},
+                     erlkoenig_zone:create(custom, #{bridge => <<"my_br">>,
+                                                     netmask => 16}))
+    after
+        cleanup(Pid)
+    end.
 
 normalize_override_test_() ->
     %% Partial overrides: specified keys override, rest uses defaults
     {setup,
      fun() ->
          application:set_env(erlkoenig, zones,
-             [{custom, #{bridge => <<"my_br">>, netmask => 16}}]),
+             [{custom, #{network => #{mode => ipvlan,
+                                      parent => <<"my_parent">>,
+                                      parent_type => dummy,
+                                      subnet => {10, 0, 0, 0}},
+                         netmask => 16}}]),
          cleanup_zone_ets(),
          {ok, Pid} = erlkoenig_zone:start_link(),
          Pid
@@ -141,6 +135,7 @@ normalize_override_test_() ->
         fun() ->
             #{network := Net} = erlkoenig_zone:zone_config(custom),
             ?assertEqual(ipvlan, maps:get(mode, Net)),
+            ?assertEqual(<<"my_parent">>, maps:get(parent, Net)),
             ?assertEqual(16, maps:get(netmask, Net)),
             ?assertEqual({10, 0, 0, 0}, maps:get(subnet, Net))
         end
@@ -260,15 +255,19 @@ setup_legacy() ->
 
 setup_multi() ->
     application:set_env(erlkoenig, zones, [
-        {default, #{bridge => <<"erlkoenig_br0">>,
-                    subnet => {10, 0, 0, 0},
-                    gateway => {10, 0, 0, 1},
-                    netmask => 24,
+        {default, #{network => #{mode => ipvlan,
+                                 parent => <<"erlkoenig_default">>,
+                                 parent_type => dummy,
+                                 subnet => {10, 0, 0, 0},
+                                 gateway => {10, 0, 0, 1},
+                                 netmask => 24},
                     policy => allow_outbound}},
-        {dmz, #{bridge => <<"erlkoenig_dmz">>,
-                subnet => {172, 16, 0, 0},
-                gateway => {172, 16, 0, 1},
-                netmask => 24,
+        {dmz, #{network => #{mode => ipvlan,
+                             parent => <<"erlkoenig_dmz">>,
+                             parent_type => dummy,
+                             subnet => {172, 16, 0, 0},
+                             gateway => {172, 16, 0, 1},
+                             netmask => 24},
                 policy => isolate}}
     ]),
     cleanup_zone_ets(),

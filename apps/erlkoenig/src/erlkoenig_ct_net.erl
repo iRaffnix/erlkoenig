@@ -25,7 +25,7 @@ container gets when it transitions from `creating' → `running':
     chain lifecycle.
   * `maybe_apply_container_nft/1' — SPEC-EK-023 per-container
     nft_table with synchronous reply handling.
-  * `teardown_veth/1' — paired with `setup_container_net'.
+  * `teardown_link/1' — paired with `setup_container_net'.
   * `write_container_files/2' — file injection (part of the
     pre-GO sequence, stays with the other pre-GO ops).
   * `zone_dns_ip/1', `ip4_to_u32/1', `effective_dns_ip/1' — DNS
@@ -51,7 +51,7 @@ original code had accreted for IPVLAN cleanup timing.
     firewall_add/4,
     firewall_remove/1,
     maybe_apply_container_nft/1,
-    teardown_veth/1,
+    teardown_link/1,
     write_container_files/2,
     zone_dns_ip/1,
     ip4_to_u32/1,
@@ -71,8 +71,8 @@ do_container_net_setup(#ct_data{id = Id, ip = Ip,
     %% member dies and the supervisor respawns it, the dying
     %% container's IPVLAN slave may still be live in the dying netns
     %% (kernel cleanup is asynchronous to gen_statem exit).  The new
-    %% slave's `ip addr add' then trips EADDRINUSE (-98).  Bridge
-    %% the teardown window with a few short retries instead of
+    %% slave's `ip addr add' then trips EADDRINUSE (-98).  Cover the
+    %% teardown window with a few short retries instead of
     %% bubbling up and letting the pod-sup burn its restart budget.
     NetResult = try_net_setup_with_retry(Handle, Id, OsPid, Ip, Zone, Name, 12),
     ok = erlkoenig_ct_rt:maybe_set_active(Data, true),
@@ -117,10 +117,11 @@ write_container_files(CtData, Files) ->
 firewall_add(_ContainerId, _NetInfo, skip_firewall, _Name) ->
     %% nft_tables mode (ADR-0015): firewall defined in DSL, not auto-generated
     ok;
-firewall_add(ContainerId, #{ip := Ip} = NetInfo, FwTerm, Name) ->
-    Veth = maps:get(host_veth, NetInfo, undefined),
+firewall_add(ContainerId, #{ip := Ip}, FwTerm, Name) ->
+    %% IPVLAN slaves live in the container netns. There is no host-side
+    %% interface name for the legacy per-container firewall path.
     Ports = [],  %% Port mappings handled via firewall term
-    case erlkoenig_ct_firewall:add_container(ContainerId, Ip, Veth, Ports, FwTerm, Name) of
+    case erlkoenig_ct_firewall:add_container(ContainerId, Ip, undefined, Ports, FwTerm, Name) of
         ok -> ok;
         {error, Reason} ->
             logger:warning("firewall: failed to create chain for ~s: ~p",
@@ -198,11 +199,11 @@ firewall_remove(ContainerId) ->
 
 %% -- Network teardown ---------------------------------------------
 
--spec teardown_veth(#ct_data{}) -> ok.
-teardown_veth(#ct_data{net_info = undefined}) ->
+-spec teardown_link(#ct_data{}) -> ok | {error, term()}.
+teardown_link(#ct_data{net_info = undefined}) ->
     ok;
-teardown_veth(#ct_data{net_info = NetInfo}) ->
-    erlkoenig_net:teardown_container_veth(NetInfo).
+teardown_link(#ct_data{net_info = NetInfo}) ->
+    erlkoenig_net:teardown_container_link(NetInfo).
 
 %% See do_container_net_setup for the rationale.
 -spec try_net_setup_with_retry(term(), binary(), non_neg_integer(),

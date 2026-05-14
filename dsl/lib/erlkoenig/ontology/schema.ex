@@ -26,7 +26,11 @@ defmodule Erlkoenig.Ontology.Schema do
     :nft_flowtable,
     :nflog_group,
     :guard,
-    :watch
+    :watch,
+    :admission_denial,
+    :resource_request,
+    :capacity_snapshot,
+    :resource_holder
   ]
 
   @relations [
@@ -54,7 +58,10 @@ defmodule Erlkoenig.Ontology.Schema do
     :jumps_to_chain,
     :has_guard,
     :has_watch,
-    :watches_counter
+    :watches_counter,
+    :has_resource_request,
+    :rejected_by_snapshot,
+    :capacity_held_by
   ]
 
   @type t :: %__MODULE__{

@@ -1,0 +1,111 @@
+Ontology debug report
+containers: 4
+scope summary:
+  container-scope nft: 8 chains, 26 rules
+  stack-global nft: 1 tables, 2 chains, 9 rules, 2 counters, 1 nflog_groups
+
+container frontdoor.edge-0
+  name: edge-0
+  pod: frontdoor
+  zone: admission
+  explains:
+    capability frontdoor.edge-0.dns.local name=dns.local
+    capability frontdoor.edge-0.journal.local name=journal.local
+    nft_chain frontdoor.edge-0.input hook=input
+    nft_chain frontdoor.edge-0.output hook=output
+    publish frontdoor.edge-0.publish metrics=[:memory, :cpu, :pids]
+    stream frontdoor.edge-0.stream channels=[:stdout, :stderr]
+  cleanup candidates:
+    nft_chain frontdoor.edge-0.input
+      nft_rule frontdoor.edge-0.input.rule_1 action=accept
+      nft_rule frontdoor.edge-0.input.rule_2 action=accept
+      nft_rule frontdoor.edge-0.input.rule_3 action=accept
+    nft_chain frontdoor.edge-0.output
+      nft_rule frontdoor.edge-0.output.rule_1 action=accept
+      nft_rule frontdoor.edge-0.output.rule_2 action=accept
+      nft_rule frontdoor.edge-0.output.rule_3 action=accept
+      nft_rule frontdoor.edge-0.output.rule_4 action=accept
+
+container frontdoor.edge-1
+  name: edge-1
+  pod: frontdoor
+  zone: admission
+  explains:
+    capability frontdoor.edge-1.dns.local name=dns.local
+    capability frontdoor.edge-1.journal.local name=journal.local
+    nft_chain frontdoor.edge-1.input hook=input
+    nft_chain frontdoor.edge-1.output hook=output
+    publish frontdoor.edge-1.publish metrics=[:memory, :cpu, :pids]
+    stream frontdoor.edge-1.stream channels=[:stdout, :stderr]
+  cleanup candidates:
+    nft_chain frontdoor.edge-1.input
+      nft_rule frontdoor.edge-1.input.rule_1 action=accept
+      nft_rule frontdoor.edge-1.input.rule_2 action=accept
+      nft_rule frontdoor.edge-1.input.rule_3 action=accept
+    nft_chain frontdoor.edge-1.output
+      nft_rule frontdoor.edge-1.output.rule_1 action=accept
+      nft_rule frontdoor.edge-1.output.rule_2 action=accept
+      nft_rule frontdoor.edge-1.output.rule_3 action=accept
+      nft_rule frontdoor.edge-1.output.rule_4 action=accept
+
+container workers.worker-0
+  name: worker-0
+  pod: workers
+  zone: admission
+  explains:
+    capability workers.worker-0.dns.local name=dns.local
+    capability workers.worker-0.journal.local name=journal.local
+    nft_chain workers.worker-0.input hook=input
+    nft_chain workers.worker-0.output hook=output
+    publish workers.worker-0.publish metrics=[:memory, :cpu, :pids]
+  cleanup candidates:
+    nft_chain workers.worker-0.input
+      nft_rule workers.worker-0.input.rule_1 action=accept
+      nft_rule workers.worker-0.input.rule_2 action=accept
+      nft_rule workers.worker-0.input.rule_3 action=accept
+    nft_chain workers.worker-0.output
+      nft_rule workers.worker-0.output.rule_1 action=accept
+      nft_rule workers.worker-0.output.rule_2 action=accept
+      nft_rule workers.worker-0.output.rule_3 action=accept
+
+container workers.worker-1
+  name: worker-1
+  pod: workers
+  zone: admission
+  explains:
+    capability workers.worker-1.dns.local name=dns.local
+    capability workers.worker-1.journal.local name=journal.local
+    nft_chain workers.worker-1.input hook=input
+    nft_chain workers.worker-1.output hook=output
+    publish workers.worker-1.publish metrics=[:memory, :cpu, :pids]
+  cleanup candidates:
+    nft_chain workers.worker-1.input
+      nft_rule workers.worker-1.input.rule_1 action=accept
+      nft_rule workers.worker-1.input.rule_2 action=accept
+      nft_rule workers.worker-1.input.rule_3 action=accept
+    nft_chain workers.worker-1.output
+      nft_rule workers.worker-1.output.rule_1 action=accept
+      nft_rule workers.worker-1.output.rule_2 action=accept
+      nft_rule workers.worker-1.output.rule_3 action=accept
+
+stack-global nft objects
+  nft_table erlkoenig_host owner=host family=inet
+    persistent while stack/host policy is active
+    counters:
+      nft_counter erlkoenig_host.admission_forward_drop name=admission_forward_drop
+      nft_counter erlkoenig_host.admission_input_drop name=admission_input_drop
+    nflog groups:
+      nflog_group erlkoenig_host.72 group=72
+    chains:
+      nft_chain erlkoenig_host.forward hook=forward owner=host
+        nft_rule erlkoenig_host.forward.rule_1 action=accept
+        nft_rule erlkoenig_host.forward.rule_2 action=accept
+        nft_rule erlkoenig_host.forward.rule_3 action=accept
+        nft_rule erlkoenig_host.forward.rule_4 action=drop counter=admission_forward_drop nflog_group=72
+      nft_chain erlkoenig_host.input hook=input owner=host
+        nft_rule erlkoenig_host.input.rule_1 action=accept
+        nft_rule erlkoenig_host.input.rule_2 action=accept
+        nft_rule erlkoenig_host.input.rule_3 action=accept
+        nft_rule erlkoenig_host.input.rule_4 action=accept
+        nft_rule erlkoenig_host.input.rule_5 action=drop counter=admission_input_drop nflog_group=72
+

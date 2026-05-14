@@ -1,0 +1,16 @@
+
+  Showcase ontology — 5 facts
+
+  admission_denial (1)
+    worker-1/denial
+
+  capacity_snapshot (1)
+    worker-1/snapshot
+
+  resource_holder (1)
+    worker-1/allocated-memory-worker-0-0
+
+  resource_request (2)
+    worker-1/request-memory
+    worker-1/request-pids
+

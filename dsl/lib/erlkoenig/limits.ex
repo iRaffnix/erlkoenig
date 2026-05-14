@@ -23,7 +23,7 @@ defmodule Erlkoenig.Limits do
       container :web do
         binary "/opt/bin/server"
         ip {10, 0, 0, 10}
-        limits cpu: 2, memory: "256M", pids: 100
+        limits cpu: 50, memory: "256M", pids: 100
       end
 
   ## Standalone usage
@@ -32,7 +32,7 @@ defmodule Erlkoenig.Limits do
         alias Erlkoenig.Limits.Builder
         def web_limits do
           Builder.new()
-          |> Builder.set_cpu(2)
+          |> Builder.set_cpu(50)
           |> Builder.set_memory("256M")
           |> Builder.set_pids(100)
           |> Builder.to_term()
@@ -41,7 +41,7 @@ defmodule Erlkoenig.Limits do
 
   ## Supported keys
 
-  - `cpu` — Number of CPU cores
+  - `cpu` — Hard quota as percent of one CPU core (1-100, written to `cpu.max`)
   - `memory` — Bytes (integer) or string ("256M", "1G", "512K")
   - `pids` — Max process count
   - `pps` — Packets per second (nf_tables rate limit)

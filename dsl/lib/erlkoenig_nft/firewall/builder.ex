@@ -373,8 +373,8 @@ defmodule ErlkoenigNft.Firewall.Builder do
 
   Options:
     ct: :established         — match conntrack state
-    iif: "name"              — match input interface (wildcard ok)
-    oif: "name"              — match output interface (wildcard ok)
+    iif: "name"              — match exact input host interface
+    oif: "name"              — match exact output host interface
     oif_neq: "name"          — match output interface NOT equal
     icmp: true               — match ICMP protocol
     tcp: port                — match TCP destination port
@@ -397,11 +397,11 @@ defmodule ErlkoenigNft.Firewall.Builder do
 
   # -- Matches (read kernel state) --
   defp normalize_rule_opt(:iif, {:ref, name}), do: {:ref, to_string(name)}
-  defp normalize_rule_opt(:iif, :bridge), do: :bridge
+  defp normalize_rule_opt(:iif, :bridge), do: reject_legacy_interface_ref!(:iif, :bridge)
   defp normalize_rule_opt(:iif, v), do: to_string(v)
   defp normalize_rule_opt(:oif, {:ref, name}), do: {:ref, to_string(name)}
-  defp normalize_rule_opt(:oif, :bridge), do: :bridge
-  defp normalize_rule_opt(:oif, :containers), do: :containers
+  defp normalize_rule_opt(:oif, :bridge), do: reject_legacy_interface_ref!(:oif, :bridge)
+  defp normalize_rule_opt(:oif, :containers), do: reject_legacy_interface_ref!(:oif, :containers)
   defp normalize_rule_opt(:oif, v), do: to_string(v)
   defp normalize_rule_opt(:oif_neq, v), do: to_string(v)
   defp normalize_rule_opt(:set, v), do: to_string(v)
@@ -434,6 +434,12 @@ defmodule ErlkoenigNft.Firewall.Builder do
   defp normalize_rule_opt(:chain, v), do: to_string(v)
 
   defp normalize_rule_opt(_, v), do: v
+
+  defp reject_legacy_interface_ref!(field, value) do
+    raise ArgumentError,
+          "#{field}: #{inspect(value)} is a removed host-interface shortcut under IPVLAN; " <>
+            "use an exact host interface or an IP/pod reference"
+  end
 
   # --- Rule accumulator (used by chain macro) ---
 

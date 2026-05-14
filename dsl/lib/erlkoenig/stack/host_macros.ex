@@ -79,7 +79,7 @@ defmodule Erlkoenig.Stack.HostMacros do
   Declare an IPVLAN network segment on the host.
 
   Creates IPVLAN L3S slaves for containers. This is the only networking
-  mode since ADR-0020 — there is no bridge/veth path.
+  mode since ADR-0020.
 
   ## Options
 

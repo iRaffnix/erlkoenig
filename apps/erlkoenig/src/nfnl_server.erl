@@ -31,6 +31,7 @@ Then used by name from any process:
 -behaviour(gen_server).
 
 -include("erlkoenig_error.hrl").
+-include("nft_constants.hrl").
 
 -export([
     start_link/0,
@@ -71,6 +72,8 @@ Then used by name from any process:
 %% --- Constants ---
 
 -define(RECV_TIMEOUT, 5000).
+-define(DUMP_RECV_TIMEOUT, 30000).
+-define(NLMSG_ERROR, 2).
 
 %% --- Public API ---
 
@@ -122,7 +125,7 @@ get_counter(Server, Family, Table, Name) ->
 -doc """
 Read a named counter and atomically reset it to zero.
 
-Delegates to nft_object:get_counter_reset/4 through the shared
+Builds the reset query and reads the response through the shared
 Netlink socket. Safe to call from any process.
 """.
 -spec get_counter_reset(server_ref(), 0..255, binary(), binary()) ->
@@ -134,19 +137,19 @@ get_counter_reset(Server, Family, Table, Name) ->
 -spec list_set_elems(server_ref(), 0..255, binary(), binary()) ->
     {ok, [binary()]} | {error, term()}.
 list_set_elems(Server, Family, Table, SetName) ->
-    gen_server:call(Server, {list_set_elems, Family, Table, SetName}, ?RECV_TIMEOUT + 2000).
+    gen_server:call(Server, {list_set_elems, Family, Table, SetName}, ?DUMP_RECV_TIMEOUT + 2000).
 
 -doc "List chains in a table via netlink GET.".
 -spec list_chains(server_ref(), 0..255, binary()) ->
     {ok, [map()]} | {error, term()}.
 list_chains(Server, Family, Table) ->
-    gen_server:call(Server, {list_chains, Family, Table}, ?RECV_TIMEOUT + 2000).
+    gen_server:call(Server, {list_chains, Family, Table}, ?DUMP_RECV_TIMEOUT + 2000).
 
 -doc "Get full ruleset for a family via netlink GET.".
 -spec get_ruleset(server_ref(), 0..255) ->
     {ok, [map()]} | {error, term()}.
 get_ruleset(Server, Family) ->
-    gen_server:call(Server, {get_ruleset, Family}, ?RECV_TIMEOUT + 2000).
+    gen_server:call(Server, {get_ruleset, Family}, ?DUMP_RECV_TIMEOUT + 2000).
 
 -doc "Stop the server.".
 -spec stop(server_ref()) -> ok.
@@ -207,18 +210,20 @@ handle_call({get_counter, Family, Table, Name}, _From,
             #{socket := Sock, socket_mod := SocketMod, seq := Seq} = State) ->
     drain_stale(Sock, SocketMod),
     QuerySeq = next_seq(Seq),
+    Msg = nft_object:counter_get_msg(Family, Table, Name, QuerySeq),
     Result = wrap_query_error(
         counter_query_failed,
-        nft_object:get_counter(Sock, Family, Table, Name, QuerySeq),
+        counter_query(Sock, SocketMod, Msg, QuerySeq),
         #{family => Family, table => Table, name => Name, seq => QuerySeq}),
     {reply, Result, State#{seq => next_seq(QuerySeq)}};
 handle_call({get_counter_reset, Family, Table, Name}, _From,
             #{socket := Sock, socket_mod := SocketMod, seq := Seq} = State) ->
     drain_stale(Sock, SocketMod),
     QuerySeq = next_seq(Seq),
+    Msg = nft_object:counter_get_reset_msg(Family, Table, Name, QuerySeq),
     Result = wrap_query_error(
         counter_query_failed,
-        nft_object:get_counter_reset(Sock, Family, Table, Name, QuerySeq),
+        counter_query(Sock, SocketMod, Msg, QuerySeq),
         #{family => Family, table => Table, name => Name, seq => QuerySeq,
           reset => true}),
     {reply, Result, State#{seq => next_seq(QuerySeq)}};
@@ -228,7 +233,7 @@ handle_call({list_set_elems, Family, Table, SetName}, _From,
     QuerySeq = next_seq(Seq),
     Result = wrap_query_error(
         list_set_elems_failed,
-        nft_query:list_set_elems(Sock, Family, Table, SetName, QuerySeq),
+        nft_query:list_set_elems(Sock, SocketMod, Family, Table, SetName, QuerySeq),
         #{family => Family, table => Table, set => SetName, seq => QuerySeq}),
     {reply, Result, State#{seq => next_seq(QuerySeq)}};
 handle_call({list_chains, Family, Table}, _From,
@@ -237,7 +242,7 @@ handle_call({list_chains, Family, Table}, _From,
     QuerySeq = next_seq(Seq),
     Result = wrap_query_error(
         list_chains_failed,
-        nft_query:list_chains(Sock, Family, Table, QuerySeq),
+        nft_query:list_chains(Sock, SocketMod, Family, Table, QuerySeq),
         #{family => Family, table => Table, seq => QuerySeq}),
     {reply, Result, State#{seq => next_seq(QuerySeq)}};
 handle_call({get_ruleset, Family}, _From,
@@ -246,7 +251,7 @@ handle_call({get_ruleset, Family}, _From,
     QuerySeq = next_seq(Seq),
     Result = wrap_query_error(
         ruleset_query_failed,
-        nft_query:get_ruleset(Sock, Family, QuerySeq),
+        nft_query:get_ruleset(Sock, SocketMod, Family, QuerySeq),
         #{family => Family, seq => QuerySeq}),
     {reply, Result, State#{seq => next_seq(QuerySeq)}};
 handle_call(_Request, _From, State) ->
@@ -383,6 +388,69 @@ process_acks([{Seq, Result} | Rest], Expected, Acc) ->
             %% Stale or out-of-band ACK — discard silently
             process_acks(Rest, Expected, Acc)
     end.
+
+-spec counter_query(socket:socket(), module(), binary(), non_neg_integer()) ->
+    {ok, map()} | {error, term()}.
+counter_query(Sock, SocketMod, Msg, QuerySeq) ->
+    case SocketMod:send(Sock, Msg) of
+        ok ->
+            case SocketMod:recv(Sock, ?RECV_TIMEOUT) of
+                {ok, Data} ->
+                    parse_counter_query_response(Data, QuerySeq);
+                {error, timeout} ->
+                    {error, timeout};
+                {error, Reason} ->
+                    {error, Reason}
+            end;
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+-spec parse_counter_query_response(binary(), non_neg_integer()) ->
+    {ok, map()} | {error, term()}.
+parse_counter_query_response(Data, QuerySeq) ->
+    parse_counter_query_messages(Data, QuerySeq, false).
+
+-spec parse_counter_query_messages(binary(), non_neg_integer(), boolean()) ->
+    {ok, map()} | {error, term()}.
+parse_counter_query_messages(<<>>, _QuerySeq, true) ->
+    {error, no_counter_payload};
+parse_counter_query_messages(<<>>, _QuerySeq, false) ->
+    {error, invalid_response};
+parse_counter_query_messages(
+    <<Len:32/little, Type:16/little, Flags:16/little, Seq:32/little,
+      Pid:32/little, Rest/binary>> = Bin,
+    QuerySeq,
+    AckSeen
+) when Len >= 16, Len =< byte_size(Bin) ->
+    PayloadLen = Len - 16,
+    <<Payload:PayloadLen/binary, Tail/binary>> = Rest,
+    case {Seq, Type} of
+        {QuerySeq, ?NLMSG_ERROR} ->
+            case Payload of
+                <<0:32/signed-little, _/binary>> ->
+                    parse_counter_query_messages(Tail, QuerySeq, true);
+                <<Errno:32/signed-little, _/binary>> ->
+                    {error, {netlink_error, Errno}};
+                _ ->
+                    {error, invalid_response}
+            end;
+        {QuerySeq, _} when (Type bsr 8) =:= ?NFNL_SUBSYS_NFTABLES ->
+            Msg = <<Len:32/little, Type:16/little, Flags:16/little,
+                    Seq:32/little, Pid:32/little, Payload/binary>>,
+            case nft_object:parse_obj_response(Msg) of
+                {ok, #{packets := _, bytes := _} = Counter} ->
+                    {ok, Counter};
+                {ok, _} ->
+                    {error, invalid_response};
+                {error, _} = Err ->
+                    Err
+            end;
+        _OtherSeqOrType ->
+            parse_counter_query_messages(Tail, QuerySeq, AckSeen)
+    end;
+parse_counter_query_messages(_Malformed, _QuerySeq, _AckSeen) ->
+    {error, invalid_response}.
 
 nft_error(socket_open_failed, Data) ->
     ?EK_ERROR(nft, socket_open_failed,

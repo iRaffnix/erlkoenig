@@ -120,8 +120,11 @@ handle_cast({local_ban, IP, BanUntil, Reason}, State) ->
         true ->
             {noreply, State};
         false ->
-            State2 = merge_ban(IP, node(), BanUntil, Reason, State),
-            pg_send({ban, IP, BanUntil, Reason, node()}),
+            {State2, Applied} = merge_ban(IP, node(), BanUntil, Reason, State),
+            case Applied of
+                true -> pg_send({ban, IP, BanUntil, Reason, node()});
+                false -> ok
+            end,
             {noreply, State2}
     end;
 
@@ -142,7 +145,7 @@ handle_info({ban, IP, BanUntil, Reason, FromNode}, State)
         true ->
             {noreply, State};
         false ->
-            State2 = merge_ban(IP, FromNode, BanUntil, Reason, State),
+            {State2, _Applied} = merge_ban(IP, FromNode, BanUntil, Reason, State),
             {noreply, State2}
     end;
 
@@ -176,9 +179,12 @@ handle_info({kernel_unban, IP}, State) ->
     Now = os:system_time(millisecond),
     Sources = maps:get(IP, State#state.active_bans, #{}),
     ActiveSources = maps:filter(fun(_, Exp) -> Exp > Now end, Sources),
-    case map_size(ActiveSources) of
-        0 ->
-            do_kernel_unban(IP),
+    case {map_size(Sources), map_size(ActiveSources)} of
+        {0, _} ->
+            Timers2 = maps:remove(IP, State#state.unban_timers),
+            {noreply, State#state{unban_timers = Timers2}};
+        {_, 0} ->
+            _ = do_kernel_unban(IP),
             Bans2 = maps:remove(IP, State#state.active_bans),
             Timers2 = maps:remove(IP, State#state.unban_timers),
             {noreply, State#state{active_bans = Bans2, unban_timers = Timers2}};
@@ -239,7 +245,7 @@ terminate(_Reason, _State) ->
 %% ===================================================================
 
 %% Merge a ban source. Apply to kernel if effective expiry changed.
--spec merge_ban(binary(), node(), integer(), atom(), #state{}) -> #state{}.
+-spec merge_ban(binary(), node(), integer(), atom(), #state{}) -> {#state{}, boolean()}.
 merge_ban(IP, Source, BanUntil, Reason, #state{active_bans = Bans} = State) ->
     Sources = maps:get(IP, Bans, #{}),
     OldExpiry = maps:get(Source, Sources, 0),
@@ -248,57 +254,69 @@ merge_ban(IP, Source, BanUntil, Reason, #state{active_bans = Bans} = State) ->
     OldEffective = effective_expiry(Sources),
     NewEffective = effective_expiry(Sources2),
     %% Apply to kernel if effective expiry increased
-    case NewEffective > OldEffective of
+    Applied = case NewEffective > OldEffective of
         true ->
             do_kernel_ban(IP, NewEffective, Reason);
         false ->
             ok
     end,
-    State2 = State#state{active_bans = Bans#{IP => Sources2}},
-    schedule_unban_timer(IP, Sources2, State2).
+    case Applied of
+        ok ->
+            State2 = State#state{active_bans = Bans#{IP => Sources2}},
+            {schedule_unban_timer(IP, Sources2, State2), true};
+        {error, _Error} ->
+            {State, false}
+    end.
 
 %% Remove a source. Kernel-unban only if no active sources remain.
 -spec remove_source(binary(), node(), #state{}) -> #state{}.
 remove_source(IP, Source, #state{active_bans = Bans} = State) ->
     Sources = maps:get(IP, Bans, #{}),
-    Sources2 = maps:remove(Source, Sources),
-    Now = os:system_time(millisecond),
-    ActiveSources = maps:filter(fun(_, Exp) -> Exp > Now end, Sources2),
-    case map_size(ActiveSources) of
-        0 ->
-            do_kernel_unban(IP),
-            cancel_unban_timer(IP, State),
-            case Source =:= node() of
-                true -> pg_send({unban, IP, node()});
-                false -> ok
-            end,
-            State#state{
-                active_bans = maps:remove(IP, Bans),
-                unban_timers = maps:remove(IP, State#state.unban_timers)
-            };
-        _ ->
-            %% Remote sources still active — keep kernel ban
-            State2 = schedule_unban_timer(IP, ActiveSources, State),
-            State2#state{active_bans = Bans#{IP => ActiveSources}}
+    case maps:is_key(Source, Sources) of
+        false ->
+            State;
+        true ->
+            Sources2 = maps:remove(Source, Sources),
+            Now = os:system_time(millisecond),
+            ActiveSources = maps:filter(fun(_, Exp) -> Exp > Now end, Sources2),
+            case map_size(ActiveSources) of
+                0 ->
+                    _ = do_kernel_unban(IP),
+                    cancel_unban_timer(IP, State),
+                    case Source =:= node() of
+                        true -> pg_send({unban, IP, node()});
+                        false -> ok
+                    end,
+                    State#state{
+                        active_bans = maps:remove(IP, Bans),
+                        unban_timers = maps:remove(IP, State#state.unban_timers)
+                    };
+                _ ->
+                    %% Remote sources still active — keep kernel ban
+                    State2 = schedule_unban_timer(IP, ActiveSources, State),
+                    State2#state{active_bans = Bans#{IP => ActiveSources}}
+            end
     end.
 
 %% Apply ban to the kernel.
--spec do_kernel_ban(binary(), integer(), atom()) -> ok.
+-spec do_kernel_ban(binary(), integer(), atom()) -> ok | {error, term()}.
 do_kernel_ban(IP, EffectiveExpiry, Reason) ->
-    try erlkoenig_nft:ban(IP) of
+    Result = try erlkoenig_nft:ban(IP) of
         ok ->
             TimeoutMs = max(100, EffectiveExpiry - os:system_time(millisecond)),
             case apply_extra_ban_targets(IP, TimeoutMs) of
                 ok ->
                     logger:notice("[threat_mesh] banned ~s reason=~p",
-                                  [erlkoenig_nft_ip:format(IP), Reason]);
+                                  [erlkoenig_nft_ip:format(IP), Reason]),
+                    ok;
                 {error, Err} ->
                     Error = kernel_ban_error(IP, Reason, Err),
                     logger:warning("[threat_mesh] ban fan-out failed ~s code=~p: ~p",
                                    [erlkoenig_nft_ip:format(IP), error_code(Error), Err]),
                     broadcast_guard({ct_guard_ban_failed,
                                      #{ip => IP, reason => Reason,
-                                       code => error_code(Error), error => Error}})
+                                       code => error_code(Error), error => Error}}),
+                    ok
             end;
         {error, Err} ->
             Error = kernel_ban_error(IP, Reason, Err),
@@ -306,7 +324,8 @@ do_kernel_ban(IP, EffectiveExpiry, Reason) ->
                            [erlkoenig_nft_ip:format(IP), error_code(Error), Err]),
             broadcast_guard({ct_guard_ban_failed,
                              #{ip => IP, reason => Reason,
-                               code => error_code(Error), error => Error}})
+                               code => error_code(Error), error => Error}}),
+            {error, Error}
     catch
         C:R ->
             %% Crash path also emits ct_guard_ban_failed — dashboards
@@ -323,27 +342,30 @@ do_kernel_ban(IP, EffectiveExpiry, Reason) ->
                            [erlkoenig_nft_ip:format(IP), error_code(Error), C, R]),
             broadcast_guard({ct_guard_ban_failed,
                              #{ip => IP, reason => Reason,
-                               code => error_code(Error), error => Error}})
+                               code => error_code(Error), error => Error}}),
+            {error, Error}
     end,
-    ok.
+    Result.
 
 %% Remove ban from the kernel.
--spec do_kernel_unban(binary()) -> ok.
+-spec do_kernel_unban(binary()) -> ok | {error, term()}.
 do_kernel_unban(IP) ->
-    try erlkoenig_nft:unban(IP) of
+    Result = try erlkoenig_nft:unban(IP) of
         ok ->
             case apply_extra_unban_targets(IP) of
                 ok ->
                     logger:notice("[threat_mesh] unbanned ~s",
                                   [erlkoenig_nft_ip:format(IP)]),
-                    broadcast_guard({ct_guard_unban, #{ip => IP}});
+                    broadcast_guard({ct_guard_unban, #{ip => IP}}),
+                    ok;
                 {error, Err} ->
                     Error = kernel_unban_error(IP, Err),
                     logger:warning("[threat_mesh] unban fan-out failed ~s code=~p: ~p",
                                    [erlkoenig_nft_ip:format(IP), error_code(Error), Err]),
                     broadcast_guard({ct_guard_unban_failed,
                                      #{ip => IP, code => error_code(Error),
-                                       error => Error}})
+                                       error => Error}}),
+                    {error, Error}
             end;
         {error, Err} ->
             Error = kernel_unban_error(IP, Err),
@@ -351,7 +373,8 @@ do_kernel_unban(IP) ->
                            [erlkoenig_nft_ip:format(IP), error_code(Error), Err]),
             broadcast_guard({ct_guard_unban_failed,
                              #{ip => IP, code => error_code(Error),
-                               error => Error}})
+                               error => Error}}),
+            {error, Error}
     catch
         C:R ->
             Error = threat_error(kernel_unban_crashed,
@@ -360,9 +383,10 @@ do_kernel_unban(IP) ->
                            [erlkoenig_nft_ip:format(IP), error_code(Error), C, R]),
             broadcast_guard({ct_guard_unban_failed,
                              #{ip => IP, code => error_code(Error),
-                               error => Error}})
+                               error => Error}}),
+            {error, Error}
     end,
-    ok.
+    Result.
 
 apply_extra_ban_targets(IP, TimeoutMs) ->
     apply_extra_target_msgs(

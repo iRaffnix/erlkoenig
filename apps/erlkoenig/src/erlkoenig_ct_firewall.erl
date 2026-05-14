@@ -56,7 +56,10 @@ through `nfnl_server` (`erlkoenig_nft_srv`) as atomic batches.
          forward_table/0]).
 
 -ifdef(TEST).
--export([build_setup_msgs/3, nat_table/0]).
+-export([build_setup_msgs/3, build_remove_msgs/3,
+         build_remove_target_msgs/2, build_remove_counter_msgs/1,
+         build_rebuild_shared_msgs/1, nat_table/0,
+         enable_ip_forward/1]).
 -endif.
 
 -include("nft_tables.hrl").
@@ -167,22 +170,15 @@ Also enables ip_forward so the kernel routes between interfaces.
 -spec setup_table() -> ok | {error, term()}.
 setup_table() ->
     _ = ensure_ets(),
-    %% Selective cleanup: flush own chains instead of deleting the entire table.
-    %% Other subsystems (erlkoenig_config/DSL) may have chains/maps in this table.
-    flush_own_chains(),
-    %% Enable IP forwarding. Silent failure here means masquerade and
-    %% cross-netns routing don't work; log so an operator chasing
-    %% "containers can't reach internet" in a dev/unprivileged setup
-    %% finds the root cause instead of debugging the nft rules.
-    case file:write_file(?IP_FORWARD_PATH, <<"1">>) of
-        ok -> ok;
-        {error, IpFwdReason} ->
-            logger:warning("erlkoenig_ct_firewall: cannot enable "
-                           "ip_forward (~s): ~p — masquerade/routing "
-                           "will not work",
-                           [?IP_FORWARD_PATH, IpFwdReason])
-    end,
-    nfnl_server:apply_msgs(?SERVER, build_setup_msgs(forward_table(), nat_table(), [])).
+    case enable_ip_forward() of
+        ok ->
+            %% Selective cleanup: flush own chains instead of deleting the entire table.
+            %% Other subsystems (erlkoenig_config/DSL) may have chains/maps in this table.
+            flush_own_chains(),
+            apply_setup_msgs(build_setup_msgs(forward_table(), nat_table(), []));
+        {error, _} = IpForwardErr ->
+            IpForwardErr
+    end.
 
 -doc """
 Same atomic setup as `setup_table/0` but accepts a zone list for
@@ -200,15 +196,44 @@ egress rules.
 -spec setup_table([map()]) -> ok | {error, term()}.
 setup_table(Zones) when is_list(Zones) ->
     _ = ensure_ets(),
-    %% Selective cleanup: flush own chains instead of deleting the entire table.
-    flush_own_chains(),
-    _ = file:write_file(?IP_FORWARD_PATH, <<"1">>),
-    %% ADR-0020: IPVLAN-only, no bridge masquerade/route_localnet needed.
-    MasqRules = [],
-    LoopbackRules = [],
-    Extra = MasqRules ++ LoopbackRules,
-    nfnl_server:apply_msgs(?SERVER,
-        build_setup_msgs(forward_table(), nat_table(), Extra)).
+    case enable_ip_forward() of
+        ok ->
+            %% Selective cleanup: flush own chains instead of deleting the entire table.
+            flush_own_chains(),
+            %% ADR-0020: IPVLAN-only, no link-layer masquerade/route_localnet needed.
+            MasqRules = [],
+            LoopbackRules = [],
+            Extra = MasqRules ++ LoopbackRules,
+            apply_setup_msgs(build_setup_msgs(forward_table(), nat_table(), Extra));
+        {error, _} = IpForwardErr ->
+            IpForwardErr
+    end.
+
+enable_ip_forward() ->
+    enable_ip_forward(?IP_FORWARD_PATH).
+
+enable_ip_forward(Path) ->
+    case file:write_file(Path, <<"1">>) of
+        ok ->
+            ok;
+        {error, Reason} ->
+            logger:error("erlkoenig_ct_firewall: cannot enable ip_forward "
+                         "(~s): ~p", [Path, Reason]),
+            {error, {ip_forward_enable_failed, Path, Reason}}
+    end.
+
+apply_setup_msgs(Msgs) ->
+    try nfnl_server:apply_msgs(?SERVER, Msgs) of
+        ok ->
+            ok;
+        {error, Reason} ->
+            {error, {setup_batch_failed, Reason}}
+    catch
+        exit:{noproc, _} = Err ->
+            {error, {setup_batch_failed, Err}};
+        Class:Reason ->
+            {error, {setup_batch_failed, {Class, Reason}}}
+    end.
 
 
 -doc """
@@ -271,9 +296,10 @@ flush_own_chains() ->
     ok.
 
 -doc "Add firewall rules for a container (no port-forwarding).".
--spec add_container(binary(), inet:ip_address(), binary()) -> ok | {error, term()}.
-add_container(ContainerId, Ip, HostVeth) ->
-    add_container(ContainerId, Ip, HostVeth, []).
+-spec add_container(binary(), inet:ip_address(), undefined | binary()) ->
+    ok | {error, term()}.
+add_container(ContainerId, Ip, HostIface) ->
+    add_container(ContainerId, Ip, HostIface, []).
 
 -doc """
 Add firewall rules for a container with port-forwarding.
@@ -282,11 +308,11 @@ Ports is a list of {HostPort, ContainerPort} tuples.
 Creates a regular chain "ct_<id>" with default rules,
 a jump rule in the forward chain, and DNAT rules in prerouting.
 """.
--spec add_container(binary(), inet:ip_address(), binary(),
+-spec add_container(binary(), inet:ip_address(), undefined | binary(),
                     [{non_neg_integer(), non_neg_integer()}]) ->
     ok | {error, term()}.
-add_container(ContainerId, Ip, HostVeth, Ports) ->
-    add_container(ContainerId, Ip, HostVeth, Ports, #{}).
+add_container(ContainerId, Ip, HostIface, Ports) ->
+    add_container(ContainerId, Ip, HostIface, Ports, #{}).
 
 -doc """
 Add firewall rules for a container with custom firewall term.
@@ -297,15 +323,18 @@ FirewallTerm is a map from the Erlkoenig DSL (or empty for defaults):
 When FirewallTerm is empty or has no chains, default rules are used
 (ct_established + icmp + dns + accept).
 """.
--spec add_container(binary(), inet:ip_address(), binary(),
+-spec add_container(binary(), inet:ip_address(), undefined | binary(),
                     [{non_neg_integer(), non_neg_integer()}],
                     map()) ->
     ok | {error, term()}.
-add_container(ContainerId, Ip, HostVeth, Ports, FirewallTerm) ->
-    add_container(ContainerId, Ip, HostVeth, Ports, FirewallTerm, undefined).
+add_container(ContainerId, Ip, HostIface, Ports, FirewallTerm) ->
+    add_container(ContainerId, Ip, HostIface, Ports, FirewallTerm, undefined).
 
 -doc "Add container with named chain for readable nft output.".
-add_container(ContainerId, Ip, HostVeth, Ports, FirewallTerm, Name) ->
+add_container(_ContainerId, _Ip, HostIface, _Ports, _FirewallTerm, _Name)
+  when HostIface =/= undefined ->
+    {error, {legacy_host_interface_refused, HostIface}};
+add_container(ContainerId, Ip, undefined, Ports, FirewallTerm, Name) ->
     _ = ensure_ets(),
     Chain = chain_name(ContainerId, Name),
     IpBin = ip_to_binary(Ip),
@@ -324,38 +353,22 @@ add_container(ContainerId, Ip, HostVeth, Ports, FirewallTerm, Name) ->
         nft_object:add_counter(?FAMILY, ?TABLE, DropCounterName, S)
     end],
 
-    %% For containers with port-forwarding, allow inbound traffic
-    %% via oifname so DNAT'd packets pass the forward chain.
-    %% Not applicable in IPVLAN mode (no host-side veth).
-    FwdInboundMsgs = case {Ports, HostVeth} of
-        {[], _} -> [];
-        {_, undefined} -> [];  %% IPVLAN: no host-side veth
-        {_, _} -> [nft_encode:rule_fun(inet, ?TABLE, ?FORWARD_CHAIN,
-                       nft_rules:oifname_accept(HostVeth))]
-    end,
-
     %% Jump rule: dispatch container traffic to its chain.
-    %% Bridge mode: match on host-side veth interface name (iifname).
-    %% IPVLAN mode: match on source IP (slave isn't visible in host netns).
-    JumpMsgs = case HostVeth of
-        undefined ->
-            %% IPVLAN: IP-based dispatch (outbound=saddr, inbound=daddr)
-            [nft_encode:rule_fun(inet, ?TABLE, ?FORWARD_CHAIN,
-                nft_rules:ip_saddr_jump(IpBin, Chain)),
-             nft_encode:rule_fun(inet, ?TABLE, ?FORWARD_CHAIN,
-                nft_rules:ip_daddr_jump(IpBin, Chain))];
-        _ ->
-            %% Bridge: interface-based dispatch
-            [nft_encode:rule_fun(inet, ?TABLE, ?FORWARD_CHAIN,
-                nft_rules:iifname_jump(HostVeth, Chain))]
-    end,
+    %% IPVLAN: IP-based dispatch (outbound=saddr, inbound=daddr). The slave
+    %% lives in the container netns, so there is no host-side interface to
+    %% match in the forward chain.
+    JumpMsgs = [
+        nft_encode:rule_fun(inet, ?TABLE, ?FORWARD_CHAIN,
+            nft_rules:ip_saddr_jump(IpBin, Chain)),
+        nft_encode:rule_fun(inet, ?TABLE, ?FORWARD_CHAIN,
+            nft_rules:ip_daddr_jump(IpBin, Chain))
+    ],
 
     Msgs = [
         %% 1. Create regular chain (no hook)
         fun(S) -> nft_chain:add_regular(?FAMILY,
             #{table => ?TABLE, name => Chain}, S) end
-    ] ++ SetMsgs ++ CounterMsgs ++ DropCounterMsg ++ RuleMsgs
-      ++ JumpMsgs ++ FwdInboundMsgs,
+    ] ++ SetMsgs ++ CounterMsgs ++ DropCounterMsg ++ RuleMsgs ++ JumpMsgs,
 
     %% DNAT rules in prerouting (external) + output (local) chains
     NatTable = nat_table(),
@@ -378,7 +391,7 @@ add_container(ContainerId, Ip, HostVeth, Ports, FirewallTerm, Name) ->
     case Result of
         ok ->
             ets:insert(erlkoenig_firewall_ports,
-                       {ContainerId, HostVeth, Ip, Ports, Chain}),
+                       {ContainerId, undefined, Ip, Ports, Chain}),
             case erlkoenig_nft_nflog:start_link(NflogGroup) of
                 {ok, _} ->
                     logger:info("erlkoenig_ct_firewall: nflog group ~p for ~s",
@@ -404,13 +417,27 @@ remaining containers.
 """.
 -spec remove_container(binary()) -> ok | {error, term()}.
 remove_container(ContainerId) ->
+    global:trans({?MODULE, remove_container},
+                 fun() -> remove_container_locked(ContainerId) end,
+                 [node()], infinity).
+
+-spec remove_container_locked(binary()) -> ok | {error, term()}.
+remove_container_locked(ContainerId) ->
     _ = ensure_ets(),
-    %% Get chain name from ETS (may be named or ID-based)
-    Chain = case ets:lookup(erlkoenig_firewall_ports, ContainerId) of
-        [{_, _, _, _, StoredChain}] -> StoredChain;
-        [{_, _, _, _}] -> chain_name(ContainerId);  %% old format
-        _ -> chain_name(ContainerId)
-    end,
+    %% No ETS entry means add_container never committed kernel state for this
+    %% container, so cleanup is idempotently complete. Guessing a chain name
+    %% here turns normal no-firewall containers into noisy ENOENT warnings.
+    case ets:lookup(erlkoenig_firewall_ports, ContainerId) of
+        [] ->
+            ok;
+        [{_, _LegacyHostIface, _Ip, Ports, Chain}] ->
+            remove_container_entry(ContainerId, Chain, Ports);
+        [{_, _, _, Ports}] ->
+            remove_container_entry(ContainerId, chain_name(ContainerId), Ports)
+    end.
+
+-spec remove_container_entry(binary(), binary(), list()) -> ok | {error, term()}.
+remove_container_entry(ContainerId, Chain, Ports) ->
     %% Build the "remaining containers" snapshot from the ETS state WITHOUT
     %% mutating it yet. Mirrors the fix in add_container: if the kernel
     %% batch is rejected, we must not have deleted ETS first — that would
@@ -419,67 +446,111 @@ remove_container(ContainerId) ->
     Remaining = [R || R <- ets:tab2list(erlkoenig_firewall_ports),
                       is_tuple(R), tuple_size(R) =:= 5,
                       element(1, R) =/= ContainerId],
+    RemoveResult = nfnl_server:apply_msgs(?SERVER,
+        build_remove_target_msgs(Chain, Ports)),
+    CounterResult = case RemoveResult of
+        ok ->
+            nfnl_server:apply_msgs(?SERVER, build_remove_counter_msgs(Chain));
+        {error, _} = RemoveErr ->
+            RemoveErr
+    end,
+    RebuildResult = case RemoveResult of
+        ok ->
+            nfnl_server:apply_msgs(?SERVER, build_rebuild_shared_msgs(Remaining));
+        {error, _} = RemoveErr2 ->
+            RemoveErr2
+    end,
+    case {RemoveResult, CounterResult, RebuildResult} of
+        {ok, ok, ok} ->
+            ets:delete(erlkoenig_firewall_ports, ContainerId),
+            ok;
+        {ok, {error, CounterReason}, ok} ->
+            ets:delete(erlkoenig_firewall_ports, ContainerId),
+            logger:warning("erlkoenig_ct_firewall: remove_container ~s counter "
+                           "delete failed after chain cleanup: ~p",
+                           [Chain, CounterReason]),
+            {error, {counter_delete_failed, CounterReason}};
+        {ok, _, {error, RebuildReason}} ->
+            logger:warning("erlkoenig_ct_firewall: remove_container ~s shared "
+                           "rebuild failed: ~p (ETS entry retained)",
+                           [Chain, RebuildReason]),
+            {error, {shared_rebuild_failed, RebuildReason}};
+        {{error, RemoveReason}, _, _} ->
+            logger:warning("erlkoenig_ct_firewall: remove_container ~s target "
+                           "cleanup failed: ~p (ETS entry retained so a retry "
+                           "can target the same chain)",
+                           [Chain, RemoveReason]),
+            {error, RemoveReason}
+    end.
+
+-ifdef(TEST).
+-spec build_remove_msgs(binary(), list(), [tuple()]) -> [fun()].
+build_remove_msgs(Chain, Ports, Remaining) ->
     %% 1. Flush shared chains + container chain, then delete container chain.
     %%    Forward + per-container chains live in forward_table, NAT
-    %%    chains in nat_table.
+    %%    chains in nat_table. NAT chains are only touched when this
+    %%    container installed DNAT rules; flushing an empty NAT chain can make
+    %%    the kernel reject the entire transaction with ENOENT and leak the
+    %%    container chain.
+    build_remove_target_msgs(Chain, Ports)
+    ++ build_remove_counter_msgs(Chain)
+    ++ build_rebuild_shared_msgs(Remaining).
+-endif.
+
+-spec build_remove_target_msgs(binary(), list()) -> [fun()].
+build_remove_target_msgs(Chain, Ports) ->
     FwdTable = forward_table(),
-    NatTable = nat_table(),
-    FlushMsgs = [
-        fun(S) -> nft_delete:flush_chain(?FAMILY, FwdTable, ?FORWARD_CHAIN, S) end,
-        fun(S) -> nft_delete:flush_chain(?FAMILY, NatTable, ?PREROUTING_CHAIN, S) end,
-        fun(S) -> nft_delete:flush_chain(?FAMILY, NatTable, ?OUTPUT_CHAIN, S) end,
+    [
+        fun(S) -> nft_delete:flush_chain(?FAMILY, FwdTable, ?FORWARD_CHAIN, S) end
+    ] ++ nat_flush_msgs(Ports)
+      ++ [
         fun(S) -> nft_delete:flush_chain(?FAMILY, FwdTable, Chain, S) end,
         fun(S) -> nft_delete:chain(?FAMILY, FwdTable, Chain, S) end
-    ],
-    %% 2. Re-add base rules for shared chains
+    ].
+
+-spec build_remove_counter_msgs(binary()) -> [fun()].
+build_remove_counter_msgs(Chain) ->
+    FwdTable = forward_table(),
+    [
+        fun(S) -> nft_object:delete(?FAMILY, FwdTable, <<Chain/binary, "_drop">>, S) end
+    ].
+
+-spec build_rebuild_shared_msgs([tuple()]) -> [fun()].
+build_rebuild_shared_msgs(Remaining) ->
+    FwdTable = forward_table(),
     BaseMsgs = [
         nft_encode:rule_fun(inet, FwdTable, ?FORWARD_CHAIN,
             nft_rules:ct_established_accept())
     ],
-    %% 3. Re-add jump + DNAT rules for remaining containers
     RebuildMsgs = lists:append([rebuild_shared_rules(R) || R <- Remaining]),
-    Result = nfnl_server:apply_msgs(?SERVER, FlushMsgs ++ BaseMsgs ++ RebuildMsgs),
-    case Result of
-        ok ->
-            ets:delete(erlkoenig_firewall_ports, ContainerId);
-        {error, RemoveReason} ->
-            logger:warning("erlkoenig_ct_firewall: remove_container ~s batch "
-                           "failed: ~p (ETS entry retained so a retry can "
-                           "target the same chain)",
-                           [Chain, RemoveReason])
-    end,
-    Result.
+    BaseMsgs ++ RebuildMsgs.
+
+nat_flush_msgs([]) ->
+    [];
+nat_flush_msgs(_Ports) ->
+    NatTable = nat_table(),
+    [
+        fun(S) -> nft_delete:flush_chain(?FAMILY, NatTable, ?PREROUTING_CHAIN, S) end,
+        fun(S) -> nft_delete:flush_chain(?FAMILY, NatTable, ?OUTPUT_CHAIN, S) end
+    ].
 
 -doc "Rebuild forward jump + DNAT rules for one container.".
 -spec rebuild_shared_rules(tuple()) -> [fun()].
-%% IPVLAN containers have no host-side veth — dispatch by source/destination
-%% IP instead. Mirrors the branching in add_container/6.
-rebuild_shared_rules({_Id, undefined, Ip, [], Chain2}) ->
+rebuild_shared_rules({_Id, _LegacyHostIface, Ip, [], Chain2}) ->
     IpBin = ip_to_binary(Ip),
     [nft_encode:rule_fun(inet, ?TABLE, ?FORWARD_CHAIN,
         nft_rules:ip_saddr_jump(IpBin, Chain2)),
      nft_encode:rule_fun(inet, ?TABLE, ?FORWARD_CHAIN,
         nft_rules:ip_daddr_jump(IpBin, Chain2))];
-rebuild_shared_rules({_Id, undefined, Ip, Ports, Chain2}) ->
-    %% IPVLAN with port-forwards: same IP-based dispatch; DNAT rules
-    %% below carry the port-forwards as usual.
+rebuild_shared_rules({_Id, _LegacyHostIface, Ip, Ports, Chain2}) ->
     IpBin = ip_to_binary(Ip),
     [nft_encode:rule_fun(inet, ?TABLE, ?FORWARD_CHAIN,
         nft_rules:ip_saddr_jump(IpBin, Chain2)),
      nft_encode:rule_fun(inet, ?TABLE, ?FORWARD_CHAIN,
         nft_rules:ip_daddr_jump(IpBin, Chain2))] ++
-    rebuild_port_forwards(Ip, Ports);
-rebuild_shared_rules({_Id, Veth, _Ip, [], Chain2}) ->
-    [nft_encode:rule_fun(inet, ?TABLE, ?FORWARD_CHAIN,
-        nft_rules:iifname_jump(Veth, Chain2))];
-rebuild_shared_rules({_Id, Veth, Ip, Ports, Chain2}) ->
-    [nft_encode:rule_fun(inet, ?TABLE, ?FORWARD_CHAIN,
-        nft_rules:iifname_jump(Veth, Chain2)),
-     nft_encode:rule_fun(inet, ?TABLE, ?FORWARD_CHAIN,
-        nft_rules:oifname_accept(Veth))] ++
     rebuild_port_forwards(Ip, Ports).
 
-%% Port-forward rules only — shared between bridge and IPVLAN paths.
+%% Port-forward rules only.
 -spec rebuild_port_forwards(inet:ip_address(), [{non_neg_integer(), non_neg_integer()}]) -> [fun()].
 rebuild_port_forwards(Ip, Ports) ->
     IpBin = ip_to_binary(Ip),
@@ -920,21 +991,20 @@ allow_to_rules(Unknown, _GwIp, _Bridge) ->
     logger:warning("[firewall] unknown allow directive: ~p", [Unknown]),
     [].
 
-%% Interface name matching — handles wildcards ("vh_*") and exact names.
-%% Wildcard: compare only the prefix bytes (before *), not padded to 16.
-%% Exact: pad to 16 bytes and compare all.
+%% Interface name matching is exact. Prefix wildcards from the old
+%% host-interface model are refused under the IPVLAN runtime.
 -spec ifname_match(iifname | oifname, eq | neq, binary()) -> list().
 ifname_match(MetaKey, Op, Name) ->
-    case binary:split(Name, <<"*">>) of
-        [Prefix, <<>>] ->
-            %% Wildcard: "vh_*" → compare prefix only
-            %% nft uses cmp with just the prefix bytes (no padding)
+    case binary:match(Name, <<"*">>) of
+        nomatch ->
             [nft_expr_ir:meta(MetaKey, 1),
-             nft_expr_ir:cmp(Op, 1, <<Prefix/binary, 0>>)];
+             nft_expr_ir:cmp(Op, 1, pad_ifname(Name))];
         _ ->
-            %% Exact match: pad to IFNAMSIZ
-            [nft_expr_ir:meta(MetaKey, 1),
-             nft_expr_ir:cmp(Op, 1, pad_ifname(Name))]
+            error({legacy_ifname_wildcard_refused,
+                   #{field => MetaKey,
+                     name => Name,
+                     hint => <<"interface wildcards were removed with IPVLAN; "
+                               "use exact host interface names or IP matches">>}})
     end.
 
 %% pad_ifname/1 defined above (shared with zone masq rules).

@@ -195,6 +195,29 @@ encode_cmd_write_file_test() ->
     <<Tag, _Ver, _/binary>> = Cmd,
     ?assertEqual(16#16, Tag).
 
+encode_cmd_device_filter_default_is_positional_test() ->
+    Path = <<"/sys/fs/cgroup/erlkoenig/containers/ct">>,
+    Cmd = erlkoenig_proto:encode_cmd_device_filter(Path),
+    PathLen = byte_size(Path),
+    ?assertEqual(<<16#19, 1, PathLen:16/big, Path/binary, 0:8>>, Cmd).
+
+encode_cmd_device_filter_rules_are_positional_test() ->
+    Path = <<"/cg">>,
+    Cmd = erlkoenig_proto:encode_cmd_device_filter(
+            Path, [{1, 136, -1, 7}, {2, 8, 0, 5}]),
+    ?assertEqual(<<16#19, 1,
+                   3:16/big, "/cg",
+                   2:8,
+                   1:8, 136:32/big-signed, (-1):32/big-signed, 7:8,
+                   2:8, 8:32/big-signed, 0:32/big-signed, 5:8>>,
+                 Cmd).
+
+encode_cmd_metrics_start_is_positional_test() ->
+    Path = <<"/sys/fs/cgroup/erlkoenig/containers/ct">>,
+    PathLen = byte_size(Path),
+    ?assertEqual(<<16#1A, 1, PathLen:16/big, Path/binary>>,
+                 erlkoenig_proto:encode_cmd_metrics_start(Path)).
+
 encode_cmd_query_status_test() ->
     ?assertEqual(<<16#14, 1>>, erlkoenig_proto:encode_cmd_query_status()).
 

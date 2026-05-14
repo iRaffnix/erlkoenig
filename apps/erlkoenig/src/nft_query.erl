@@ -26,16 +26,23 @@ The kernel responds with one message per object, followed by
 NLMSG_DONE. For dump operations (NLM_F_DUMP), all objects of the
 requested type are returned.
 
-This module works directly with nfnl_socket for send/recv since
-get responses contain data, not just ACK/error codes.
+Standalone calls use nfnl_socket directly. The seq-parameterized
+variants accept an injected socket module so nfnl_server can keep
+ownership of one supervised socket while still receiving data
+responses, not just ACK/error codes.
 """.
 
 -export([
     list_tables/2, list_tables/3,
+    list_tables/4,
     list_chains/3, list_chains/4,
+    list_chains/5,
     list_rules/3, list_rules/4,
+    list_rules/5,
     get_ruleset/2, get_ruleset/3,
-    list_set_elems/4, list_set_elems/5
+    get_ruleset/4,
+    list_set_elems/4, list_set_elems/5,
+    list_set_elems/6
 ]).
 %% Exposed for fuzzing — pure parser, consumes kernel dumps.
 -export([parse_dump/2]).
@@ -180,18 +187,23 @@ get_ruleset(Sock, Family) ->
 -spec send_and_collect(socket:socket(), binary()) ->
     {ok, [[nfnl_attr:nla()]]} | {error, term()}.
 send_and_collect(Sock, Msg) ->
-    case nfnl_socket:send(Sock, Msg) of
-        ok -> collect_dump(Sock, []);
+    send_and_collect(Sock, nfnl_socket, Msg).
+
+-spec send_and_collect(socket:socket(), module(), binary()) ->
+    {ok, [[nfnl_attr:nla()]]} | {error, term()}.
+send_and_collect(Sock, SocketMod, Msg) ->
+    case SocketMod:send(Sock, Msg) of
+        ok -> collect_dump(Sock, SocketMod, []);
         {error, _} = Err -> Err
     end.
 
--spec collect_dump(socket:socket(), [[nfnl_attr:nla()]]) ->
+-spec collect_dump(socket:socket(), module(), [[nfnl_attr:nla()]]) ->
     {ok, [[nfnl_attr:nla()]]} | {error, term()}.
-collect_dump(Sock, Acc) ->
-    case nfnl_socket:recv(Sock, ?DUMP_RECV_TIMEOUT) of
+collect_dump(Sock, SocketMod, Acc) ->
+    case SocketMod:recv(Sock, ?DUMP_RECV_TIMEOUT) of
         {ok, Data} ->
             case parse_dump(Data, Acc) of
-                {more, NewAcc} -> collect_dump(Sock, NewAcc);
+                {more, NewAcc} -> collect_dump(Sock, SocketMod, NewAcc);
                 {done, NewAcc} -> {ok, lists:reverse(NewAcc)};
                 {error, _} = Err -> Err
             end;
@@ -371,9 +383,12 @@ seq() ->
 %% Seq-parameterized variants for unified sequence management.
 %% These are called by nfnl_server with the gen_server's seq counter.
 list_tables(Sock, Family, Seq) ->
+    list_tables(Sock, nfnl_socket, Family, Seq).
+
+list_tables(Sock, SocketMod, Family, Seq) ->
     Msg = nfnl_msg:build_hdr(?NFT_MSG_GETTABLE, Family,
         ?NLM_F_REQUEST bor ?NLM_F_DUMP, Seq, <<>>),
-    case send_and_collect(Sock, Msg) of
+    case send_and_collect(Sock, SocketMod, Msg) of
         {ok, Responses} ->
             {ok, lists:filtermap(fun(Attrs) ->
                 case lists:keyfind(?NFTA_TABLE_NAME, 1, Attrs) of
@@ -385,39 +400,65 @@ list_tables(Sock, Family, Seq) ->
     end.
 
 list_chains(Sock, Family, Table, Seq) ->
+    list_chains(Sock, nfnl_socket, Family, Table, Seq).
+
+list_chains(Sock, SocketMod, Family, Table, Seq) ->
     FilterAttrs = nfnl_attr:encode_str(?NFTA_CHAIN_TABLE, Table),
     Msg = nfnl_msg:build_hdr(?NFT_MSG_GETCHAIN, Family,
         ?NLM_F_REQUEST bor ?NLM_F_DUMP, Seq, FilterAttrs),
-    case send_and_collect(Sock, Msg) of
+    case send_and_collect(Sock, SocketMod, Msg) of
         {ok, Responses} ->
-            {ok, lists:filtermap(fun(Attrs) ->
-                case lists:keyfind(?NFTA_CHAIN_NAME, 1, Attrs) of
-                    {_, NameBin} -> {true, #{name => strip_null(NameBin)}};
-                    false -> false
-                end
-            end, Responses)};
+            Chains = [
+                parse_chain_attrs(A)
+             || A <- Responses,
+                table_matches(A, Table)
+            ],
+            {ok, Chains};
         {error, _} = Err -> Err
     end.
 
 list_rules(Sock, Family, Table, Seq) ->
+    list_rules(Sock, nfnl_socket, Family, Table, Seq).
+
+list_rules(Sock, SocketMod, Family, Table, Seq) ->
     FilterAttrs = nfnl_attr:encode_str(?NFTA_RULE_TABLE, Table),
     Msg = nfnl_msg:build_hdr(?NFT_MSG_GETRULE, Family,
         ?NLM_F_REQUEST bor ?NLM_F_DUMP, Seq, FilterAttrs),
-    send_and_collect(Sock, Msg).
+    case send_and_collect(Sock, SocketMod, Msg) of
+        {ok, Responses} ->
+            Rules = [
+                parse_rule_attrs(A)
+             || A <- Responses,
+                table_matches(A, Table)
+            ],
+            {ok, Rules};
+        {error, _} = Err -> Err
+    end.
 
 get_ruleset(Sock, Family, Seq) ->
+    get_ruleset(Sock, nfnl_socket, Family, Seq).
+
+get_ruleset(Sock, SocketMod, Family, Seq) ->
     Msg = nfnl_msg:build_hdr(?NFT_MSG_GETRULE, Family,
         ?NLM_F_REQUEST bor ?NLM_F_DUMP, Seq, <<>>),
-    send_and_collect(Sock, Msg).
+    send_and_collect(Sock, SocketMod, Msg).
 
 list_set_elems(Sock, Family, Table, SetName, Seq) ->
+    list_set_elems(Sock, nfnl_socket, Family, Table, SetName, Seq).
+
+list_set_elems(Sock, SocketMod, Family, Table, SetName, Seq) ->
     Attrs = iolist_to_binary([
         nfnl_attr:encode_str(?NFTA_SET_ELEM_LIST_TABLE, Table),
         nfnl_attr:encode_str(?NFTA_SET_ELEM_LIST_SET, SetName)
     ]),
     Msg = nfnl_msg:build_hdr(?NFT_MSG_GETSETELEM, Family,
         ?NLM_F_REQUEST bor ?NLM_F_DUMP, Seq, Attrs),
-    send_and_collect(Sock, Msg).
+    case send_and_collect(Sock, SocketMod, Msg) of
+        {ok, Responses} ->
+            Elems = lists:flatmap(fun extract_set_elems/1, Responses),
+            {ok, Elems};
+        {error, _} = Err -> Err
+    end.
 
 -doc """
 List all elements in a named set.

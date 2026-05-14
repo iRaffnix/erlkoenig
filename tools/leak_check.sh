@@ -5,7 +5,8 @@
 # Categories audited:
 #   link            — ipv. / h. / i. interfaces left from container nets
 #   parent-dummy    — test-only dummy parents (ek_*, by name prefix)
-#   nft             — erlkoenig-owned nft tables (inet/host, inet/erlkoenig)
+#   nft             — legacy erlkoenig-owned nft tables (inet/host, inet/erlkoenig)
+#   nft-zone-object — stale objects inside the daemon-managed zone table
 #   cgroup          — container cgroups under erlkoenig.service/containers
 #   volume-orphan   — disk-orphan volume dirs reported by `ek vol orphans`
 #
@@ -121,7 +122,22 @@ is_allowed_parent() {
     return 1
 }
 
-# 1. Container-side ipvlan/veth interfaces (ipv.*, h.*, i.*)
+# Returns true when the operator API is reachable and reports no
+# running containers. Used to decide whether per-container nft objects
+# in erlkoenig_zone are leaks rather than live state.
+ct_list_empty() {
+    [ -n "$ek_bin" ] || return 1
+    [ -x "$ek_bin" ] || return 1
+
+    local out
+    out="$("$ek_bin" --format json ct list 2>/dev/null)" || return 1
+    case "$(printf '%s' "$out" | tr -d '[:space:]')" in
+        "[]") return 0 ;;
+        *)    return 1 ;;
+    esac
+}
+
+# 1. Container-side ipvlan/veth interfaces.
 audit_links() {
     local line name
     while read -r line; do
@@ -130,7 +146,7 @@ audit_links() {
         name="${name%%:*}"
         name="${name%%@*}"
         case "$name" in
-            ipv.*|h.*|i.*)
+            ipv.*|h.*|i.*|ekht*)
                 emit link "$name"
                 ;;
         esac
@@ -170,6 +186,31 @@ audit_nft_tables() {
                 ;;
         esac
     done < <(nft list tables 2>/dev/null)
+}
+
+# 3b. Stale objects inside the daemon-managed zone table. The table
+# itself is expected to exist while the daemon is running, but after
+# all containers are stopped it should contain only the base `forward'
+# chain. This catches the class of drift where shutdown/restart leaves
+# old per-container chains, counters, sets or flowtables behind inside
+# the correct table name.
+audit_nft_zone_objects() {
+    ct_list_empty || return 0
+
+    local line kind name
+    while read -r line; do
+        set -- $line
+        kind="${1:-}"
+        name="${2:-}"
+        case "$kind" in
+            chain)
+                [ "$name" = "forward" ] || emit nft-zone-object "chain/$name"
+                ;;
+            counter|set|flowtable)
+                emit nft-zone-object "$kind/$name"
+                ;;
+        esac
+    done < <(nft list table inet erlkoenig_zone 2>/dev/null)
 }
 
 # 4. Container cgroup directories left over after teardown.
@@ -250,6 +291,7 @@ audit_volume_orphans() {
 audit_links
 audit_parent_dummies
 audit_nft_tables
+audit_nft_zone_objects
 audit_cgroups
 audit_volume_orphans
 

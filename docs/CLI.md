@@ -219,7 +219,9 @@ ek vol set-quota <uuid> <size>
 `vol inspect` accepts either a volume UUID or the persistent volume name from
 the DSL. `vol set-quota` accepts the same size syntax as the DSL, such as
 `1G`, `500M`, or integer bytes. Setting `0` clears enforcement while keeping
-the project binding.
+the project binding. Quota updates are strict by default: if the kernel
+project-quota command cannot be applied, the command fails and `quota_bytes`
+is not updated.
 
 `vol destroy <uuid> --yes` removes metadata and the on-disk directory. The
 `--yes` flag is required because persistent volumes may contain real data.
@@ -439,8 +441,7 @@ order). Missing values are `null`. The schema is additive — new fields
 may appear; existing ones don't disappear.
 
 `net_info` carries: `ip`, `gateway`, `netmask`, `zone`, `iface`,
-`container_veth`, `host_veth`, plus a nested `attach` object
-(`mode`, `os_pid`, `slave`).
+plus a nested `attach` object (`mode`, `os_pid`, `slave`).
 
 `ek pod list` — array of:
 ```json

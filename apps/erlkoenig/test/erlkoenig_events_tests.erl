@@ -101,6 +101,19 @@ collector_counts_events_test_() ->
         end
      ] end}.
 
+notify_without_bus_does_not_crash_caller_test() ->
+    OldLevel = logger:get_primary_config(),
+    logger:set_primary_config(level, none),
+    try
+        try unregister(erlkoenig_events) catch _:_ -> ok end,
+        ?assertEqual(ok, erlkoenig_events:notify({container_failed, <<"ct">>, reason}))
+    after
+        case OldLevel of
+            #{level := Level} -> logger:set_primary_config(level, Level);
+            _ -> logger:set_primary_config(level, all)
+        end
+    end.
+
 %% =================================================================
 %% Event log handler (all event types)
 %% =================================================================

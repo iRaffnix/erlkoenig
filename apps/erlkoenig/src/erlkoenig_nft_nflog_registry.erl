@@ -17,7 +17,8 @@ NFLOG group belongs to which nft owner table. Packet parsing must not
 infer ownership from chain names, prefixes, or numeric conventions.
 """.
 
--export([register_table/1, register_group/3, lookup/1, all/0, clear/0]).
+-export([register_table/1, register_group/3, unregister_table/1,
+         lookup/1, all/0, clear/0]).
 
 -include("nft_tables.hrl").
 
@@ -45,6 +46,19 @@ register_group(Group, Table, Owner)
     },
     Current = persistent_term:get(?KEY, #{}),
     persistent_term:put(?KEY, Current#{Group => Meta}),
+    ok.
+
+-spec unregister_table(binary()) -> ok.
+unregister_table(Table) when is_binary(Table) ->
+    Current = persistent_term:get(?KEY, #{}),
+    Next = maps:filter(
+             fun(_Group, #{table := Registered}) ->
+                     Registered =/= Table;
+                (_Group, _Meta) ->
+                     true
+             end,
+             Current),
+    persistent_term:put(?KEY, Next),
     ok.
 
 -spec lookup(non_neg_integer() | unknown) -> {ok, map()} | error.

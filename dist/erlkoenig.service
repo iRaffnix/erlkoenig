@@ -21,6 +21,11 @@ Restart=on-failure
 RestartSec=5
 
 Delegate=yes
+MemoryAccounting=yes
+TasksAccounting=yes
+MemoryMin=256M
+CPUWeight=200
+TasksMax=8192
 LimitNOFILE=65536
 LimitMEMLOCK=infinity
 NoNewPrivileges=no

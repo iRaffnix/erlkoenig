@@ -121,6 +121,17 @@ build_setup_msgs_appends_extra_test() ->
     ?assertEqual(8, length(Msgs)),
     ?assertEqual(hd(lists:reverse(Msgs)), hd(Extra)).
 
+enable_ip_forward_writes_requested_path_test() ->
+    Path = tmp_path("ip_forward_ok"),
+    ?assertEqual(ok, erlkoenig_ct_firewall:enable_ip_forward(Path)),
+    ?assertEqual({ok, <<"1">>}, file:read_file(Path)),
+    _ = file:delete(Path).
+
+enable_ip_forward_reports_write_failure_test() ->
+    Path = filename:join(tmp_path("missing_parent"), "ip_forward"),
+    ?assertMatch({error, {ip_forward_enable_failed, Path, enoent}},
+                 erlkoenig_ct_firewall:enable_ip_forward(Path)).
+
 %% ============================================================
 %% Phase 6g: owner tables are fixed
 %% ============================================================
@@ -156,6 +167,78 @@ build_setup_msgs_from_helpers_routes_forward_chain_into_zone_test() ->
     ?assert(any_match(NatBins, <<"prerouting">>)),
     ?assert(any_match(NatBins, <<"postrouting">>)),
     ?assertNot(any_match(FwdBins, <<"prerouting">>)).
+
+remove_without_ports_does_not_touch_nat_chains_test() ->
+    Chain = <<"fail-0-crasher">>,
+    Msgs = erlkoenig_ct_firewall:build_remove_msgs(Chain, [], []),
+    Bins = run_msgs(Msgs),
+    Fwd = erlkoenig_ct_firewall:forward_table(),
+    Nat = erlkoenig_ct_firewall:nat_table(),
+    {FwdBins, NatBins} = partition_by_table(Bins, Fwd, Nat),
+    ?assertEqual(5, length(Msgs)),
+    ?assertEqual([], NatBins),
+    ?assert(any_match(FwdBins, <<"forward">>)),
+    ?assert(any_match(FwdBins, Chain)),
+    ?assert(any_match(FwdBins, <<"fail-0-crasher_drop">>)).
+
+remove_target_cleanup_is_separate_from_counter_delete_test() ->
+    Chain = <<"duo-0-echo">>,
+    TargetMsgs = erlkoenig_ct_firewall:build_remove_target_msgs(Chain, []),
+    CounterMsgs = erlkoenig_ct_firewall:build_remove_counter_msgs(Chain),
+    RebuildMsgs = erlkoenig_ct_firewall:build_rebuild_shared_msgs([]),
+    TargetBins = run_msgs(TargetMsgs),
+    CounterBins = run_msgs(CounterMsgs),
+    RebuildBins = run_msgs(RebuildMsgs),
+    ?assertEqual(3, length(TargetMsgs)),
+    ?assertEqual(1, length(CounterMsgs)),
+    ?assertEqual(1, length(RebuildMsgs)),
+    ?assert(any_match(TargetBins, Chain)),
+    ?assertNot(any_match(TargetBins, <<"duo-0-echo_drop">>)),
+    ?assert(any_match(CounterBins, <<"duo-0-echo_drop">>)),
+    ?assert(any_match(RebuildBins, <<"forward">>)).
+
+remove_with_ports_flushes_nat_chains_test() ->
+    Chain = <<"web-0-svc">>,
+    Msgs = erlkoenig_ct_firewall:build_remove_msgs(
+        Chain, [{8080, 80}], []),
+    Bins = run_msgs(Msgs),
+    Fwd = erlkoenig_ct_firewall:forward_table(),
+    Nat = erlkoenig_ct_firewall:nat_table(),
+    {FwdBins, NatBins} = partition_by_table(Bins, Fwd, Nat),
+    ?assertEqual(7, length(Msgs)),
+    ?assert(any_match(FwdBins, <<"forward">>)),
+    ?assert(any_match(FwdBins, Chain)),
+    ?assert(any_match(NatBins, <<"prerouting">>)),
+    ?assert(any_match(NatBins, <<"output">>)).
+
+add_container_refuses_legacy_host_iface_test() ->
+    ?assertEqual(
+       {error, {legacy_host_interface_refused, <<"vh_old">>}},
+       erlkoenig_ct_firewall:add_container(
+         <<"ct-1">>, {10, 80, 0, 2}, <<"vh_old">>, [], #{}, <<"ct-1">>)).
+
+remove_rebuild_ignores_legacy_host_iface_test() ->
+    Chain = <<"gone-0-svc">>,
+    Remaining = [{<<"ct-2">>, <<"vh_legacy">>, {10, 80, 0, 3}, [],
+                  <<"still-0-svc">>}],
+    Msgs = erlkoenig_ct_firewall:build_remove_msgs(Chain, [], Remaining),
+    Bins = run_msgs(Msgs),
+    ?assertNot(any_match(Bins, <<"vh_legacy">>)),
+    ?assert(any_match(Bins, <<"still-0-svc">>)).
+
+compile_rule_refuses_interface_wildcards_test() ->
+    ?assertError({legacy_ifname_wildcard_refused, #{field := iifname,
+                                                    name := <<"vh_*">>}},
+        erlkoenig_ct_firewall:compile_rule(
+            {rule, accept, #{iif => <<"vh_*">>}})),
+    ?assertError({legacy_ifname_wildcard_refused, #{field := oifname,
+                                                    name := <<"eth*">>}},
+        erlkoenig_ct_firewall:compile_rule(
+            {rule, accept, #{oif => <<"eth*">>}})),
+    ?assertError({legacy_ifname_wildcard_refused, #{field := oifname,
+                                                    name := <<"v*">>}},
+        erlkoenig_ct_firewall:compile_rule(
+            {rule, accept, #{oif_neq => <<"v*">>}})).
 
 %% --- helpers ---
 
@@ -214,3 +297,9 @@ reset_ets() ->
             catch error:badarg -> ok
             end
     end.
+
+tmp_path(Name) ->
+    filename:join(
+      "/tmp",
+      lists:flatten(io_lib:format("erlkoenig_ct_firewall_~s_~p",
+                                  [Name, erlang:unique_integer([positive])]))).

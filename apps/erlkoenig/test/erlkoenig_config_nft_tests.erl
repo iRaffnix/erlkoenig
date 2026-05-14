@@ -88,6 +88,33 @@ unknown_nft_table_is_refused_before_apply_test() ->
         {error, {unknown_nft_table, <<"erlkoenig">>, _}},
         erlkoenig_config_nft:apply_nft_tables([Table], #{}, #{}, [], [])).
 
+running_entry_from_info_returns_ip_test() ->
+    ?assertEqual(
+        {ok, #{ip => {10, 72, 0, 10}}},
+        erlkoenig_config_nft:running_entry_from_info(#{
+            state => running,
+            net_info => #{iface => <<"i.web">>, ip => {10, 72, 0, 10}}
+        })).
+
+running_entry_from_info_skips_terminal_without_net_info_test() ->
+    ?assertEqual(skip, erlkoenig_config_nft:running_entry_from_info(#{
+        state => stopped,
+        exit_info => #{exit_code => 0, term_signal => 0}
+    })),
+    ?assertEqual(skip, erlkoenig_config_nft:running_entry_from_info(#{
+        state => failed,
+        exit_info => #{exit_code => -1, term_signal => 11}
+    })).
+
+running_entry_from_info_warns_for_running_without_net_info_test() ->
+    ?assertMatch(
+        {warning, {no_net_info, running, _}},
+        erlkoenig_config_nft:running_entry_from_info(#{
+            state => running,
+            id => <<"ct-1">>,
+            name => <<"ct">>
+        })).
+
 %% ============================================================
 %% Phase 6e.1.b: build_forward_topology_msgs/3 — pure shape +
 %% reload-idempotency contract
@@ -387,6 +414,34 @@ apply_forward_topology_returns_structured_error_when_no_nft_srv_test() ->
     Result = erlkoenig_config_nft:apply_forward_topology(
         Zones, Pods, IpMap, SpawnedPids),
     ?assertMatch({error, {batch_failed, _}}, Result).
+
+pod_local_missing_ref_is_compile_error_test() ->
+    Pod = #{
+        name => <<"api">>,
+        containers => [#{name => <<"web">>}],
+        chains => [#{rules => [
+            {rule, accept, #{iif => {ref, <<"web">>}, tcp => #{dport => 8080}}}
+        ]}]
+    },
+    ?assertError({unresolved_pod_rule_ref,
+                  #{pod := <<"api">>, field := iif, ref := <<"web">>}},
+        erlkoenig_config_nft:build_forward_topology_msgs([], [Pod], ctx_for([]))).
+
+apply_forward_topology_returns_compile_error_for_missing_pod_ref_test() ->
+    Pod = #{
+        name => <<"api">>,
+        containers => [#{name => <<"web">>}],
+        chains => [#{rules => [
+            {rule, accept, #{oif => {ref, <<"web">>}, tcp => #{dport => 8080}}}
+        ]}]
+    },
+    Result = erlkoenig_config_nft:apply_forward_topology(
+        [], [Pod], #{}, [], fun(_Group) -> {ok, self()} end),
+    ?assertMatch({error, {compile_failed,
+                          {unresolved_pod_rule_ref,
+                           #{pod := <<"api">>, field := oif,
+                             ref := <<"web">>}}}},
+                 Result).
 
 %% NFLOG fail-loud: when ensure_started returns an error, the
 %% wrapper must abort with `{error, {nflog_start_failed, ...}}`

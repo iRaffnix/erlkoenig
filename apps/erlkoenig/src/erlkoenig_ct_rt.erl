@@ -41,7 +41,9 @@ in step 3b.
     wait_and_connect/2,
     wait_and_connect/3,
     connect_to_runtime/1,
+    runtime_pid_from_cgroup/1,
     kill_os_pid/1,
+    terminate_os_pid/1,
     sync_rt_command/3,
     handle_setup_reply/3
 ]).
@@ -188,6 +190,30 @@ connect_to_runtime(#ct_data{socket_path = SocketPath}) ->
                                 timeout_ms => 3000})}
     end.
 
+-spec runtime_pid_from_cgroup(string() | undefined) ->
+    non_neg_integer() | undefined.
+runtime_pid_from_cgroup(undefined) ->
+    undefined;
+runtime_pid_from_cgroup(CgroupProcsPath) ->
+    case file:read_file(CgroupProcsPath) of
+        {ok, Bin} ->
+            case [Pid || Line <- binary:split(Bin, <<"\n">>, [global]),
+                         Pid <- [parse_pid(Line)],
+                         Pid =/= undefined] of
+                [Pid | _] -> Pid;
+                [] -> undefined
+            end;
+        {error, _} ->
+            undefined
+    end.
+
+parse_pid(<<>>) ->
+    undefined;
+parse_pid(Line) ->
+    try binary_to_integer(Line)
+    catch _:_ -> undefined
+    end.
+
 %% Sync handshake used only on the reconnect path. The first-connect
 %% path (creating_do_spawn) sends encode_handshake/0 asynchronously and
 %% handles the reply via creating_handle_rt_data/3 — keep those flows
@@ -217,6 +243,34 @@ kill_os_pid(Pid) when is_integer(Pid), Pid > 0 ->
     _ = os:cmd("kill -15 " ++ integer_to_list(Pid)),
     ok;
 kill_os_pid(_) -> ok.
+
+-doc "Terminate a runtime wrapper and wait briefly for it to leave its cgroup.".
+-spec terminate_os_pid(non_neg_integer() | undefined) -> ok.
+terminate_os_pid(undefined) ->
+    ok;
+terminate_os_pid(Pid) when is_integer(Pid), Pid > 0 ->
+    _ = os:cmd("kill -15 " ++ integer_to_list(Pid) ++ " 2>/dev/null"),
+    case wait_os_pid_gone(Pid, 1000) of
+        ok ->
+            ok;
+        timeout ->
+            _ = os:cmd("kill -9 " ++ integer_to_list(Pid) ++ " 2>/dev/null"),
+            _ = wait_os_pid_gone(Pid, 500),
+            ok
+    end;
+terminate_os_pid(_) ->
+    ok.
+
+wait_os_pid_gone(_Pid, TimeoutMs) when TimeoutMs =< 0 ->
+    timeout;
+wait_os_pid_gone(Pid, TimeoutMs) ->
+    case filelib:is_dir("/proc/" ++ integer_to_list(Pid)) of
+        false ->
+            ok;
+        true ->
+            timer:sleep(25),
+            wait_os_pid_gone(Pid, TimeoutMs - 25)
+    end.
 
 -doc "Send a command and synchronously wait for the reply.".
 -spec sync_rt_command(#ct_data{}, iodata(), non_neg_integer()) ->

@@ -2,7 +2,8 @@
 %%% @doc Unit tests for erlkoenig_volume_store (DETS + gen_server).
 %%%
 %%% Exercises: UUID generation, idempotent ensure, list, destroy,
-%%% ephemeral cleanup, by-name symlinks, chown best-effort.
+%%% ephemeral cleanup, by-name symlinks, chown best-effort, strict
+%%% quota enforcement vs explicit advisory mode.
 %%% @end
 %%%-------------------------------------------------------------------
 
@@ -46,6 +47,10 @@ store_test_() ->
            ?_test(t_reconcile_quota())},
           {"distinct volumes get distinct project IDs",
            ?_test(t_distinct_project_ids())},
+          {"strict quota create fails without kernel enforcement",
+           ?_test(t_strict_quota_create_without_xfs_fails())},
+          {"strict set_quota fails without kernel enforcement",
+           ?_test(t_strict_set_quota_without_xfs_fails())},
           {"parse_quota accepts strings, ints, binaries",
            ?_test(t_parse_quota())},
           {"parse_quota raises on garbage",
@@ -66,6 +71,7 @@ setup() ->
     Root = iolist_to_binary(["/tmp/eunit_ek_vs_",
                              integer_to_list(erlang:system_time(nanosecond))]),
     ok = application:set_env(erlkoenig, volumes_root, Root),
+    ok = application:set_env(erlkoenig, volume_quota_mode, advisory),
     case erlkoenig_volume_store:start_link() of
         {ok, _Pid} -> ok;
         {error, {already_started, _}} -> ok
@@ -78,6 +84,7 @@ cleanup(Root) ->
         Pid -> gen_server:stop(Pid, normal, 5000)
     end,
     _ = application:unset_env(erlkoenig, volumes_root),
+    _ = application:unset_env(erlkoenig, volume_quota_mode),
     _ = file:del_dir_r(binary_to_list(Root)),
     ok.
 
@@ -207,11 +214,10 @@ t_by_name_symlink(Root) ->
 %%====================================================================
 %% Quota tests
 %%
-%% The test tmpdir isn't XFS, so `xfs_quota` will fail at the
-%% subprocess layer. That's by design — the store logs a warning
-%% and records the requested quota in metadata regardless. These
-%% tests verify the metadata pathway; kernel-level enforcement is
-%% covered by integration test 28 (root-gated, real XFS mount).
+%% The test tmpdir isn't XFS. Most metadata-path tests run with the
+%% explicit `volume_quota_mode = advisory' fixture above. The strict
+%% tests below assert the production default: no quota metadata is
+%% recorded unless kernel enforcement is available.
 %%====================================================================
 
 t_quota_on_create() ->
@@ -278,6 +284,36 @@ t_distinct_project_ids() ->
     ?assertNotEqual(PidA, PidC),
     ?assertNotEqual(PidB, PidC),
     ?assert(PidA >= 10_000).
+
+t_strict_quota_create_without_xfs_fails() ->
+    ok = application:set_env(erlkoenig, volume_quota_mode, enforce),
+    try
+        Result = erlkoenig_volume_store:ensure(
+            #{container => <<"ct-strict-create">>, persist => <<"q">>,
+              uid => 0, gid => 0, quota => <<"1G">>}),
+        ?assertMatch({error, {quota_unavailable, {project_bind, _, _}}},
+                     Result),
+        ?assertEqual(not_found,
+                     erlkoenig_volume_store:find(<<"ct-strict-create">>, <<"q">>))
+    after
+        ok = application:set_env(erlkoenig, volume_quota_mode, advisory)
+    end.
+
+t_strict_set_quota_without_xfs_fails() ->
+    {ok, V0} = erlkoenig_volume_store:ensure(
+        #{container => <<"ct-strict-set">>, persist => <<"q">>,
+          uid => 0, gid => 0}),
+    ok = application:set_env(erlkoenig, volume_quota_mode, enforce),
+    try
+        Result = erlkoenig_volume_store:set_quota(maps:get(uuid, V0), <<"1G">>),
+        ?assertMatch({error, {quota_unavailable, {project_bind, _, _}}},
+                     Result),
+        {ok, Found} = erlkoenig_volume_store:find(<<"ct-strict-set">>, <<"q">>),
+        ?assertEqual(error, maps:find(quota_bytes, Found)),
+        ?assertEqual(error, maps:find(project_id, Found))
+    after
+        ok = application:set_env(erlkoenig, volume_quota_mode, advisory)
+    end.
 
 t_parse_quota() ->
     ?assertEqual(0, erlkoenig_volume_store:parse_quota(0)),

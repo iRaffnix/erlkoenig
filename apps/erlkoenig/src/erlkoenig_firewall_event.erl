@@ -148,7 +148,8 @@ amqp_event(#{kind := firewall_packet} = Event) ->
 amqp_event(#{kind := counter_rate, evidence := #{packets := Packets}} = Event)
   when Packets > 0 ->
     Chain = ensure_binary(maps:get(chain, Event, unknown)),
-    {ok, <<"firewall.", Chain/binary, ".drop">>, Event};
+    Suffix = counter_route_suffix(Event),
+    {ok, <<"firewall.", Chain/binary, ".", Suffix/binary>>, Event};
 amqp_event(#{kind := counter_rate}) ->
     skip;
 amqp_event(#{kind := scan_suspect} = Event) ->
@@ -186,6 +187,18 @@ counter_to_chain(Name) ->
         [Chain, _] -> Chain;
         _ -> NameBin
     end.
+
+counter_route_suffix(Event) ->
+    Counter = ensure_binary(maps:get(counter, Event, maps:get(chain, Event, unknown))),
+    case is_drop_counter(Counter) of
+        true -> <<"drop">>;
+        false -> <<"counter">>
+    end.
+
+is_drop_counter(<<"dropped">>) ->
+    true;
+is_drop_counter(Counter) ->
+    binary:match(Counter, <<"_drop">>) =/= nomatch.
 
 event_id() ->
     Unique = erlang:unique_integer([monotonic, positive]),

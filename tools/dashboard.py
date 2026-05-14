@@ -26,6 +26,7 @@ Requires: pip install textual pika
 
 import sys
 import json
+import os
 import threading
 import time
 from datetime import datetime
@@ -410,11 +411,13 @@ class ClusterState:
 class AmqpThread:
     """Background thread consuming AMQP events."""
 
-    def __init__(self, host, state, lock, queue):
+    def __init__(self, host, state, lock, queue, user=None, password=None):
         self.host = host
         self.state = state
         self.lock = lock
         self.queue = queue
+        self.user = user
+        self.password = password
         self._conn = None
 
     def start(self):
@@ -424,7 +427,7 @@ class AmqpThread:
     def _run(self):
         while True:
             try:
-                creds = pika.PlainCredentials("erlkoenig", "erlkoenig")
+                creds = pika.PlainCredentials(self.user, self.password)
                 params = pika.ConnectionParameters(
                     host=self.host, port=5672, credentials=creds, heartbeat=30,
                 )
@@ -442,6 +445,8 @@ class AmqpThread:
                 ch.start_consuming()
             except Exception:
                 self._conn = None
+                with self.lock:
+                    self.queue.append(("status", "amqp.disconnected"))
                 time.sleep(2)
 
     def _on_event(self, ch, method, props, body_bytes):
@@ -457,7 +462,7 @@ class AmqpThread:
     def attach_logs(self, container_name, callback):
         def _consume():
             try:
-                creds = pika.PlainCredentials("erlkoenig", "erlkoenig")
+                creds = pika.PlainCredentials(self.user, self.password)
                 params = pika.ConnectionParameters(
                     host=self.host, port=5672, credentials=creds, heartbeat=30,
                 )
@@ -658,9 +663,11 @@ class ErlkoenigTUI(App):
         Binding("q", "quit", "Quit"),
     ]
 
-    def __init__(self, host="localhost"):
+    def __init__(self, host="localhost", user=None, password=None):
         super().__init__()
         self.amqp_host = host
+        self.amqp_user = user
+        self.amqp_password = password
         self.state = ClusterState()
         self._event_queue = []
         self._lock = threading.Lock()
@@ -730,7 +737,9 @@ class ErlkoenigTUI(App):
         self.query_one("#network-recent").border_title = " recent connections "
 
         # Start AMQP
-        self._amqp = AmqpThread(self.amqp_host, self.state, self._lock, self._event_queue)
+        self._amqp = AmqpThread(self.amqp_host, self.state, self._lock,
+                                self._event_queue, self.amqp_user,
+                                self.amqp_password)
         self._amqp.start()
         self.set_interval(0.5, self._tick)
 
@@ -1119,7 +1128,12 @@ class ErlkoenigTUI(App):
 
 def main():
     host = sys.argv[1] if len(sys.argv) > 1 else "localhost"
-    app = ErlkoenigTUI(host=host)
+    user = os.environ.get("AMQP_USER")
+    password = os.environ.get("AMQP_PASS")
+    if not user or not password:
+        print("error: set AMQP_USER and AMQP_PASS", file=sys.stderr)
+        sys.exit(2)
+    app = ErlkoenigTUI(host=host, user=user, password=password)
     app.run()
 
 

@@ -175,6 +175,27 @@ help_output_test() ->
     ?assert(string:find(Output, "ek:logs") =/= nomatch),
     ?assert(string:find(Output, "ek:events") =/= nomatch).
 
+events_print_current_lifecycle_tuples_test() ->
+    Cases = [
+        {{container_started, <<"id1">>, <<"web">>, self()}, "[started]", "id1/web"},
+        {{container_stopped, <<"id2">>, <<"api">>, #{exit_code => 0}}, "[stopped]", "id2/api"},
+        {{container_failed, <<"id3">>, <<"worker">>, timeout}, "[failed]", "id3/worker"},
+        {{container_restarting, <<"id4">>, <<"job">>, 2}, "[restart]", "id4/job"},
+        {{container_oom, <<"id5">>, <<"db">>}, "[oom]", "id5/db"}
+    ],
+    lists:foreach(fun({Event, Label, IdName}) ->
+        Output = capture_print_event(Event),
+        ?assert(string:find(Output, Label) =/= nomatch),
+        ?assert(string:find(Output, IdName) =/= nomatch),
+        ?assertEqual(nomatch, string:find(Output, "[event]"))
+    end, Cases).
+
+events_print_legacy_lifecycle_tuples_test() ->
+    Output = capture_print_event({container_failed, <<"id3">>, timeout}),
+    ?assert(string:find(Output, "[failed]") =/= nomatch),
+    ?assert(string:find(Output, "id3") =/= nomatch),
+    ?assertEqual(nomatch, string:find(Output, "[event]")).
+
 %% =================================================================
 %% ek.escript explain
 %% =================================================================
@@ -366,7 +387,14 @@ json_ct_inspect_full_shape_test() ->
         args          => [<<"-p">>, <<"7777">>],
         ports         => [],
         caps          => [],
-        volumes       => [],
+        volumes       => [
+            #{uuid => <<"ek_vol_1">>,
+              host => <<"/var/lib/erlkoenig/volumes/ek_vol_1">>,
+              container => <<"/data">>,
+              persist => <<"primary-data">>,
+              read_only => false,
+              lifecycle => persistent}
+        ],
         net_info      => #{ip => {10,10,0,2}, netmask => 24,
                            zone => <<"dmz">>, ifname => <<"vm0">>},
         stats         => #{memory_bytes => 921600, cpu_usec => 2839,
@@ -392,6 +420,12 @@ json_ct_inspect_full_shape_test() ->
     ?assertEqual(921600, maps:get(<<"memory_bytes">>, Stats)),
     Args = maps:get(<<"args">>, Json),
     ?assertEqual([<<"-p">>, <<"7777">>], Args),
+    [Vol] = maps:get(<<"volumes">>, Json),
+    ?assertEqual(<<"ek_vol_1">>, maps:get(<<"uuid">>, Vol)),
+    ?assertEqual(<<"/data">>, maps:get(<<"container">>, Vol)),
+    ?assertEqual(<<"primary-data">>, maps:get(<<"persist">>, Vol)),
+    ?assertEqual(false, maps:get(<<"read_only">>, Vol)),
+    ?assertEqual(<<"persistent">>, maps:get(<<"lifecycle">>, Vol)),
     %% undefined → null
     ?assertEqual(null, maps:get(<<"exit_info">>, Json)),
     ?assertEqual(null, maps:get(<<"error">>, Json)),
@@ -796,6 +830,14 @@ io_capture_get(Pid) ->
     after 2000 -> ""
     end.
 
+capture_print_event(Event) ->
+    OldGL = group_leader(),
+    CaptPid = spawn_link(fun() -> io_server_loop([]) end),
+    group_leader(CaptPid, self()),
+    ek:print_event(Event),
+    group_leader(OldGL, self()),
+    io_capture_get(CaptPid).
+
 io_server_loop(Acc) ->
     receive
         {io_request, From, ReplyAs, Request} ->
@@ -815,3 +857,314 @@ io_handle_request({put_chars, Chars}, Acc) ->
     {ok, [unicode:characters_to_binary(Chars) | Acc]};
 io_handle_request(_Other, Acc) ->
     {ok, Acc}.
+
+%% =================================================================
+%% admission_denial — text + JSON output, ETS hot path
+%% =================================================================
+
+admission_denial_test_() ->
+    {foreach,
+     fun denial_setup/0,
+     fun denial_teardown/1,
+     [fun t_admission_denial_no_match_text/1,
+      fun t_admission_denial_no_match_json_default/1,
+      fun t_admission_denial_text_round_trip/1,
+      fun t_admission_denial_default_format_is_json/1,
+      fun t_admission_denial_lookup_by_name/1,
+      fun t_admission_denial_all_lists_multiple/1,
+      fun t_admission_denial_text_handles_binary_limit_keys/1,
+      fun t_admission_denial_text_capture_is_ascii_safe/1]}.
+
+denial_setup() ->
+    {ok, Pid} = erlkoenig_denial_log:start_link(),
+    Pid.
+
+denial_teardown(Pid) ->
+    catch gen_server:stop(Pid),
+    ok.
+
+denial_sync() -> _ = sys:get_state(erlkoenig_denial_log), ok.
+
+denial_record(Id, Name, Reason) ->
+    erlkoenig_denial_log:record_denial(#{
+        container_id => Id,
+        container_name => Name,
+        ts_ms => 1_700_000_000_000,
+        zone => zone_a,
+        reason => Reason,
+        limits => #{memory => 200, pids => 10}
+    }),
+    denial_sync().
+
+capture_admission(Args) ->
+    OldGL = group_leader(),
+    CaptPid = spawn_link(fun() -> io_server_loop([]) end),
+    group_leader(CaptPid, self()),
+    apply(ek, admission_denial, Args),
+    group_leader(OldGL, self()),
+    io_capture_get(CaptPid).
+
+t_admission_denial_no_match_text(_) ->
+    ?_test(begin
+        Output = capture_admission([<<"missing">>, #{format => text}]),
+        ?assert(string:find(Output, "No admission denials found") =/= nomatch),
+        ?assert(string:find(Output, "missing") =/= nomatch)
+    end).
+
+t_admission_denial_no_match_json_default(_) ->
+    ?_test(begin
+        %% No format opt → JSON (the contracted default for the pipe).
+        Output = capture_admission([<<"missing">>]),
+        ?assertEqual([], json:decode(iolist_to_binary(string:trim(Output))))
+    end).
+
+t_admission_denial_text_round_trip(_) ->
+    ?_test(begin
+        denial_record(<<"c1">>, <<"api">>,
+                      #{reason => insufficient_memory, kind => memory,
+                        ceiling => 1000, allocated => 800, committed => 100}),
+        Output = capture_admission([<<"c1">>, #{format => text}]),
+        ?assert(string:find(Output, "c1") =/= nomatch),
+        ?assert(string:find(Output, "api") =/= nomatch),
+        ?assert(string:find(Output, "insufficient_memory") =/= nomatch),
+        ?assert(string:find(Output, "Ceiling") =/= nomatch),
+        ?assert(string:find(Output, "Allocated") =/= nomatch)
+    end).
+
+t_admission_denial_default_format_is_json(_) ->
+    ?_test(begin
+        denial_record(<<"c1">>, <<"api">>,
+                      #{reason => insufficient_memory, kind => memory,
+                        ceiling => 1000, allocated => 800}),
+        %% The contracted default — `ek:admission_denial(Name)`
+        %% must produce a JSON object suitable for piping to
+        %% `mix erlkoenig.explain admission`.
+        Output = capture_admission([<<"c1">>]),
+        Decoded = json:decode(iolist_to_binary(string:trim(Output))),
+        ?assert(is_map(Decoded)),
+        ?assertEqual(<<"ct">>, maps:get(<<"type">>, Decoded)),
+        ?assertEqual(<<"resource_admission_denied">>,
+                     maps:get(<<"reason">>, Decoded)),
+        ?assertEqual(<<"EK_CT_RESOURCE_ADMISSION_DENIED">>,
+                     maps:get(<<"code">>, Decoded)),
+        ?assertEqual(<<"c1">>, maps:get(<<"container">>, Decoded)),
+        ?assertEqual(1_700_000_000_000, maps:get(<<"ts_ms">>, Decoded)),
+        Data = maps:get(<<"data">>, Decoded),
+        ?assert(is_map(Data)),
+        ?assert(maps:is_key(<<"reason">>, Data)),
+        ?assert(maps:is_key(<<"limits">>, Data))
+    end).
+
+t_admission_denial_lookup_by_name(_) ->
+    ?_test(begin
+        denial_record(<<"abc-123-def">>, <<"api">>,
+                      #{reason => insufficient_memory}),
+        %% Operator typed the friendly name, not the generated id.
+        Output = capture_admission([<<"api">>, #{format => text}]),
+        ?assert(string:find(Output, "abc-123-def") =/= nomatch),
+        ?assert(string:find(Output, "api") =/= nomatch)
+    end).
+
+t_admission_denial_all_lists_multiple(_) ->
+    ?_test(begin
+        denial_record(<<"c1">>, <<"api">>,
+                      #{reason => insufficient_memory}),
+        denial_record(<<"c1">>, <<"api">>,
+                      #{reason => insufficient_pids}),
+        Output = capture_admission([<<"c1">>, #{format => text, all => true}]),
+        ?assert(string:find(Output, "2 denial(s)") =/= nomatch),
+        ?assert(string:find(Output, "insufficient_memory") =/= nomatch),
+        ?assert(string:find(Output, "insufficient_pids") =/= nomatch)
+    end).
+
+%% Reproduces the audit-fallback case: limits arrive as a map keyed
+%% by binaries (json:decode default) rather than atoms. The text
+%% renderer must not crash on `atom_to_list/1`.
+t_admission_denial_text_handles_binary_limit_keys(_) ->
+    ?_test(begin
+        erlkoenig_denial_log:record_denial(#{
+            container_id => <<"c1">>,
+            container_name => <<"api">>,
+            ts_ms => 1_700_000_000_000,
+            zone => <<"zone_a">>,
+            reason => #{<<"reason">> => <<"insufficient_memory">>},
+            limits => #{<<"memory">> => 200, <<"pids">> => 10}
+        }),
+        denial_sync(),
+        %% Should render without crashing on atom_to_list/binary.
+        Output = capture_admission([<<"c1">>, #{format => text}]),
+        ?assert(string:find(Output, "memory = 200") =/= nomatch),
+        ?assert(string:find(Output, "pids = 10") =/= nomatch)
+    end).
+
+t_admission_denial_text_capture_is_ascii_safe(_) ->
+    ?_test(begin
+        denial_record(<<"c1">>, <<"api">>,
+                      #{reason => insufficient_memory, kind => memory}),
+        Output = ek:capture(fun() ->
+            ek:admission_denial(<<"c1">>, #{format => text})
+        end),
+        ?assert(string:find(Output, "c1") =/= nomatch),
+        ?assert(string:find(Output, "insufficient_memory") =/= nomatch)
+    end).
+
+%% =================================================================
+%% admission_denial — full audit-fallback round trip
+%%
+%% Exercises the producer/consumer contract end to end:
+%%   ct.erl-shape audit:log
+%%     → erlkoenig_audit gen_server (writes to disk)
+%%       → erlkoenig_audit:query/1 (parses lines)
+%%         → ek's audit_to_denial/1
+%%           → ek's denial_to_emit_event/1
+%%             → erlkoenig_error:to_map/1
+%% This is the path that was broken before this fix: audit flattens
+%% `details' onto top level, so a reader looking inside a nested
+%% `<<"details">>' map got back nothing. With the fix, every field
+%% should make it through.
+%% =================================================================
+
+audit_roundtrip_test_() ->
+    {foreach,
+     fun audit_setup/0,
+     fun audit_teardown/1,
+     [fun t_audit_roundtrip_full_evidence/1,
+      fun t_audit_roundtrip_name_lookup/1,
+      fun t_audit_roundtrip_text_reason_with_binary_keys/1,
+      fun t_audit_roundtrip_not_hidden_by_global_limit/1]}.
+
+audit_setup() ->
+    TmpDir = "/tmp/ek_audit_roundtrip_"
+             ++ integer_to_list(erlang:unique_integer([positive])),
+    ok = filelib:ensure_dir(TmpDir ++ "/x"),
+    AuditFile = filename:join(TmpDir, "audit.jsonl"),
+    application:set_env(erlkoenig, audit_path, AuditFile),
+    {ok, AuditPid} = erlkoenig_audit:start_link(),
+    {ok, RingPid} = erlkoenig_denial_log:start_link(),
+    {AuditPid, RingPid, TmpDir}.
+
+audit_teardown({AuditPid, RingPid, TmpDir}) ->
+    catch gen_server:stop(AuditPid),
+    catch gen_server:stop(RingPid),
+    application:unset_env(erlkoenig, audit_path),
+    _ = file:del_dir_r(TmpDir),
+    ok.
+
+audit_flush() -> _ = sys:get_state(erlkoenig_audit), ok.
+
+t_audit_roundtrip_full_evidence(_) ->
+    ?_test(begin
+        %% Mimics ct.erl exactly — same map shape goes into the audit.
+        Reason = #{reason => insufficient_memory,
+                   required => 4_294_967_296,
+                   available => 2_147_483_648,
+                   evidence => #{kind => memory,
+                                 ceiling => 8_589_934_592,
+                                 allocated => 5_368_709_120,
+                                 committed => 1_073_741_824}},
+        erlkoenig_audit:log(#{type => resource_admission_denied,
+                              subject => <<"abc-123">>,
+                              result => denied,
+                              details => #{zone => zone_a,
+                                           reason => Reason,
+                                           limits => #{memory => 4_294_967_296,
+                                                       pids => 512},
+                                           container_name => <<"api">>}}),
+        audit_flush(),
+        %% Hot ring is empty — only the audit-fallback can serve this.
+        Output = capture_admission([<<"abc-123">>]),
+        Decoded = json:decode(iolist_to_binary(string:trim(Output))),
+        ?assertEqual(<<"ct">>, maps:get(<<"type">>, Decoded)),
+        ?assertEqual(<<"resource_admission_denied">>,
+                     maps:get(<<"reason">>, Decoded)),
+        ?assertEqual(<<"abc-123">>, maps:get(<<"container">>, Decoded)),
+        Data = maps:get(<<"data">>, Decoded),
+        %% These four assertions would all have failed against the
+        %% pre-fix `audit_to_denial' that read from a nested
+        %% `<<"details">>' key.
+        ?assertEqual(<<"zone_a">>, maps:get(<<"zone">>, Data)),
+        DataReason = maps:get(<<"reason">>, Data),
+        ?assert(is_map(DataReason)),
+        ?assertEqual(<<"insufficient_memory">>,
+                     maps:get(<<"reason">>, DataReason)),
+        ?assertEqual(4_294_967_296,
+                     maps:get(<<"required">>, DataReason)),
+        DataLimits = maps:get(<<"limits">>, Data),
+        ?assertEqual(4_294_967_296, maps:get(<<"memory">>, DataLimits)),
+        ?assertEqual(512, maps:get(<<"pids">>, DataLimits))
+    end).
+
+t_audit_roundtrip_name_lookup(_) ->
+    ?_test(begin
+        erlkoenig_audit:log(#{type => resource_admission_denied,
+                              subject => <<"abc-123">>,
+                              result => denied,
+                              details => #{zone => zone_a,
+                                           reason =>
+                                               #{reason => insufficient_memory},
+                                           limits => #{memory => 200},
+                                           container_name => <<"api">>}}),
+        audit_flush(),
+        %% Operator typed the friendly name. Audit-fallback must
+        %% match container_name (top-level after the flatten), not
+        %% just subject. Without the name-aware filter this returns
+        %% an empty `[]' and the JSON output is the no-match list.
+        Output = capture_admission([<<"api">>]),
+        Decoded = json:decode(iolist_to_binary(string:trim(Output))),
+        ?assert(is_map(Decoded)),
+        ?assertEqual(<<"abc-123">>, maps:get(<<"container">>, Decoded))
+    end).
+
+t_audit_roundtrip_text_reason_with_binary_keys(_) ->
+    ?_test(begin
+        erlkoenig_audit:log(#{type => resource_admission_denied,
+                              subject => <<"abc-123">>,
+                              result => denied,
+                              details => #{zone => zone_a,
+                                           reason =>
+                                               #{reason => insufficient_memory,
+                                                 kind => memory,
+                                                 ceiling => 1000,
+                                                 allocated => 800,
+                                                 committed => 100},
+                                           limits => #{memory => 200},
+                                           container_name => <<"api">>}}),
+        audit_flush(),
+        %% Audit JSON decode returns binary keys inside the reason map.
+        %% The text quick-look must still show the reason and fields.
+        Output = capture_admission([<<"abc-123">>, #{format => text}]),
+        ?assert(string:find(Output, "insufficient_memory") =/= nomatch),
+        ?assert(string:find(Output, "Ceiling") =/= nomatch),
+        ?assert(string:find(Output, "Allocated") =/= nomatch),
+        ?assert(string:find(Output, "Committed") =/= nomatch)
+    end).
+
+t_audit_roundtrip_not_hidden_by_global_limit(_) ->
+    ?_test(begin
+        [erlkoenig_audit:log(#{type => resource_admission_denied,
+                               subject => <<"noise-", (integer_to_binary(N))/binary>>,
+                               result => denied,
+                               details => #{container_name => <<"noise">>,
+                                            reason =>
+                                                #{reason => insufficient_memory},
+                                            limits => #{memory => 1}}})
+         || N <- lists:seq(1, 1005)],
+        erlkoenig_audit:log(#{type => resource_admission_denied,
+                              subject => <<"abc-123">>,
+                              result => denied,
+                              details => #{zone => zone_a,
+                                           reason =>
+                                               #{reason => insufficient_pids},
+                                           limits => #{pids => 512},
+                                           container_name => <<"api">>}}),
+        audit_flush(),
+        %% This must still find the newest target denial even though
+        %% more than 1000 unrelated denials precede it in the audit.
+        Output = capture_admission([<<"abc-123">>]),
+        Decoded = json:decode(iolist_to_binary(string:trim(Output))),
+        ?assert(is_map(Decoded)),
+        ?assertEqual(<<"abc-123">>, maps:get(<<"container">>, Decoded)),
+        DataReason = maps:get(<<"reason">>, maps:get(<<"data">>, Decoded)),
+        ?assertEqual(<<"insufficient_pids">>,
+                     maps:get(<<"reason">>, DataReason))
+    end).

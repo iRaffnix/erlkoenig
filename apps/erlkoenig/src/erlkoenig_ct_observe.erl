@@ -48,6 +48,7 @@ are still pure (`round_2/1', `start_stats_timers/1').
     forward_output/3,
     %% Event notifications
     notify_stopped/1,
+    should_notify_oom/3,
     %% Public-map projection helpers
     maybe_add_stats/3
 ]).
@@ -199,26 +200,34 @@ forward_output(Stream, Chunk, #ct_data{output = OutputPid,
 %% -- Event notifications ------------------------------------------
 
 -spec notify_stopped(#ct_data{}) -> ok.
-notify_stopped(#ct_data{id = Id, name = Name, exit_info = ExitInfo}) ->
+notify_stopped(#ct_data{id = Id, name = Name, exit_info = ExitInfo,
+                        user_stopped = UserStopped}) ->
     erlkoenig_events:notify({container_stopped, Id, Name, ExitInfo}),
     %% Detect OOM-Kill via cgroup memory.events (authoritative).
-    %% Fallback to signal heuristic if cgroup check fails.
+    %% Fallback to signal heuristic for non-operator stops.
     %%
     %% ExitInfo can be `undefined' when a container is stopped via
     %% the recovering/disconnected → stopped path (kill_os_pid,
     %% user_stopped=true). The previous `maps:get(term_signal,
     %% ExitInfo, 0)' call crashed badmap on that path and took down
     %% the gen_statem instead of just emitting container_stopped.
-    OOM = case erlkoenig_cgroup:was_oom_killed(Id) of
-        true  -> true;
-        false when is_map(ExitInfo) ->
-            maps:get(term_signal, ExitInfo, 0) =:= 9;
-        false -> false
-    end,
-    case OOM of
+    case should_notify_oom(UserStopped, ExitInfo,
+                           erlkoenig_cgroup:was_oom_killed(Id)) of
         true  -> erlkoenig_events:notify({container_oom, Id, Name});
         false -> ok
     end.
+
+-spec should_notify_oom(boolean(), term(), boolean()) -> boolean().
+should_notify_oom(true, _ExitInfo, _CgroupOOM) ->
+    %% Operator-initiated stop may escalate to SIGKILL after the grace
+    %% timeout. That is not an OOM and must not page as one.
+    false;
+should_notify_oom(false, _ExitInfo, true) ->
+    true;
+should_notify_oom(false, ExitInfo, false) when is_map(ExitInfo) ->
+    maps:get(term_signal, ExitInfo, 0) =:= 9;
+should_notify_oom(false, _ExitInfo, false) ->
+    false.
 
 %% -- Public-map projection helpers --------------------------------
 

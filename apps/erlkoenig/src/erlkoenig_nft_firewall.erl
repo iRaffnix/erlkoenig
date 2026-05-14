@@ -45,6 +45,7 @@ calling this module directly.
     rates/0,
     status/0,
     reload/0,
+    adopt_runtime_config/1,
     list_chains/0,
     list_sets/0,
     list_set/1,
@@ -164,6 +165,18 @@ state lives in the kernel).
 -spec reload() -> ok | {error, term()}.
 reload() ->
     gen_server:call(?MODULE, reload, 10000).
+
+-doc """
+Adopt a host firewall config that was already applied by the DSL nft_tables path.
+
+This updates the operator-facing runtime state and counter watchers without
+writing firewall.term or applying kernel rules again. The DSL compiler remains
+the kernel writer for nft_tables configs; this keeps ek nft counters, firewall
+events and status views in sync with that committed ruleset.
+""".
+-spec adopt_runtime_config(map()) -> ok | {error, term()}.
+adopt_runtime_config(Config) when is_map(Config) ->
+    gen_server:call(?MODULE, {adopt_runtime_config, Config}, 10000).
 
 -doc "List chains with hook, type, policy, and rule count.".
 -spec list_chains() -> [map()].
@@ -359,6 +372,32 @@ handle_call(reload, _From, #{table := OldTable} = State) ->
                                     degraded_reason => DiagReason}}
                     end
             end
+    end;
+handle_call({adopt_runtime_config, Config0}, _From, State) ->
+    Result =
+        try
+            NewConfig = normalize_config(Config0),
+            erlkoenig_nft_watch_sup:stop_counters(),
+            start_counters(NewConfig),
+            NewTable = maps:get(table, NewConfig),
+            logger:notice("[erlkoenig_nft] Runtime config adopted: table=~s", [NewTable]),
+            {ok, NewConfig, NewTable}
+        catch
+            Class:Reason:Stack ->
+                logger:error("[erlkoenig_nft] Runtime config adoption failed: ~p:~p~n  ~p",
+                             [Class, Reason, Stack]),
+                {error, {adopt_runtime_config_failed, Class, Reason}}
+        end,
+    case Result of
+        {ok, NewCfg, NewTbl} ->
+            {reply, ok, State#{
+                config => NewCfg,
+                table => NewTbl,
+                mode => active,
+                degraded_reason => undefined
+            }};
+        {error, _} = Err ->
+            {reply, Err, State}
     end;
 handle_call(list_chains, _From, #{config := Config} = State) ->
     Chains = maps:get(chains, Config, []),
@@ -1911,9 +1950,20 @@ collect_rates() ->
 
 -spec read_live_counter(binary(), binary()) -> map().
 read_live_counter(Table, Name) ->
-    case nfnl_server:get_counter(erlkoenig_nft_srv, ?INET, Table, Name) of
+    case safe_get_counter(Table, Name) of
         {ok, #{packets := _, bytes := _} = Counter} -> Counter;
         _ -> #{}
+    end.
+
+-spec safe_get_counter(binary(), binary()) -> {ok, map()} | {error, term()}.
+safe_get_counter(Table, Name) ->
+    try nfnl_server:get_counter(erlkoenig_nft_srv, ?INET, Table, Name) of
+        Result -> Result
+    catch
+        exit:{timeout, _} = Reason ->
+            {error, Reason};
+        Class:Reason ->
+            {error, {Class, Reason}}
     end.
 
 -spec counter_count() -> non_neg_integer().

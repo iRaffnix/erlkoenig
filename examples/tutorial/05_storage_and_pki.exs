@@ -148,7 +148,7 @@ defmodule Tutorial.StorageAndPki do
       limits: %{
         memory: 256_000_000,                 # 256 MB hard cap
         pids:   128,
-        cpu:    50_000,                      # 50% einer CPU-unit
+        cpu:    50,                          # 50% eines CPU-Cores
         disk:   1_000_000_000                # 1 GB volume budget
       }
       # In production this API binary could use an explicit detached

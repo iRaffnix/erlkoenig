@@ -159,6 +159,14 @@ Payload fields:
 
 The `code` field is part of the stable operator contract.
 
+Structured error events are for alerting and automation. They are emitted by
+explicit `erlkoenig_error:emit/1,2` calls and route under `error.#`, for
+example `error.ct.cgroup_setup_failed`. Lifecycle failures are separate
+container events: `container.<name>.failed` carries the container state-machine
+failure reason for timeline consumers. Operators who need pages, tickets, or
+deduplicated incident aggregation should subscribe to `error.#`; operators who
+need container timelines should subscribe to `container.#`.
+
 ### Container Lifecycle
 
 Routing:
@@ -174,6 +182,15 @@ Routing:
 
 Legacy `container_unhealthy` events without `name` route as
 `container.<id>.health` and carry `id`, `failures`.
+
+### Aggregate Container-Cgroup Stats
+
+Routing: `stats.system.containers`
+
+Payload fields include `memory_current`, `memory_peak`, `memory_max`,
+`memory_available`, `memory_pct`, `cpu_usec`, `pids_current`, `pids_max`,
+`pids_available`, `pids_pct`, `scope`, and `ts_ms`. This event describes the
+aggregate `containers/` cgroup headroom, not an individual container.
 
 ### Container Stats
 

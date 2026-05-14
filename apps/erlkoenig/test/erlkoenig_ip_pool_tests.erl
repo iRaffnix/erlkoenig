@@ -144,7 +144,9 @@ prefix_test_() ->
      {"prefix /30 yields exactly one host",   fun prefix_30_one_host/0},
      {"prefix /31 is rejected at boot",       fun prefix_31_rejected/0},
      {"release outside pool range is no-op",  fun release_out_of_range/0},
-     {"release never allocated IP is no-op",  fun release_never_allocated/0}
+     {"release never allocated IP is no-op",  fun release_never_allocated/0},
+     {"zone lookup failure does not poison default pool",
+      fun release_zone_lookup_failure_does_not_poison_default/0}
     ].
 
 prefix_28_size() ->
@@ -222,6 +224,20 @@ release_never_allocated() ->
         ?assertEqual({ok, {10, 99, 0, 2}}, gen_server:call(Pid, allocate)),
         ?assertEqual({ok, {10, 99, 0, 3}}, gen_server:call(Pid, allocate))
     after stop_zone(Pid)
+    end.
+
+release_zone_lookup_failure_does_not_poison_default() ->
+    application:set_env(erlkoenig, subnet, {10, 99, 0, 0}),
+    {ok, Pid} = erlkoenig_ip_pool:start_link(),
+    try
+        %% No erlkoenig_zone registry is running in this test. Before
+        %% the fail-fast release path this IP would be cast into the
+        %% default pool and later reissued across subnet boundaries.
+        erlkoenig_ip_pool:release({10, 42, 0, 9}),
+        timer:sleep(10),
+        ?assertEqual({ok, {10, 99, 0, 2}}, erlkoenig_ip_pool:allocate())
+    after
+        cleanup(Pid)
     end.
 
 start_zone(Name, Subnet, Netmask) ->

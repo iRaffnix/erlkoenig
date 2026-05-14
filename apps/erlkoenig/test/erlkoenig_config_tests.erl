@@ -75,6 +75,73 @@ validate_invalid_container_test() ->
                  erlkoenig_config:validate(File)),
     file:delete(File).
 
+validate_rejects_container_memory_above_aggregate_ceiling_test() ->
+    with_resource_protection(
+      #{containers_memory_max => 209_715_200, containers_pids_max => 1024},
+      fun() ->
+          File = write_term_file(#{containers => [
+              #{name => <<"api">>, binary => <<"/bin/api">>,
+                limits => #{memory => 314_572_800}}
+          ]}),
+          ?assertMatch({error, {container_limit_exceeds_ceiling,
+                                #{container := <<"api">>, limit := memory,
+                                  value := 314_572_800,
+                                  ceiling := 209_715_200}}},
+                       erlkoenig_config:validate(File)),
+          file:delete(File)
+      end).
+
+validate_rejects_memory_total_above_aggregate_ceiling_test() ->
+    with_resource_protection(
+      #{containers_memory_max => 314_572_800, containers_pids_max => 1024},
+      fun() ->
+          File = write_term_file(#{containers => [
+              #{name => <<"api">>, binary => <<"/bin/api">>,
+                limits => #{memory => 157_286_400}, replicas => 2},
+              #{name => <<"worker">>, binary => <<"/bin/worker">>,
+                limits => #{memory => 52_428_800}}
+          ]}),
+          ?assertMatch({error, {container_limit_total_exceeds_ceiling,
+                                #{limit := memory, total := 367_001_600,
+                                  ceiling := 314_572_800}}},
+                       erlkoenig_config:validate(File)),
+          file:delete(File)
+      end).
+
+validate_rejects_pids_total_above_aggregate_ceiling_test() ->
+    with_resource_protection(
+      #{containers_memory_max => 134_217_728, containers_pids_max => 10},
+      fun() ->
+          File = write_term_file(#{pods => [
+              #{name => <<"p">>, containers => [
+                  #{name => <<"api">>, binary => <<"/bin/api">>,
+                    limits => #{pids => 6}},
+                  #{name => <<"worker">>, binary => <<"/bin/worker">>,
+                    limits => #{pids => 5}}
+              ]}
+          ]}),
+          ?assertMatch({error, {container_limit_total_exceeds_ceiling,
+                                #{limit := pids, total := 11,
+                                  ceiling := 10}}},
+                       erlkoenig_config:validate(File)),
+          file:delete(File)
+      end).
+
+validate_rejects_cpu_outside_one_core_percent_range_test() ->
+    with_resource_protection(
+      #{containers_memory_max => 134_217_728, containers_pids_max => 1024},
+      fun() ->
+          File = write_term_file(#{containers => [
+              #{name => <<"api">>, binary => <<"/bin/api">>,
+                limits => #{cpu => 125}}
+          ]}),
+          ?assertMatch({error, {invalid_container_limit,
+                                #{container := <<"api">>, limit := cpu,
+                                  value := 125}}},
+                       erlkoenig_config:validate(File)),
+          file:delete(File)
+      end).
+
 validate_missing_file_test() ->
     ?assertMatch({error, {read_failed, _, _}},
                  erlkoenig_config:validate("/tmp/erlkoenig_nonexistent_42.term")).
@@ -106,6 +173,35 @@ validate_zone_with_legacy_containers_refused_test() ->
                           #{zone := <<"z">>, field := containers}}},
                  erlkoenig_config:validate(File)),
     file:delete(File).
+
+validate_zone_with_legacy_bridge_refused_test() ->
+    File = write_term_file(#{containers => [],
+                             zones => [#{name => <<"z">>,
+                                         bridge => <<"ek_br_z">>}]}),
+    ?assertMatch({error, {legacy_zone_shape_refused,
+                          #{zone := <<"z">>, field := bridge}}},
+                 erlkoenig_config:validate(File)),
+    file:delete(File).
+
+validate_zone_with_legacy_allows_refused_test() ->
+    File = write_term_file(#{containers => [],
+                             zones => [#{name => <<"z">>,
+                                         allows => [dns]}]}),
+    ?assertMatch({error, {legacy_zone_shape_refused,
+                          #{zone := <<"z">>, field := allows}}},
+                 erlkoenig_config:validate(File)),
+    file:delete(File).
+
+expand_container_replicas_refuses_undeclared_zone_test() ->
+    ?assertError(
+        {undeclared_zone, <<"missing">>, <<"api">>},
+        erlkoenig_config_flatten:expand_container_replicas(
+            <<"pod">>,
+            #{name => <<"api">>, zone => <<"missing">>, replicas => 1},
+            #{<<"known">> => {10, 1, 0}},
+            #{}
+        )
+    ).
 
 %% =================================================================
 %% watches
@@ -208,6 +304,20 @@ resolve_both_pod_refs_test() ->
         #{saddr := _, daddr := {10, 0, 1, 2, 32}} = element(3, R)
     end, Resolved).
 
+expand_pod_ref_rules_refuses_unrepresentable_ref_count_test() ->
+    ?assertError(
+        {too_many_pod_refs, accept, #{tcp := 443}, _},
+        erlkoenig_config_nft:expand_pod_ref_rules(
+            accept,
+            #{tcp => 443},
+            [
+                {saddr, [{10, 0, 0, 2}]},
+                {daddr, [{10, 0, 1, 2}]},
+                {extra, [{10, 0, 2, 2}]}
+            ]
+        )
+    ).
+
 %% Non-pod refs pass through unchanged
 resolve_plain_interface_test() ->
     Ctx = #{ip_map => #{}, bridge => <<"br0">>},
@@ -215,12 +325,15 @@ resolve_plain_interface_test() ->
     [Resolved] = erlkoenig_config_nft:resolve_host_refs(Rule, Ctx),
     ?assertEqual(Rule, Resolved).
 
-%% Bridge ref resolves to bridge name
-resolve_bridge_ref_test() ->
+%% Legacy bridge shortcut is refused under IPVLAN.
+resolve_legacy_bridge_ref_refused_test() ->
     Ctx = #{ip_map => #{}, bridge => <<"dmz">>},
-    Rule = {rule, accept, #{iif => bridge, oif => <<"eth0">>}},
-    [Resolved] = erlkoenig_config_nft:resolve_host_refs(Rule, Ctx),
-    ?assertMatch({rule, accept, #{iif := <<"dmz">>, oif := <<"eth0">>}}, Resolved).
+    ?assertError({legacy_bridge_ref_refused, #{field := iif}},
+        erlkoenig_config_nft:resolve_host_refs(
+            {rule, accept, #{iif => bridge, oif => <<"eth0">>}}, Ctx)),
+    ?assertError({legacy_bridge_ref_refused, #{field := oif}},
+        erlkoenig_config_nft:resolve_host_refs(
+            {rule, accept, #{oif => bridge, iif => <<"eth0">>}}, Ctx)).
 
 %% Unknown pod ref: no match in IpMap, keeps original name
 resolve_unknown_pod_ref_test() ->
@@ -228,6 +341,16 @@ resolve_unknown_pod_ref_test() ->
     Rule = {rule, accept, #{oif => <<"unknown.service">>}},
     [Resolved] = erlkoenig_config_nft:resolve_host_refs(Rule, Ctx),
     ?assertMatch({rule, accept, #{oif := <<"unknown.service">>}}, Resolved).
+
+%% Legacy host-interface wildcard is refused under IPVLAN.
+resolve_legacy_containers_ref_refused_test() ->
+    Ctx = #{ip_map => #{}, bridge => <<"br0">>},
+    ?assertError({legacy_containers_ref_refused, #{field := oif}},
+        erlkoenig_config_nft:resolve_host_refs(
+            {rule, accept, #{oif => containers}}, Ctx)),
+    ?assertError({legacy_containers_ref_refused, #{field := iif}},
+        erlkoenig_config_nft:resolve_host_refs(
+            {rule, accept, #{iif => containers}}, Ctx)).
 
 %% find_all_replica_ips finds all matching replicas
 find_all_replica_ips_test() ->
@@ -276,8 +399,8 @@ lambda_pattern_resolve_test() ->
 
 expand_veth_of_refused_iifname_test() ->
     %% Post-6i: {veth_of, _, _} is fail-loud at expansion time
-    %% regardless of whether VethMap can resolve it. IPVLAN slaves
-    %% are not visible on the host, so the legacy resolver produced
+    %% before any legacy host-interface resolver can invent truth.
+    %% IPVLAN slaves are not visible on the host, so the old resolver produced
     %% no kernel-effective rule. Refusal at the seam beats silent
     %% no-op.
     ?assertError({legacy_veth_of_refused, #{pod := <<"pod1">>,
@@ -332,6 +455,24 @@ expand_ip_daddr_5tuple_keeps_prefix_test() ->
             #{ip_daddr => {10, 0, 0, 0, 24}},
             #{}, #{}),
     ?assertEqual({10, 0, 0, 0, 24}, maps:get(daddr, Opts)).
+
+expand_replica_ips_refuses_empty_saddr_targets_test() ->
+    ?assertError({unresolved_replica_ips,
+                  #{field := saddr, pod := <<"worker">>,
+                    container := <<"fn">>}},
+        erlkoenig_config_nft:expand_nft_rule(accept,
+            #{ip_saddr => {replica_ips, <<"worker">>, <<"fn">>},
+              tcp_dport => 9000},
+            #{}, #{})).
+
+expand_replica_ips_refuses_empty_daddr_targets_test() ->
+    ?assertError({unresolved_replica_ips,
+                  #{field := daddr, pod := <<"worker">>,
+                    container := <<"fn">>}},
+        erlkoenig_config_nft:expand_nft_rule(accept,
+            #{ip_daddr => {replica_ips, <<"worker">>, <<"fn">>},
+              tcp_dport => 9000},
+            #{}, #{})).
 
 expand_ct_state_takes_head_test() ->
     %% The DSL lets operators write `ct_state: [:established, :related]`
@@ -429,3 +570,17 @@ write_term_file(Term) ->
     Data = io_lib:format("~tp.~n", [Term]),
     ok = file:write_file(Path, Data),
     Path.
+
+with_resource_protection(Override, Fun) ->
+    Previous = application:get_env(erlkoenig, resource_protection),
+    Cfg = #{mode => development,
+            containers_memory_max => 1_073_741_824,
+            containers_pids_max => 24576},
+    application:set_env(erlkoenig, resource_protection, maps:merge(Cfg, Override)),
+    try Fun()
+    after
+        case Previous of
+            undefined -> application:unset_env(erlkoenig, resource_protection);
+            {ok, Old} -> application:set_env(erlkoenig, resource_protection, Old)
+        end
+    end.

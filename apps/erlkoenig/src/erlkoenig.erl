@@ -101,10 +101,7 @@ Usage from the Erlang shell:
 -type net_info() :: #{ip := ip4(),
                       gateway := ip4(),
                       netmask := non_neg_integer(),
-                      iface := binary(),
-                      %% Backward compat: set to `undefined` in IPVLAN mode
-                      host_veth => binary() | undefined,
-                      container_veth => binary() | undefined}.
+                      iface := binary()}.
 
 -type exit_info() :: #{exit_code := integer(),
                        term_signal := non_neg_integer()}.

@@ -154,15 +154,13 @@ limit fail with `EDQUOT`; reads are unaffected.
 Passing an integer treats it as raw bytes. Omitting the option or
 `quota: 0` disables quota.
 
-Quotas are best-effort at the subprocess layer. If the volumes
-filesystem isn't mounted with `prjquota`, or the `xfs_quota` binary
-is missing, or the volumes root looks like a test fixture (paths
-under `/tmp/`), the call is skipped with a warning. The metadata
-records the requested limit regardless. Reconciliation happens on
-the next container ensure cycle — typically the next container
-restart — not via a background loop. A host moved to a proper XFS
-mount picks up the stored quotas the next time the affected
-containers come up.
+Quotas are strict by default. If the volumes filesystem is not mounted
+with `prjquota`, `xfs_quota` is missing, or the quota command fails,
+volume creation or `set_quota` returns an error and the metadata does
+not claim a quota that the kernel did not enforce. Development
+fixtures may explicitly set `{volume_quota_mode, advisory}` to record
+quota metadata without kernel enforcement; production should leave the
+default `enforce` mode in place.
 
 Live adjustment: `erlkoenig_volume_store:set_quota/2` updates an
 existing volume's limit without touching its data. Setting the limit

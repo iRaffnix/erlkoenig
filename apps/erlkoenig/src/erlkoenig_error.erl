@@ -361,16 +361,23 @@ jsonable_key(K)                   -> iolist_to_binary(io_lib:format("~p", [K])).
 jsonable_value(V) when is_atom(V), V =/= undefined, V =/= true, V =/= false, V =/= null ->
     atom_to_binary(V);
 jsonable_value(V) when is_atom(V)    -> V;
+jsonable_value(<<A, B, C, D>>) ->
+    %% IPv4 raw bytes show up in threat/firewall evidence. JSON strings
+    %% must be UTF-8, so render these as dotted addresses.
+    iolist_to_binary(io_lib:format("~b.~b.~b.~b", [A, B, C, D]));
 jsonable_value(V) when is_binary(V)  -> V;
 jsonable_value(V) when is_integer(V) -> V;
 jsonable_value(V) when is_float(V)   -> V;
 jsonable_value(V) when is_boolean(V) -> V;
 jsonable_value(V) when is_map(V)     -> jsonable_map(V);
 jsonable_value(V) when is_list(V)    ->
-    %% IP tuples often come as lists after binary_to_term etc.
-    case io_lib:printable_unicode_list(V) of
-        true  -> iolist_to_binary(V);
-        false -> [jsonable_value(X) || X <- V]
+    %% Keep ordinary text lists compact, but do not treat arbitrary
+    %% integer lists (for example scanned port lists with values >255)
+    %% as iodata. iolist_to_binary/1 would crash and take AMQP handlers
+    %% down on otherwise valid structured errors.
+    case printable_iolist_to_binary(V) of
+        {ok, Bin} -> Bin;
+        error -> [jsonable_value(X) || X <- V]
     end;
 jsonable_value({A, B, C, D}) when is_integer(A), is_integer(B),
                                    is_integer(C), is_integer(D) ->
@@ -380,3 +387,15 @@ jsonable_value(V) when is_tuple(V) ->
     [jsonable_value(X) || X <- tuple_to_list(V)];
 jsonable_value(V) ->
     iolist_to_binary(io_lib:format("~p", [V])).
+
+printable_iolist_to_binary(V) ->
+    case io_lib:printable_unicode_list(V) of
+        true ->
+            try iolist_to_binary(V) of
+                Bin -> {ok, Bin}
+            catch
+                error:badarg -> error
+            end;
+        false ->
+            error
+    end.

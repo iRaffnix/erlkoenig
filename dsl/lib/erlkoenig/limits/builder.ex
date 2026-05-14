@@ -43,8 +43,8 @@ defmodule Erlkoenig.Limits.Builder do
   end
 
   @spec set_cpu(t(), pos_integer()) :: t()
-  def set_cpu(limits, count) when is_integer(count) and count > 0 do
-    %{limits | cpu: count}
+  def set_cpu(limits, percent) when is_integer(percent) and percent >= 1 and percent <= 100 do
+    %{limits | cpu: percent}
   end
 
   @spec set_memory(t(), pos_integer() | String.t()) :: t()

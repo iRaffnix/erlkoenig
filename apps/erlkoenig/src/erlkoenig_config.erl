@@ -27,7 +27,7 @@ Usage:
   {ok, Pids} = erlkoenig_config:reload("/etc/erlkoenig/cluster.term").
 """.
 
--export([load/1, load/2, validate/1, reload/1, parse/1, flatten_containers/1,
+-export([load/1, load/2, validate/1, reload/1, unload/1, parse/1, flatten_containers/1,
          declared_names/1]).
 
 -include("erlkoenig_error.hrl").
@@ -108,10 +108,10 @@ load(TermFile, Opts) when is_map(Opts) ->
         ok ?= erlkoenig_config_validate:validate_config(Config),
         ok ?= host_fw_preflight(TermFile, Config, Opts),
         OldConfig = get_stored_config(TermFile),
-        Result = apply_config_with_reconciliation(OldConfig, Config),
+        {ok, Results} ?= apply_config_with_reconciliation(OldConfig, Config),
         store_config(TermFile, Config),
         erlkoenig_events:notify({config_loaded, TermFile, Config}),
-        Result
+        {ok, Results}
     else
         {error, Reason} = Err ->
             erlkoenig_events:notify({config_failed, TermFile, Err}),
@@ -153,6 +153,40 @@ host_fw_preflight(TermFile, Config, Opts) ->
 -spec reload(file:filename()) -> {ok, [{binary(), pid()}]} | {error, term()}.
 reload(TermFile) ->
     load(TermFile).
+
+-doc """
+Unload the config associated with a term file.
+
+This reconciles the live system against an explicit empty config, so
+zone-level resources such as host-side IPVLAN links are destroyed even
+after all declared containers have already stopped.
+""".
+-spec unload(file:filename()) -> {ok, [{binary(), pid()}]} | {error, term()}.
+unload(TermFile) ->
+    maybe
+        {ok, ParsedConfig} ?= parse(TermFile),
+        EmptyConfig = #{zones => [], pods => [], containers => []},
+        ok ?= erlkoenig_config_validate:validate_config(EmptyConfig),
+        OldConfig = case get_stored_config(TermFile) of
+                        undefined -> ParsedConfig;
+                        Stored -> Stored
+                    end,
+        {ok, Results} ?= apply_config_with_reconciliation(OldConfig, EmptyConfig),
+        ok ?= erlkoenig_config_nft:cleanup_nft_tables(
+                 maps:get(nft_tables, OldConfig, [])),
+        store_config(TermFile, EmptyConfig),
+        erlkoenig_events:notify({config_unloaded, TermFile, EmptyConfig}),
+        {ok, Results}
+    else
+        {error, Reason} = Err ->
+            erlkoenig_events:notify({config_failed, TermFile, Err}),
+            erlkoenig_error:emit(
+              ?EK_ERROR(config, config_load_failed,
+                        "erlkoenig_config:unload rejected term file",
+                        #{path   => path_binary(TermFile),
+                          reason => Reason})),
+            Err
+    end.
 
 -doc """
 Return the list of container names declared in a term file, without
@@ -197,7 +231,7 @@ path_binary(Path) ->
 %%====================================================================
 
 -spec apply_config_with_reconciliation(map() | undefined, map()) ->
-    {ok, [{binary(), pid()}]}.
+    {ok, [{binary(), pid()}]} | {error, term()}.
 apply_config_with_reconciliation(OldConfig, Config) ->
     Report = #{},
 
@@ -236,10 +270,13 @@ apply_config_with_reconciliation(OldConfig, Config) ->
         stop_by_name(Name)
     end, StillRunningDrift),
 
-    %% Give containers time to exit and release veths/IPs
+    %% Wait for stopped containers to reach their terminal state before
+    %% tearing down zones. Destroying a zone too early stops its DNS
+    %% service while the container state machine is still unregistering
+    %% names, producing noisy noproc unregister warnings.
     case ToStop ++ StillRunningDrift of
         []  -> ok;
-        _   -> timer:sleep(1000)
+        NamesAwaitingStop -> wait_for_terminal(NamesAwaitingStop, 10_000)
     end,
     %% Drifted containers now need to re-appear as "missing" from live
     %% state so the spawn loop below picks them up.
@@ -278,99 +315,98 @@ apply_config_with_reconciliation(OldConfig, Config) ->
                        netmask => maps:get(netmask, Z, maps:get(netmask, Net, 24))},
           policy => allow_outbound}
     end || Z <- Zones],
-    case ZoneNftConfigs of
+    SetupResult = case ZoneNftConfigs of
         [] -> ok;
-        _ ->
-            _ = erlkoenig_ct_firewall:setup_table(ZoneNftConfigs),
-            ok
+        _ -> erlkoenig_ct_firewall:setup_table(ZoneNftConfigs)
     end,
 
-    %% 3c. Apply zone network policy (old format only — new format deferred to 6b)
-    lists:foreach(fun(#{allows := _, bridge := Bridge} = Zone) ->
-        BridgeBin = iolist_to_binary(Bridge),
-        erlkoenig_ct_firewall:apply_zone_allows(Zone, BridgeBin);
-       (_) -> ok
-    end, Zones),
-
-    %% 4. Apply host firewall (skipped when nft_tables present — ADR-0015)
-    Report3 = case maps:is_key(nft_tables, Config) of
-        true -> Report2#{firewall => nft_tables};
-        false -> erlkoenig_config_zone:maybe_apply_firewall(Config, Report2)
-    end,
-
-    %% 5. Apply guard + watches
-    maybe_configure_guard(resolve_guard_key(Config)),
-    Watches = maps:get(watches, Config, maps:get(watch, Config, [])),
-    WatchList = if is_list(Watches) -> Watches;
-                   is_map(Watches) -> [Watches];
-                   true -> []
-                end,
-    lists:foreach(fun start_watch/1, WatchList),
-
-    %% Start new containers (not already running)
-    %% Group by pod instance for pod-supervised startup
-    ToStart = DeclaredNames -- RunningAfterStops,
-    Pods = maps:get(pods, Config, []),
-    HasNftTables = maps:is_key(nft_tables, Config),
-    %% When nft_tables present, containers don't get auto-generated firewall chains
-    NewContainers0 = [Ct || Ct <- AllContainers,
-                      lists:member(iolist_to_binary(maps:get(name, Ct)), ToStart)],
-    NewContainers = case HasNftTables of
-        true -> [Ct#{firewall => skip_firewall} || Ct <- NewContainers0];
-        false -> NewContainers0
-    end,
-    Results = erlkoenig_config_spawn:spawn_pods(NewContainers, Pods),
-
-    %% 6b. Apply zone chains + pod forward chains (after spawn, need IPs)
-    %% Wait for containers to reach running state and have IPs assigned.
-    %% Poll instead of fixed sleep — returns as soon as all IPs are known.
-    IpMap = wait_for_ips(Results, 10_000),
-
-    Pods = maps:get(pods, Config, []),
-    NftTables = maps:get(nft_tables, Config, []),
-
-    %% Phase 6e.1.b: single atomic apply for the zone-forward
-    %% surface — replaces the pre-6e.1.b per-zone foreach +
-    %% separate apply_pod_forward_chains pair. Reload is now
-    %% idempotent (no rule accumulation) because the entry point
-    %% flushes the forward base chain and every regular chain in
-    %% one atomic netlink batch. A failure here means **no**
-    %% forward rules were installed (atomic batch rolls back, or
-    %% NFLOG receiver setup failed before the batch was sent),
-    %% so the reconciliation as a whole is not in a known good
-    %% state and the error must be propagated — the previous
-    %% logger:warning swallowed it and let the caller believe the
-    %% config was applied.
-    ForwardResult = case NftTables of
-        [] ->
-            erlkoenig_config_nft:apply_forward_topology(
-                Zones, Pods, IpMap, Results);
-        _ ->
-            %% New path: nft-transparent DSL (ADR-0015)
-            %% nft_tables define ALL firewall rules — skip legacy chain generation
-            VethMap = erlkoenig_config_nft:build_veth_map(Results),
-            erlkoenig_config_nft:apply_nft_tables(NftTables, IpMap, VethMap, Pods, Zones)
-    end,
-
-    case ForwardResult of
-        ok ->
-            %% 7. Apply steering
-            Report4 = erlkoenig_config_zone:maybe_apply_steering(
-                        Config, AllContainers, Report3),
-            %% 8. Log report
-            Started = length(Results),
-            Stopped = length(ToStop),
-            Kept = length(DeclaredNames) - Started,
-            logger:info("erlkoenig_config: reconciled — ~p started, "
-                        "~p stopped, ~p kept", [Started, Stopped, Kept]),
-            erlkoenig_config_zone:log_deploy_report(
-                Report4, Started, length(AllContainers)),
-            {ok, Results};
-        {error, ApplyErr} ->
+    case SetupResult of
+        {error, SetupErr} ->
             logger:error(
-                "erlkoenig_config: forward topology apply failed — "
-                "config_load aborted: ~p", [ApplyErr]),
-            {error, {forward_topology_failed, ApplyErr}}
+                "erlkoenig_config: zone firewall setup failed — "
+                "config_load aborted: ~p", [SetupErr]),
+            {error, {zone_firewall_setup_failed, SetupErr}};
+        ok ->
+            %% 4. Apply host firewall (skipped when nft_tables present — ADR-0015)
+            Report3 = case maps:is_key(nft_tables, Config) of
+                true -> Report2#{firewall => nft_tables};
+                false -> erlkoenig_config_zone:maybe_apply_firewall(Config, Report2)
+            end,
+
+            %% 5. Apply guard + watches
+            maybe_configure_guard(resolve_guard_key(Config)),
+            Watches = maps:get(watches, Config, maps:get(watch, Config, [])),
+            WatchList = if is_list(Watches) -> Watches;
+                           is_map(Watches) -> [Watches];
+                           true -> []
+                        end,
+            lists:foreach(fun start_watch/1, WatchList),
+
+            %% Start new containers (not already running)
+            %% Group by pod instance for pod-supervised startup
+            ToStart = DeclaredNames -- RunningAfterStops,
+            Pods = maps:get(pods, Config, []),
+            HasNftTables = maps:is_key(nft_tables, Config),
+            %% When nft_tables present, containers don't get auto-generated firewall chains
+            NewContainers0 = [Ct || Ct <- AllContainers,
+                              lists:member(iolist_to_binary(maps:get(name, Ct)), ToStart)],
+            NewContainers = case HasNftTables of
+                true -> [Ct#{firewall => skip_firewall} || Ct <- NewContainers0];
+                false -> NewContainers0
+            end,
+            Results = erlkoenig_config_spawn:spawn_pods(NewContainers, Pods),
+
+            %% 6b. Apply zone chains + pod forward chains (after spawn, need IPs)
+            %% Wait for containers to reach running state and have IPs assigned.
+            %% Poll instead of fixed sleep — returns as soon as all IPs are known.
+            IpMap = wait_for_ips(Results, 10_000),
+
+            Pods = maps:get(pods, Config, []),
+            NftTables = maps:get(nft_tables, Config, []),
+
+            %% Phase 6e.1.b: single atomic apply for the zone-forward
+            %% surface — replaces the pre-6e.1.b per-zone foreach +
+            %% separate apply_pod_forward_chains pair. Reload is now
+            %% idempotent (no rule accumulation) because the entry point
+            %% flushes the forward base chain and every regular chain in
+            %% one atomic netlink batch. A failure here means **no**
+            %% forward rules were installed (atomic batch rolls back, or
+            %% NFLOG receiver setup failed before the batch was sent),
+            %% so the reconciliation as a whole is not in a known good
+            %% state and the error must be propagated — the previous
+            %% logger:warning swallowed it and let the caller believe the
+            %% config was applied.
+            ForwardResult = case NftTables of
+                [] ->
+                    erlkoenig_config_nft:apply_forward_topology(
+                        Zones, Pods, IpMap, Results);
+                _ ->
+                    %% New path: nft-transparent DSL (ADR-0015)
+                    %% nft_tables define ALL firewall rules — skip legacy chain generation
+                    erlkoenig_config_nft:apply_nft_tables(
+                        NftTables, IpMap, #{}, Pods, Zones)
+            end,
+
+            case ForwardResult of
+                ok ->
+                    %% 7. Apply steering
+                    Report4 = erlkoenig_config_zone:maybe_apply_steering(
+                                Config, AllContainers, Report3),
+                    %% 8. Log report
+                    Started = length(Results),
+                    Stopped = length(ToStop),
+                    Kept = length(DeclaredNames) - Started,
+                    logger:info("erlkoenig_config: reconciled — ~p started, "
+                                "~p stopped, ~p kept", [Started, Stopped, Kept]),
+                    erlkoenig_config_zone:log_deploy_report(
+                        Report4, Started, length(AllContainers)),
+                    {ok, Results};
+                {error, ApplyErr} ->
+                    logger:error(
+                        "erlkoenig_config: forward topology apply failed — "
+                        "config_load aborted: ~p", [ApplyErr]),
+                    {error, {forward_topology_failed, ApplyErr}}
+            end
     end.
 
 %% Drift detection (`detect_drifted/2', `containers_by_name/1',
@@ -600,12 +636,66 @@ wait_for_ips_loop(Remaining, IpMap, Deadline) ->
                 catch _:_ -> Acc
                 end
             end, IpMap, Found),
-            case Still of
+            StillPending = [Item || Item <- Still,
+                                    not terminal_without_ip(element(2, Item))],
+            case StillPending of
                 [] -> NewIps;
                 _  ->
                     timer:sleep(25),
-                    wait_for_ips_loop(Still, NewIps, Deadline)
+                    wait_for_ips_loop(StillPending, NewIps, Deadline)
             end
+    end.
+
+-spec terminal_without_ip(pid()) -> boolean().
+terminal_without_ip(Pid) ->
+    try erlkoenig_ct:get_info(Pid) of
+        #{state := State} when State =:= failed;
+                              State =:= stopped;
+                              State =:= gone ->
+            true;
+        _ ->
+            false
+    catch _:_ ->
+        true
+    end.
+
+-spec wait_for_terminal([binary()], non_neg_integer()) -> ok.
+wait_for_terminal(Names, MaxMs) ->
+    Deadline = erlang:monotonic_time(millisecond) + MaxMs,
+    wait_for_terminal_loop(Names, Deadline).
+
+-spec wait_for_terminal_loop([binary()], integer()) -> ok.
+wait_for_terminal_loop([], _Deadline) ->
+    ok;
+wait_for_terminal_loop(Names, Deadline) ->
+    Remaining = [Name || Name <- Names, not name_is_terminal(Name)],
+    case Remaining of
+        [] ->
+            ok;
+        _ ->
+            Now = erlang:monotonic_time(millisecond),
+            case Now >= Deadline of
+                true ->
+                    logger:warning("erlkoenig_config: timeout waiting for "
+                                   "containers to stop before zone cleanup: ~p",
+                                   [Remaining]),
+                    ok;
+                false ->
+                    timer:sleep(25),
+                    wait_for_terminal_loop(Remaining, Deadline)
+            end
+    end.
+
+-spec name_is_terminal(binary()) -> boolean().
+name_is_terminal(Name) ->
+    Pids = try pg:get_members(erlkoenig_pg, erlkoenig_cts_all)
+           catch error:_ -> []
+           end,
+    case find_pid_by_name(Name, Pids) of
+        error ->
+            true;
+        {ok, Pid} ->
+            terminal_without_ip(Pid)
     end.
 
 

@@ -41,8 +41,9 @@ Supported per-container limits (all optional):
   pids    - Max number of processes (written to pids.max)
 
 The gen_server creates the full topology on init and enables the required
-controllers. On terminate, it removes containers/, beam/, and base
-(best-effort, log and ignore errors).
+controllers. On terminate, it removes the containers/ subtree if it is empty.
+The BEAM and base cgroups are intentionally kept: during terminate the BEAM
+process still belongs to beam/, and systemd owns the service cgroup lifecycle.
 
 All operations are pure file I/O on cgroupfs — no os:cmd.
 """.
@@ -67,6 +68,8 @@ All operations are pure file I/O on cgroupfs — no os:cmd.
          containers_config/0,
          validate_beam_config/1,
          validate_containers_config/1,
+         protection_mode/0,
+         production_mode/0,
          compute_containers_memory_max/3,
          parse_memtotal/1,
          parse_cpu_usage/1,
@@ -271,8 +274,10 @@ handle_call(read_containers_stats, _From, #state{containers_path = CPath} = Stat
             Stats = lists:foldl(fun(F, Acc) -> F(CPath, Acc) end, #{}, [
                 fun read_memory_current/2,
                 fun read_memory_peak/2,
+                fun read_memory_max/2,
                 fun read_cpu_stat/2,
-                fun read_pids_current/2
+                fun read_pids_current/2,
+                fun read_pids_max/2
             ]),
             {ok, Stats}
     end,
@@ -306,27 +311,23 @@ handle_info(_Msg, State) ->
 
 terminate(_Reason, #state{base_path = BasePath, beam_path = BeamPath,
                           containers_path = ContainersPath}) ->
-    %% Best-effort removal of cgroup hierarchy.
-    %% Clean up containers/, then beam/, then base.
-    %% del_dir on non-empty cgroups will fail — log and ignore.
+    %% Best-effort removal of container state only.
+    %% Do not remove beam/ or base here: this callback is running inside
+    %% the BEAM that belongs to beam/, and under systemd the service cgroup
+    %% is not Erlkoenig-owned. Removing either path on stop/restart produces
+    %% expected EBUSY noise that looks like a real leak to operators.
     case file:del_dir(ContainersPath) of
         ok -> ok;
+        {error, enoent} -> ok;
+        {error, ebusy} ->
+            logger:warning("erlkoenig_cgroup: del_dir ~s failed: ~p",
+                           [ContainersPath, ebusy]);
         {error, CErr} ->
             logger:warning("erlkoenig_cgroup: del_dir ~s failed: ~p",
                            [ContainersPath, CErr])
     end,
-    case file:del_dir(BeamPath) of
-        ok -> ok;
-        {error, BErr} ->
-            logger:warning("erlkoenig_cgroup: del_dir ~s failed: ~p",
-                           [BeamPath, BErr])
-    end,
-    case file:del_dir(BasePath) of
-        ok -> ok;
-        {error, BaseErr} ->
-            logger:warning("erlkoenig_cgroup: del_dir ~s failed: ~p",
-                           [BasePath, BaseErr])
-    end,
+    persistent_term:erase(erlkoenig_cgroup_containers_path),
+    _ = {BasePath, BeamPath},
     ok.
 
 %% =================================================================
@@ -343,6 +344,21 @@ beam_config() ->
              pids_max   => maps:get(beam_pids_max, Cfg, 8192)},
     ok = validate_beam_config(Beam),
     Beam.
+
+-doc "Current resource-protection mode. Defaults to development for isolated tests.".
+-spec protection_mode() -> production | development.
+protection_mode() ->
+    Cfg = application:get_env(erlkoenig, resource_protection, #{}),
+    case maps:get(mode, Cfg, development) of
+        production -> production;
+        development -> development;
+        Other -> error({invalid_config, resource_protection_mode, Other})
+    end.
+
+-doc "True when resource-protection failures must abort container spawns.".
+-spec production_mode() -> boolean().
+production_mode() ->
+    protection_mode() =:= production.
 
 -doc "Read containers ceiling configuration from app env, resolving 'auto'.".
 -spec containers_config() -> map().
@@ -681,10 +697,12 @@ config_source() ->
     case application:get_env(erlkoenig, resource_protection) of
         undefined -> "defaults";
         {ok, Cfg} ->
-            case maps:get(containers_memory_max, Cfg, auto) of
+            Mode = atom_to_list(maps:get(mode, Cfg, development)),
+            Source = case maps:get(containers_memory_max, Cfg, auto) of
                 auto -> "auto";
                 _    -> "sys.config"
-            end
+            end,
+            Source ++ "/" ++ Mode
     end.
 
 %% Format bytes as a human-readable string.

@@ -438,11 +438,14 @@ firewall_events_since(Cursor, TimeoutMs, Limit) ->
 List all running containers as `container_info()` maps.
 
 Best-effort: containers that died between enumeration and inspect
-are silently filtered (mirrors `erlkoenig:list/0`).
+are silently filtered by `erlkoenig:list/0`. Stopped/failed container
+state machines remain available for post-mortem `container_inspect/1`,
+but the list view is the live operator surface and only returns
+`state := running`.
 """.
 -spec container_list() -> result([erlkoenig:container_info()]).
 container_list() ->
-    {ok, erlkoenig:list()}.
+    {ok, [Info || #{state := running} = Info <- erlkoenig:list()]}.
 
 -doc """
 Detailed info for one container, looked up by name or id.

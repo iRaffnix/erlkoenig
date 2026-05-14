@@ -107,7 +107,7 @@ init(Config) ->
 
     %% Do an initial read to set the baseline
     {PrevPkts, PrevBytes} =
-        case nfnl_server:get_counter(erlkoenig_nft_srv, Family, Table, Name) of
+        case safe_get_counter(Family, Table, Name) of
             {ok, #{packets := P, bytes := B}} -> {P, B};
             _ -> {0, 0}
         end,
@@ -164,7 +164,7 @@ handle_info(
         history := History
     } = State
 ) ->
-    case nfnl_server:get_counter(erlkoenig_nft_srv, Family, Table, Name) of
+    case safe_get_counter(Family, Table, Name) of
         {ok, #{packets := CurPkts, bytes := CurBytes}} ->
             %% Delta since last poll
             DeltaPkts = max(0, CurPkts - PrevPkts),
@@ -258,6 +258,18 @@ check_thresholds(
             ok
     end,
     check_thresholds(Name, Rest, Rate).
+
+-spec safe_get_counter(0..255, binary(), binary()) ->
+    {ok, map()} | {error, term()}.
+safe_get_counter(Family, Table, Name) ->
+    try nfnl_server:get_counter(erlkoenig_nft_srv, Family, Table, Name) of
+        Result -> Result
+    catch
+        exit:{timeout, _} = Reason ->
+            {error, Reason};
+        Class:Reason ->
+            {error, {Class, Reason}}
+    end.
 
 -spec eval_op(atom(), number(), number()) -> boolean().
 eval_op('>', A, B) -> A > B;

@@ -42,7 +42,7 @@ still owns the orchestration and the Report-map threading.
     log_deploy_report/3
 ]).
 
-%% Ensure zones exist (bridge + IP pool + DNS)
+%% Ensure zones exist (IPVLAN link + IP pool + DNS)
 -spec ensure_zones(list(), map()) -> map().
 ensure_zones(Zones, Report) ->
     Results = lists:map(fun(#{name := Name} = Zone) ->
@@ -164,7 +164,7 @@ maybe_apply_steering(#{steering := #{services := Services, routes := Routes}},
         NameBin = iolist_to_binary(ContainerName),
         case find_container_ip(NameBin, AllContainers) of
             {ok, Ip} ->
-                %% ifindex resolved at runtime from host veth
+                %% ifindex resolved at runtime from the IPVLAN attach info
                 logger:info("erlkoenig_config: steering route ~s → ~p (deferred)",
                             [NameBin, Ip]);
             error ->

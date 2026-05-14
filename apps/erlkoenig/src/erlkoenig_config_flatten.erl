@@ -80,7 +80,7 @@ expand_container_replicas(PodName, Ct, ZoneSubnets, ZoneIps) ->
     ZoneAtom = binary_to_atom(ZoneBin),
     Prefix = case maps:find(ZoneBin, ZoneSubnets) of
         {ok, P} -> P;
-        error   -> {10, 0, 0}  %% fallback if zone not declared (shouldn't happen)
+        error -> error({undeclared_zone, ZoneBin, maps:get(name, Ct)})
     end,
     IpStart = maps:get(ZoneBin, ZoneIps, 2),
     {Expanded, NextIp} = lists:foldl(fun(ReplicaIdx, {Acc, Ip}) ->

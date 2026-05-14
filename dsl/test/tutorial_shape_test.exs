@@ -306,7 +306,7 @@ defmodule Erlkoenig.TutorialShapeTest do
       [pod] = c.pods
       api = Enum.find(pod.containers, &(&1.name == "api"))
       assert api.limits.disk == 1_000_000_000
-      assert api.limits.cpu == 50_000
+      assert api.limits.cpu == 50
       assert api.limits.memory == 256_000_000
       assert api.limits.pids == 128
     end

@@ -24,7 +24,7 @@ Creates IPVLAN slaves for containers, manages parent devices.
 ADR-0020: IPVLAN L3S is the only networking mode.
 """.
 
--export([init/1, attach_container/2, detach_container/2]).
+-export([init/1, attach_container/2, detach_container/2, destroy/1]).
 -export_type([link_ref/0]).
 
 -type link_ref() :: map().
@@ -41,3 +41,7 @@ attach_container(State, {SlaveName, OsPid}) ->
 -spec detach_container(link_ref(), map()) -> ok.
 detach_container(State, AttachInfo) ->
     erlkoenig_zone_link_ipvlan:detach_container(State, AttachInfo).
+
+-spec destroy(link_ref()) -> ok.
+destroy(State) ->
+    erlkoenig_zone_link_ipvlan:destroy(State).

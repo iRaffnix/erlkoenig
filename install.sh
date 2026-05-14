@@ -249,16 +249,7 @@ fi
 echo "  prefix: ${PREFIX}"
 echo ""
 
-# ── Stop daemon if running ───────────────────────────────
-
-DAEMON_WAS_RUNNING=false
-
-if [ "$IS_UPDATE" = true ] && daemon_is_running; then
-    DAEMON_WAS_RUNNING=true
-    stop_daemon
-fi
-
-# ── Acquire artifacts ────────────────────────────────────
+# ── Temporary workspace ──────────────────────────────────
 
 TMPDIR=$(mktemp -d)
 
@@ -266,6 +257,32 @@ cleanup() {
     rm -rf "$TMPDIR"
 }
 trap cleanup EXIT
+
+# ── Stop daemon if running ───────────────────────────────
+
+DAEMON_WAS_RUNNING=false
+PRESERVED_SYS_CONFIG=""
+
+if [ "$IS_UPDATE" = true ] && daemon_is_running; then
+    DAEMON_WAS_RUNNING=true
+    stop_daemon
+fi
+
+if [ "$IS_UPDATE" = true ]; then
+    if [ -f /etc/erlkoenig/sys.config ]; then
+        PRESERVED_SYS_CONFIG="/etc/erlkoenig/sys.config"
+        info "Using external sys.config: /etc/erlkoenig/sys.config"
+    elif [ -f "$PREFIX/releases/start_erl.data" ]; then
+        OLD_REL_VSN=$(awk '{print $2}' "$PREFIX/releases/start_erl.data" 2>/dev/null || true)
+        if [ -n "$OLD_REL_VSN" ] && [ -f "$PREFIX/releases/$OLD_REL_VSN/sys.config" ]; then
+            PRESERVED_SYS_CONFIG="$TMPDIR/sys.config.preserved"
+            cp "$PREFIX/releases/$OLD_REL_VSN/sys.config" "$PRESERVED_SYS_CONFIG"
+            info "Preserving existing release sys.config"
+        fi
+    fi
+fi
+
+# ── Acquire artifacts ────────────────────────────────────
 
 copy_rt_from_tar() {
     tarball="$1"
@@ -484,6 +501,21 @@ if ! tar xzf "$TMPDIR/erlkoenig-release.tar.gz" -C "$PREFIX"; then
 fi
 
 ok "OTP release extracted"
+
+if [ -n "$PRESERVED_SYS_CONFIG" ] && [ -f "$PRESERVED_SYS_CONFIG" ]; then
+    REL_VSN_FOR_CONFIG=$(awk '{print $2}' "$PREFIX/releases/start_erl.data" 2>/dev/null || true)
+    if [ -n "$REL_VSN_FOR_CONFIG" ] && [ -d "$PREFIX/releases/$REL_VSN_FOR_CONFIG" ]; then
+        cp "$PRESERVED_SYS_CONFIG" "$PREFIX/releases/$REL_VSN_FOR_CONFIG/sys.config"
+        chmod 640 "$PREFIX/releases/$REL_VSN_FOR_CONFIG/sys.config"
+        ok "Preserved sys.config: $PREFIX/releases/$REL_VSN_FOR_CONFIG/sys.config"
+        if [ "$PRESERVED_SYS_CONFIG" != "/etc/erlkoenig/sys.config" ] && [ ! -f /etc/erlkoenig/sys.config ]; then
+            cp "$PRESERVED_SYS_CONFIG" /etc/erlkoenig/sys.config
+            chmod 640 /etc/erlkoenig/sys.config
+            chown root:"$SERVICE_USER" /etc/erlkoenig/sys.config 2>/dev/null || chown root:root /etc/erlkoenig/sys.config
+            ok "External sys.config: /etc/erlkoenig/sys.config"
+        fi
+    fi
+fi
 
 # ── Remove stale versioned scripts ──────────────────────
 # The release tarball may contain scripts from old versions

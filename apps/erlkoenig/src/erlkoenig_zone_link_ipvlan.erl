@@ -28,7 +28,7 @@ would require setns() into the container netns, which is not safe
 in the multi-threaded BEAM.
 """.
 
--export([init/1, attach_container/3, detach_container/2]).
+-export([init/1, attach_container/3, detach_container/2, destroy/1]).
 
 %% host_slave_name carries the only non-trivial length arithmetic in
 %% this module: `h.<dummy>' must fit IFNAMSIZ (15 visible bytes).
@@ -86,7 +86,7 @@ Create an IPVLAN slave in the container's netns.
 
 The slave is created with IFLA_NET_NS_PID so the kernel puts it
 directly into the container's network namespace. No separate move
-step needed (unlike veth).
+step is needed.
 """.
 -spec attach_container(map(), binary(), non_neg_integer()) ->
     {ok, map()} | {error, term()}.
@@ -126,6 +126,23 @@ this spec explicitly excludes C changes.
 """.
 -spec detach_container(map(), map()) -> ok.
 detach_container(_State, _AttachInfo) ->
+    ok.
+
+-doc """
+Destroy host-side IPVLAN zone infrastructure.
+
+Container slaves live in container netns and are cleaned up with those netns.
+The host-side dummy parent and gateway IPVLAN slave are zone-level resources,
+so they must be removed when the zone itself is destroyed.
+""".
+-spec destroy(map()) -> ok.
+destroy(#{parent := Parent, parent_type := dummy}) ->
+    ParentStr = binary_to_list(Parent),
+    HostSlaveStr = binary_to_list(host_slave_name(Parent)),
+    os_cmd_ok("ip link del " ++ HostSlaveStr),
+    os_cmd_ok("ip link del " ++ ParentStr),
+    ok;
+destroy(_State) ->
     ok.
 
 %%%===================================================================

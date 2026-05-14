@@ -85,6 +85,9 @@ Query audit events. Blocking.
 Options:
   since => UnixSeconds (filter by timestamp)
   type  => atom() (filter by event type)
+  subject => binary() | atom() | string() (filter by audit subject)
+  container_name => binary() | atom() | string() (filter by flattened detail)
+  reverse => boolean() (scan newest first, default false)
   limit => pos_integer() (max results, default 100)
 """.
 -spec query(map()) -> {ok, [map()]} | {error, erlkoenig_error:error_map()}.
@@ -948,8 +951,17 @@ do_query(Path, Opts) ->
                 _ -> undefined
             end,
             TypeFilter = maps:get(type, Opts, undefined),
+            SubjectFilter = maps:get(subject, Opts, undefined),
+            ContainerNameFilter = maps:get(container_name, Opts, undefined),
             Limit = maps:get(limit, Opts, 100),
-            Filtered = filter_lines(Lines, SinceIso, TypeFilter, Limit, []),
+            ScanLines = case maps:get(reverse, Opts, false) of
+                true -> lists:reverse(Lines);
+                false -> Lines
+            end,
+            Filters = #{type => TypeFilter,
+                        subject => SubjectFilter,
+                        container_name => ContainerNameFilter},
+            Filtered = filter_lines(ScanLines, SinceIso, Filters, Limit, []),
             {ok, Filtered};
         {error, enoent} ->
             {ok, []};
@@ -972,16 +984,16 @@ iso8601_from_unix(UnixSec) ->
 
 -spec filter_lines([binary()],
                    binary() | undefined,
-                   atom() | undefined,
+                   map(),
                    non_neg_integer(),
                    [binary()]) -> [binary()].
 filter_lines(_, _, _, 0, Acc) ->
     lists:reverse(Acc);
 filter_lines([], _, _, _, Acc) ->
     lists:reverse(Acc);
-filter_lines([<<>> | Rest], Since, Type, Limit, Acc) ->
-    filter_lines(Rest, Since, Type, Limit, Acc);
-filter_lines([Line | Rest], Since, Type, Limit, Acc) ->
+filter_lines([<<>> | Rest], Since, Filters, Limit, Acc) ->
+    filter_lines(Rest, Since, Filters, Limit, Acc);
+filter_lines([Line | Rest], Since, Filters, Limit, Acc) ->
     %% Simple substring matching — no JSON parser needed for filtering.
     %% Full JSON parsing is left to external tools (jq, SIEM).
     %%
@@ -990,20 +1002,31 @@ filter_lines([Line | Rest], Since, Type, Limit, Acc) ->
     %% 00:00 UTC" returned every event in the file. Match now on the
     %% `"ts":"...Z"' substring since canonical JSON keeps the ts
     %% field in lexicographic position and ISO-8601 sorts chrono.
-    TypeOk = case Type of
+    TypeOk = case maps:get(type, Filters, undefined) of
         undefined -> true;
         T ->
             TypeBin = atom_to_binary(T),
             binary:match(Line, TypeBin) =/= nomatch
     end,
+    SubjectOk = field_filter_ok(Line, <<"subject">>,
+                                maps:get(subject, Filters, undefined)),
+    ContainerNameOk = field_filter_ok(Line, <<"container_name">>,
+                                      maps:get(container_name, Filters, undefined)),
     SinceOk = case Since of
         undefined -> true;
         SinceIso -> ts_after_or_equal(Line, SinceIso)
     end,
-    case TypeOk andalso SinceOk of
-        true  -> filter_lines(Rest, Since, Type, Limit - 1, [Line | Acc]);
-        false -> filter_lines(Rest, Since, Type, Limit, Acc)
+    case TypeOk andalso SubjectOk andalso ContainerNameOk andalso SinceOk of
+        true  -> filter_lines(Rest, Since, Filters, Limit - 1, [Line | Acc]);
+        false -> filter_lines(Rest, Since, Filters, Limit, Acc)
     end.
+
+field_filter_ok(_Line, _Field, undefined) ->
+    true;
+field_filter_ok(Line, Field, Value) ->
+    EncodedValue = canonical_json(to_bin(Value)),
+    Needle = <<"\"", Field/binary, "\":", EncodedValue/binary>>,
+    binary:match(Line, Needle) =/= nomatch.
 
 %% Extract the 20-byte ISO timestamp that follows `"ts":"` in the
 %% canonical-JSON line and compare with SinceIso. Length-20 matches

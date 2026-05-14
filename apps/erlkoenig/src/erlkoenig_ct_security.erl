@@ -25,8 +25,9 @@ security-policy boundary of `erlkoenig_ct':
   2. **Admission + quarantine gate**.
      `admission_then_quarantine/2' is the combined gate: first a
      quarantine check (crashloop circuit breaker), then admission
-     acquire. Both sibling gen_servers may be absent in test
-     fixtures — the `safe_*/*' helpers fail-open in that case.
+     acquire. Quarantine remains fail-open for isolated test fixtures.
+     Quarantine and admission are fail-closed in resource_protection
+     mode `production' and fail-open only in development mode.
 
   3. **Post-mortem bookkeeping**.
      `safe_record_crash/1' feeds the quarantine counter on
@@ -49,7 +50,11 @@ orchestrate which gate runs when.
     maybe_verify_signature/1,
     resolve_sig_path/1,
     %% Admission + quarantine gate
+    resource_then_admission_then_quarantine/4,
     admission_then_quarantine/2,
+    safe_resource_admit/2,
+    confirm_resource_admission/1,
+    release_resource_admission/1,
     safe_quarantine_check/1,
     safe_admission_acquire/1,
     admission_acquire_timeout_ms/0,
@@ -60,11 +65,64 @@ orchestrate which gate runs when.
     format_hash_prefix/1
 ]).
 
+%% -- Resource admission + admission + quarantine gate --------------
+
+-spec resource_then_admission_then_quarantine(binary(), map(),
+                                              atom() | binary(), binary()) ->
+    {ok, reference() | undefined}
+  | {error, {resource_admission_denied, term()}}
+  | {error, admission_timeout | admission_queue_full
+            | admission_unavailable | quarantine_unavailable}
+  | {error, {quarantined, binary(), integer()}}.
+resource_then_admission_then_quarantine(ContainerId, Limits, Zone, BinaryPath) ->
+    case safe_resource_admit(ContainerId, Limits) of
+        ok ->
+            case admission_then_quarantine(Zone, BinaryPath) of
+                {ok, _} = Ok ->
+                    Ok;
+                {error, _} = Err ->
+                    release_resource_admission(ContainerId),
+                    Err
+            end;
+        {error, Reason} ->
+            {error, {resource_admission_denied, Reason}}
+    end.
+
+-spec safe_resource_admit(binary(), map()) -> ok | {error, term()}.
+safe_resource_admit(ContainerId, Limits) ->
+    try erlkoenig_node_resources:admit(ContainerId, Limits)
+    catch
+        exit:{noproc, _} ->
+            case erlkoenig_cgroup:production_mode() of
+                true  -> {error, node_resources_unavailable};
+                false -> ok
+            end;
+        exit:{timeout, _} ->
+            {error, node_resources_unavailable}
+    end.
+
+-spec confirm_resource_admission(#ct_data{} | binary()) -> ok.
+confirm_resource_admission(#ct_data{id = Id}) ->
+    confirm_resource_admission(Id);
+confirm_resource_admission(Id) when is_binary(Id) ->
+    try erlkoenig_node_resources:confirm_running(Id)
+    catch _:_ -> ok
+    end.
+
+-spec release_resource_admission(#ct_data{} | binary()) -> ok.
+release_resource_admission(#ct_data{id = Id}) ->
+    release_resource_admission(Id);
+release_resource_admission(Id) when is_binary(Id) ->
+    try erlkoenig_node_resources:release_commit(Id)
+    catch _:_ -> ok
+    end.
+
 %% -- Admission + quarantine gate ---------------------------------
 
 -spec admission_then_quarantine(atom() | binary(), binary()) ->
     {ok, reference() | undefined}
-  | {error, admission_timeout | admission_queue_full}
+  | {error, admission_timeout | admission_queue_full
+            | admission_unavailable | quarantine_unavailable}
   | {error, {quarantined, binary(), integer()}}.
 admission_then_quarantine(Zone, BinaryPath) ->
     %% Quarantine check first — it's cheap, a hashmap lookup plus a
@@ -85,11 +143,19 @@ safe_quarantine_check(BinaryPath) ->
     try erlkoenig_quarantine:check(BinaryPath)
     catch
         %% Quarantine gen_server not running (isolated eunit contexts
-        %% that don't need it). Fail-open: if the gate itself is
-        %% missing, don't block spawns. The operational deployment
-        %% always has it; this branch is just for tests.
-        exit:{noproc, _} -> ok;
-        exit:{timeout, _} -> ok
+        %% that don't need it). In production, missing quarantine is a
+        %% hard safety failure because crashloop protection is part of
+        %% the pre-spawn contract.
+        exit:{noproc, _} ->
+            case erlkoenig_cgroup:production_mode() of
+                true  -> {error, quarantine_unavailable};
+                false -> ok
+            end;
+        exit:{timeout, _} ->
+            case erlkoenig_cgroup:production_mode() of
+                true  -> {error, quarantine_unavailable};
+                false -> ok
+            end
     end.
 
 safe_admission_acquire(Scope) ->
@@ -99,8 +165,13 @@ safe_admission_acquire(Scope) ->
         {error, queue_full} -> {error, admission_queue_full}
     catch
         %% Same rationale as quarantine: the admission gate is
-        %% supposed to be there, but tests don't always start it.
-        exit:{noproc, _}  -> {ok, undefined};
+        %% supposed to be there, but tests don't always start it. In
+        %% production, missing admission is a hard safety failure.
+        exit:{noproc, _} ->
+            case erlkoenig_cgroup:production_mode() of
+                true  -> {error, admission_unavailable};
+                false -> {ok, undefined}
+            end;
         exit:{timeout, _} -> {error, admission_timeout}
     end.
 

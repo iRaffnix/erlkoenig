@@ -6,8 +6,14 @@ defmodule Erlkoenig.LimitsTest do
 
   describe "Builder" do
     test "set_cpu" do
-      l = Builder.new() |> Builder.set_cpu(4)
-      assert l.cpu == 4
+      l = Builder.new() |> Builder.set_cpu(50)
+      assert l.cpu == 50
+    end
+
+    test "set_cpu rejects values outside one-core percent range" do
+      assert_raise FunctionClauseError, fn ->
+        Builder.new() |> Builder.set_cpu(101)
+      end
     end
 
     test "set_memory with integer" do
@@ -59,8 +65,8 @@ defmodule Erlkoenig.LimitsTest do
 
   describe "Limits.build/1" do
     test "builds from keyword list" do
-      term = Limits.build(cpu: 2, memory: "256M", pids: 50)
-      assert term.cpu == 2
+      term = Limits.build(cpu: 50, memory: "256M", pids: 50)
+      assert term.cpu == 50
       assert term.memory == 256 * 1_048_576
       assert term.pids == 50
     end

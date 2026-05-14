@@ -1,6 +1,8 @@
 -module(nfnl_mock_socket).
 -behaviour(gen_server).
 
+-include("nft_constants.hrl").
+
 -export([start_link/1, drain_count/1, inject_raw_recv/2, release_late/1]).
 -export([open/0, send/2, recv/1, recv/2, close/1]).
 -export([init/1, handle_call/3, handle_cast/2]).
@@ -48,6 +50,9 @@ handle_call({send, Bin}, _From, State) ->
             {reply, ok, enqueue(Acks, State1)};
         {raw_recv, RawBin} when is_binary(RawBin) ->
             {reply, ok, enqueue([RawBin], State1)};
+        {counter, Packets, Bytes} ->
+            [Seq | _] = parse_seqs(Bin, []),
+            {reply, ok, enqueue([counter_response(Seq, Packets, Bytes)], State1)};
         no_ack ->
             {reply, ok, State1#{late => maps:get(late, State1) ++ Acks}};
         {error, Reason} ->
@@ -104,3 +109,16 @@ parse_seqs(_Other, Acc) ->
 ack(Seq) ->
     <<20:32/little, 2:16/little, 0:16/little, Seq:32/little, 0:32/little,
       0:32/signed-little>>.
+
+counter_response(Seq, Packets, Bytes) ->
+    CounterData = iolist_to_binary([
+        nfnl_attr:encode_u64(?NFTA_COUNTER_BYTES, Bytes),
+        nfnl_attr:encode_u64(?NFTA_COUNTER_PACKETS, Packets)
+    ]),
+    Attrs = iolist_to_binary([
+        nfnl_attr:encode_str(?NFTA_OBJ_TABLE, <<"erlkoenig_host">>),
+        nfnl_attr:encode_str(?NFTA_OBJ_NAME, <<"live_ssh_accept">>),
+        nfnl_attr:encode_u32(?NFTA_OBJ_TYPE, ?NFT_OBJECT_COUNTER),
+        nfnl_attr:encode_nested(?NFTA_OBJ_DATA, CounterData)
+    ]),
+    nfnl_msg:build_hdr(?NFT_MSG_NEWOBJ, ?NFPROTO_INET, 0, Seq, Attrs).

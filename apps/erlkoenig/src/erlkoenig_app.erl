@@ -20,15 +20,15 @@ Erlkoenig application callback.
 
 Boot order:
   1. Start DETS state (must be first -- recovery needs it)
-  2. Run recovery (finds and reconnects still-running containers)
-  3. Start supervisor (core services incl. zones + firewall table)
+  2. Start supervisor (core services incl. zones + cgroup topology)
+  3. Run recovery (finds and reconnects still-running containers)
   4. Setup nftables (per-zone masquerade + NAT)
   5. Autostart containers from config file
 """.
 
 -behaviour(application).
 
--export([start/2, stop/1]).
+-export([start/2, prep_stop/1, stop/1]).
 
 start(_StartType, _StartArgs) ->
     %% Step 1: DETS state (must be first — recovery needs it)
@@ -39,7 +39,12 @@ start(_StartType, _StartArgs) ->
                            [DetsReason])
     end,
 
-    %% Step 2: Recovery (before supervisor, so recovered processes exist)
+    %% Step 2: Normal supervisor (creates infrastructure: zones, cgroups, etc.)
+    {ok, Sup} = erlkoenig_sup:start_link(),
+
+    %% Step 3: Recovery depends on supervised infrastructure. In particular,
+    %% protected-cgroup migration calls erlkoenig_cgroup:path/1, so running it
+    %% before erlkoenig_sup starts produces a boot-time noproc error storm.
     RecoveryResults = case whereis(erlkoenig_node_state) of
         undefined -> [];
         _ ->
@@ -48,21 +53,36 @@ start(_StartType, _StartArgs) ->
     end,
     log_recovery_results(RecoveryResults),
 
-    %% Step 3: Normal supervisor (creates infrastructure: zones, bridges, etc.)
-    {ok, Sup} = erlkoenig_sup:start_link(),
-
     %% Step 4: Firewall + autostart
-    setup_firewall(),
+    case setup_firewall() of
+        ok ->
+            %% Step 5: Optional AMQP integration (ADR-0014)
+            maybe_start_amqp(Sup),
 
-    %% Step 5: Optional AMQP integration (ADR-0014)
-    maybe_start_amqp(Sup),
+            autostart_containers(),
+            {ok, Sup};
+        {error, Reason} ->
+            {error, {firewall_setup_failed, Reason}}
+    end.
 
-    autostart_containers(),
-    {ok, Sup}.
+prep_stop(State) ->
+    shutdown_firewall(prep_stop),
+    {firewall_torn_down, State}.
 
+stop({firewall_torn_down, _State}) ->
+    ok;
 stop(_State) ->
-    _ = erlkoenig_ct_firewall:teardown_table(),
+    shutdown_firewall(stop),
     ok.
+
+shutdown_firewall(Phase) ->
+    case erlkoenig_ct_firewall:teardown_table() of
+        ok ->
+            ok;
+        {error, Reason} ->
+            logger:warning("erlkoenig_app: nft teardown failed during ~p: ~p",
+                           [Phase, Reason])
+    end.
 
 %% Log recovery results summary.
 log_recovery_results([]) -> ok;
@@ -80,7 +100,8 @@ setup_firewall() ->
     case erlkoenig_ct_firewall:setup_table(ZoneConfigs) of
         ok -> ok;
         {error, Reason} ->
-            logger:error("firewall setup failed: ~p", [Reason])
+            logger:error("firewall setup failed: ~p", [Reason]),
+            {error, Reason}
     end.
 
 %% Optional AMQP integration subtree (ADR-0014).

@@ -80,7 +80,11 @@ sign(BinaryPath, CertPath, KeyPath, Opts) ->
         {ok, PrivKey} = read_private_key(KeyPath),
         {ok, CertChain} = read_cert_chain(CertPath),
         SignerCN = extract_cn(hd(CertChain)),
-        GitSHA = parse_git_sha(maps:get(git_sha, Opts, <<>>)),
+        GitSHA =
+            case parse_git_sha(maps:get(git_sha, Opts, <<>>)) of
+                {error, _} = GitShaErr -> throw(GitShaErr);
+                ParsedGitSHA -> ParsedGitSHA
+            end,
         Timestamp = erlang:system_time(second),
 
         Payload = encode_payload(#{
@@ -98,6 +102,7 @@ sign(BinaryPath, CertPath, KeyPath, Opts) ->
 
         {ok, [SigBlock | CertBlocks]}
     catch
+        throw:{error, _} = Err -> Err;
         error:{badmatch, {error, Reason}} -> {error, Reason};
         Class:Reason:Stack ->
             logger:error("[sig] sign failed: ~p:~p~n~p", [Class, Reason, Stack]),
@@ -368,32 +373,19 @@ extract_public_key(DerCert) ->
 -spec cert_entry_type(public_key:der_encoded()) -> atom().
 cert_entry_type(_) -> 'Certificate'.
 
--spec parse_git_sha(binary()) -> binary().
+-spec parse_git_sha(binary()) -> binary() | {error, term()}.
 parse_git_sha(<<>>) ->
     <<0:160>>;
 parse_git_sha(Hex) when byte_size(Hex) =:= 40 ->
-    %% `hex_to_bin' raises badarg on non-hex bytes. This parser is
-    %% fuzz-contract (see erlkoenig_sig_fuzz_test) — arbitrary input
-    %% must not crash, so non-hex falls back to zeroes. Log it though:
-    %% previously the fallback was silent, which meant a signer passing
-    %% corrupted hex saw "00000..." in verifier metadata with no clue
-    %% their git_sha was rejected.
     try hex_to_bin(Hex)
     catch _:Reason ->
-        logger:warning(
-            "[sig] parse_git_sha: ~B-byte input not valid hex (~p), "
-            "falling back to zero-sha; signer attribution lost",
-            [byte_size(Hex), Reason]),
-        <<0:160>>
+        {error, {invalid_git_sha, #{reason => Reason, bytes => byte_size(Hex)}}}
     end;
 parse_git_sha(Raw) when byte_size(Raw) =:= 20 ->
     Raw;
 parse_git_sha(Other) ->
-    logger:warning(
-        "[sig] parse_git_sha: rejected ~B-byte input "
-        "(expected 0, 20, or 40 bytes); using zero-sha",
-        [byte_size(Other)]),
-    <<0:160>>.
+    {error, {invalid_git_sha, #{bytes => byte_size(Other),
+                                expected => [0, 20, 40]}}}.
 
 -spec hex(binary()) -> binary().
 hex(Bin) ->

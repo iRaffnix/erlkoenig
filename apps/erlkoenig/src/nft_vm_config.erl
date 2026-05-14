@@ -1,4 +1,4 @@
-%%% @doc Config→VM Bridge: Loads .term firewall configs and builds VM-ready chain maps.
+%%% @doc Config-to-VM adapter: Loads .term firewall configs and builds VM-ready chain maps.
 %%%
 %%% Mirrors the rule dispatch from erlkoenig_nft_firewall:build_rule/4 but returns
 %%% raw IR expressions instead of Netlink-encoded msg_funs. The IR expressions are

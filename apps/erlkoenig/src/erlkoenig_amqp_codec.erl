@@ -159,6 +159,12 @@ encode_payload({container_stats, _Id, Name, MetricType, Values}) when is_map(Val
     {ok, <<"stats.", NameBin/binary, ".", MetricBin/binary>>,
      encode_map(Payload)};
 
+%% ── Aggregate containers/ stats ─────────────────────────────────
+%% Routing: stats.system.containers
+
+encode_payload({containers_stats, Values}) when is_map(Values) ->
+    {ok, <<"stats.system.containers">>, encode_map(Values)};
+
 %% ── Quarantine events ──────────────────────────────────────────
 %% Routing: security.<hash-prefix>.quarantined | unquarantined
 
@@ -295,12 +301,16 @@ encode_payload({nflog_event, Event}) ->
     {ok, <<"firewall.unknown.packet">>, #{<<"raw">> => term_to_binary_string(Event)}};
 
 %% ── Counter events ─────────────────────────────────────────────
-%% Routing: firewall.<chain>.drop
+%% Routing: firewall.<chain>.drop | firewall.<counter>.counter
 
 encode_payload({counter_event, Name, #{packets := Pkts} = Rate}) when Pkts > 0 ->
     ChainName = counter_to_chain(Name),
-    {ok, <<"firewall.", ChainName/binary, ".drop">>, #{
+    CounterName = ensure_binary(Name),
+    Suffix = counter_route_suffix(CounterName),
+    {ok, <<"firewall.", ChainName/binary, ".", Suffix/binary>>, #{
         <<"chain">> => ChainName,
+        <<"counter">> => CounterName,
+        <<"kind">> => <<"counter_rate">>,
         <<"packets">> => Pkts,
         <<"pps">> => maps:get(pps, Rate, 0.0),
         <<"bytes">> => maps:get(bytes, Rate, 0),
@@ -541,6 +551,14 @@ counter_to_chain(Name) ->
         _          -> NameBin
     end.
 
+counter_route_suffix(<<"dropped">>) ->
+    <<"drop">>;
+counter_route_suffix(CounterName) ->
+    case binary:match(CounterName, <<"_drop">>) of
+        nomatch -> <<"counter">>;
+        _       -> <<"drop">>
+    end.
+
 -spec timestamp() -> binary().
 timestamp() ->
     Now = os:system_time(millisecond),
@@ -565,8 +583,8 @@ ensure_binary(T) -> term_to_binary_string(T).
 hash_prefix(Hash) when is_binary(Hash) ->
     Hex = hash_to_hex(Hash),
     case byte_size(Hex) of
-        N when N >= 12 ->
-            <<Prefix:12/binary, _/binary>> = Hex,
+        N when N >= 8 ->
+            <<Prefix:8/binary, _/binary>> = Hex,
             Prefix;
         _ -> Hex
     end.

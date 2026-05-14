@@ -28,6 +28,7 @@ defmodule Erlkoenig.Nft.DslTest do
 
   alias Erlkoenig.Nft.ChainBuilder
   alias Erlkoenig.Nft.TableBuilder
+  alias ErlkoenigNft.Firewall.Builder, as: LegacyFirewallBuilder
 
   # ------------------------------------------------------------------
   # TableBuilder — basic accumulation
@@ -890,6 +891,22 @@ defmodule Erlkoenig.Nft.DslTest do
         |> ChainBuilder.add_rule(:jump, to: "target")
 
       assert [{:jump, %{to: "target"}}] = c.rules
+    end
+  end
+
+  describe "legacy Firewall.Builder interface refs" do
+    test "refuses removed bridge and containers shortcuts" do
+      assert_raise ArgumentError, ~r/removed host-interface shortcut/, fn ->
+        LegacyFirewallBuilder.build_rule(:accept, iif: :bridge)
+      end
+
+      assert_raise ArgumentError, ~r/removed host-interface shortcut/, fn ->
+        LegacyFirewallBuilder.build_rule(:accept, oif: :bridge)
+      end
+
+      assert_raise ArgumentError, ~r/removed host-interface shortcut/, fn ->
+        LegacyFirewallBuilder.build_rule(:accept, oif: :containers)
+      end
     end
   end
 

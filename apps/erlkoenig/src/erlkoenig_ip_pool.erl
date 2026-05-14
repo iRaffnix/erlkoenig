@@ -87,10 +87,23 @@ allocate(ZoneName) ->
 -doc "Release an IP back to its zone's pool.".
 -spec release(inet:ip4_address()) -> ok.
 release(Ip) ->
-    %% Find the right pool by subnet match, or use default
-    case find_pool_for_ip(Ip) of
-        {ok, Pid} -> gen_server:cast(Pid, {release, Ip});
-        error     -> gen_server:cast(?MODULE, {release, Ip})
+    %% Release to the default pool only if it actually owns the IP.
+    %% Otherwise resolve the zone owner explicitly; registry failures
+    %% must not reroute a zone IP into the default pool's free list.
+    case default_pool_owns(Ip) of
+        true ->
+            gen_server:cast(?MODULE, {release, Ip});
+        false ->
+            case find_pool_for_ip(Ip) of
+                {ok, Pid} ->
+                    gen_server:cast(Pid, {release, Ip});
+                not_found ->
+                    ok;
+                {error, Reason} ->
+                    logger:warning("ip_pool: release of ~p skipped: ~p",
+                                   [Ip, Reason]),
+                    ok
+            end
     end.
 
 -doc "Return the number of currently allocated IPs (default zone).".
@@ -165,20 +178,10 @@ find_pool_for_ip(Ip) ->
         Zones = erlkoenig_zone:zones(),
         find_pool_for_ip(Ip, Zones)
     catch Class:Reason ->
-        %% `release/1' falls back to the default pool on `error'.
-        %% Without logging, a crashed zone registry silently rerouted
-        %% IPs from zone-pools into the default pool's free list —
-        %% later allocations could hand cross-subnet IPs to default-
-        %% zone containers and conflict against the original zone.
-        logger:warning(
-            "ip_pool: zone-lookup for ~p failed (~p:~p); "
-            "falling back to default pool — next allocation may "
-            "reuse cross-subnet IPs",
-            [Ip, Class, Reason]),
-        error
+        {error, {zone_lookup_failed, Class, Reason}}
     end.
 
-find_pool_for_ip(_Ip, []) -> error;
+find_pool_for_ip(_Ip, []) -> not_found;
 find_pool_for_ip({A, B, C, D} = Ip, [Zone | Rest]) ->
     case erlkoenig_zone:zone_config(Zone) of
         #{network := #{subnet := SubnetIp, netmask := Mask}}
@@ -192,6 +195,19 @@ find_pool_for_ip({A, B, C, D} = Ip, [Zone | Rest]) ->
             {ok, erlkoenig_zone:ip_pool(Zone)};
         _ ->
             find_pool_for_ip(Ip, Rest)
+    end.
+
+default_pool_owns(Ip) ->
+    case whereis(?MODULE) of
+        Pid when is_pid(Pid) ->
+            try gen_server:call(Pid, {owns, Ip}) of
+                true -> true;
+                _ -> false
+            catch
+                _:_ -> false
+            end;
+        undefined ->
+            false
     end.
 
 %% Every allocate opportunistically drains any cooldown entries
@@ -216,7 +232,11 @@ handle_call(used_count, _From, #state{next = N, first = First,
                                        cooldown = Cooldown} = S) ->
     %% Allocated = (N - First) total handed out, minus recycled
     %% (in free or still cooling down).
-    {reply, (N - First) - length(Free) - length(Cooldown), S}.
+    {reply, (N - First) - length(Free) - length(Cooldown), S};
+
+handle_call({owns, {A, B, C, D}}, _From, S) ->
+    Abs = (A bsl 24) bor (B bsl 16) bor (C bsl 8) bor D,
+    {reply, Abs >= S#state.first andalso Abs =< S#state.last, S}.
 
 handle_cast({release, {A, B, C, D}},
             #state{first = First, last = Last, free = Free,

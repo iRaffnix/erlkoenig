@@ -2,7 +2,7 @@
 
 Auto-generated from `apps/erlkoenig/priv/error_catalog.term`. Do not hand-edit. Re-run `make docs/ERROR_CODES.md` after any catalog change.
 
-**101 codes across 13 components.**
+**115 codes across 14 components.**
 
 Codes are part of the public contract. They follow the stability rules in CONTRIBUTING.md (Error Handling Contract): stable identifiers, deprecation over removal, structured `{error, ErrorMap}` returns at module boundaries.
 
@@ -19,12 +19,13 @@ ek --format json explain EK_FOO      # for tooling
 
 - [`admission`](#admission) (2 codes)
 - [`audit`](#audit) (8 codes)
-- [`config`](#config) (3 codes)
-- [`ct`](#ct) (16 codes)
+- [`config`](#config) (4 codes)
+- [`ct`](#ct) (21 codes)
 - [`dns`](#dns) (8 codes)
-- [`host`](#host) (6 codes)
+- [`host`](#host) (11 codes)
 - [`network`](#network) (8 codes)
 - [`nft`](#nft) (9 codes)
+- [`operator`](#operator) (3 codes)
 - [`quarantine`](#quarantine) (4 codes)
 - [`runtime`](#runtime) (10 codes)
 - [`security`](#security) (1 codes)
@@ -195,6 +196,20 @@ ek --format json explain EK_FOO      # for tooling
 
 ---
 
+### `EK_CONFIG_HOST_FW_LOCKOUT_RISK`
+
+- **Severity:** `error`
+- **Since:** `0.9.0`
+- **Description:** host firewall stack would lock out the operator's SSH reconnect path
+
+**Operator action:** either declare the live SSH port in the host input chain accept-list, or pass --allow-lockout if you have out-of-band recovery (serial console, KVM, hypervisor recovery mode) ready
+
+**Evidence fields:** path, findings, override
+
+**Related:** docs/ARCHITECTURE_BACKLOG.md#host-firewall-lockout-preflight
+
+---
+
 ### `EK_CONFIG_PARSE_FAILED`
 
 - **Severity:** `error`
@@ -242,6 +257,48 @@ ek --format json explain EK_FOO      # for tooling
 **Operator action:** inspect admission queue pressure and retry once capacity is available
 
 **Evidence fields:** zone
+
+---
+
+### `EK_CT_ADMISSION_UNAVAILABLE`
+
+- **Severity:** `critical`
+- **Since:** `0.9.0`
+- **Description:** admission gate is unavailable in production resource-protection mode
+
+**Operator action:** inspect erlkoenig_admission supervision state before retrying the spawn
+
+**Evidence fields:** zone
+
+**Iron rule:** _local admission is sovereign_
+
+---
+
+### `EK_CT_CGROUP_SETUP_FAILED`
+
+- **Severity:** `critical`
+- **Since:** `0.9.0`
+- **Description:** container cgroup setup failed in production resource-protection mode
+
+**Operator action:** inspect cgroup v2 delegation, enabled controllers and cgroupfs permissions
+
+**Evidence fields:** reason
+
+**Iron rule:** _declared cgroup boundaries are hard fail-closed requirements_
+
+---
+
+### `EK_CT_CLEANUP_FAILED`
+
+- **Severity:** `critical`
+- **Since:** `0.9.0`
+- **Description:** container cleanup failed before restart
+
+**Operator action:** inspect stale ipvlan slave, netns and cgroup resources before retrying the container
+
+**Evidence fields:** state, reason
+
+**Iron rule:** _restart only after prior kernel resources are known to be cleaned up_
 
 ---
 
@@ -299,6 +356,20 @@ ek --format json explain EK_FOO      # for tooling
 
 ---
 
+### `EK_CT_QUARANTINE_UNAVAILABLE`
+
+- **Severity:** `critical`
+- **Since:** `0.9.0`
+- **Description:** quarantine gate is unavailable in production resource-protection mode
+
+**Operator action:** inspect erlkoenig_quarantine supervision state before retrying the spawn
+
+**Evidence fields:** zone
+
+**Iron rule:** _quarantine is a hard local spawn boundary_
+
+---
+
 ### `EK_CT_RECONNECT_EXHAUSTED`
 
 - **Severity:** `error`
@@ -344,6 +415,20 @@ ek --format json explain EK_FOO      # for tooling
 **Operator action:** check whether the runtime is still alive and responding to status queries
 
 **Evidence fields:** timeout_ms
+
+---
+
+### `EK_CT_RESOURCE_ADMISSION_DENIED`
+
+- **Severity:** `error`
+- **Since:** `0.9.0`
+- **Description:** resource admission denied the container before spawn
+
+**Operator action:** inspect declared memory and pids limits, aggregate containers/ headroom, and node resource pressure
+
+**Evidence fields:** zone, reason, limits
+
+**Iron rule:** _local resource admission is sovereign_
 
 ---
 
@@ -563,6 +648,42 @@ ek --format json explain EK_FOO      # for tooling
 
 ---
 
+### `EK_HOST_COOKIE_PERMISSIONS_WEAK`
+
+- **Severity:** `error`
+- **Since:** `0.9.0`
+- **Description:** Erlang distribution cookie permissions are too broad or the cookie is empty
+
+**Operator action:** set /etc/erlkoenig/cookie to a non-empty regular file owned by the service owner with mode 0400 or 0440
+
+**Evidence fields:** path, mode, size, world_readable, group_writable, world_writable, reason, type
+
+---
+
+### `EK_HOST_COOKIE_SYMLINK_INVALID`
+
+- **Severity:** `error`
+- **Since:** `0.9.0`
+- **Description:** legacy /opt/erlkoenig/cookie does not point at the canonical erlkoenig cookie
+
+**Operator action:** re-run installer.sh or replace /opt/erlkoenig/cookie with a symlink to /etc/erlkoenig/cookie
+
+**Evidence fields:** legacy, canonical, target, reason
+
+---
+
+### `EK_HOST_EPMD_LOCAL_BIND_MISSING`
+
+- **Severity:** `error`
+- **Since:** `0.9.0`
+- **Description:** erlkoenig service does not pin EPMD to the loopback interface
+
+**Operator action:** install the current systemd unit with ERL_EPMD_ADDRESS=127.0.0.1 and restart erlkoenig
+
+**Evidence fields:** path, expected, reason
+
+---
+
 ### `EK_HOST_NFT_MISSING`
 
 - **Severity:** `error`
@@ -572,6 +693,18 @@ ek --format json explain EK_FOO      # for tooling
 **Operator action:** install nftables so operators can inspect and debug kernel firewall state
 
 **Evidence fields:** executable
+
+---
+
+### `EK_HOST_NODE_PING_FAILED`
+
+- **Severity:** `error`
+- **Since:** `0.9.0`
+- **Description:** ek cannot reach the erlkoenig node with Erlang distribution
+
+**Operator action:** verify the erlkoenig service is running, the --node value matches the node name, and ek uses the same cookie as the service
+
+**Evidence fields:** node, cookie_file, reason
 
 ---
 
@@ -610,6 +743,18 @@ ek --format json explain EK_FOO      # for tooling
 **Operator action:** create /run/erlkoenig/containers with service permissions or start the erlkoenig service to create it
 
 **Evidence fields:** paths_searched
+
+---
+
+### `EK_HOST_SYSTEMD_UNIT_MISSING`
+
+- **Severity:** `error`
+- **Since:** `0.9.0`
+- **Description:** erlkoenig systemd unit is not installed
+
+**Operator action:** re-run installer.sh and verify /etc/systemd/system/erlkoenig.service exists
+
+**Evidence fields:** path, reason, type
 
 ---
 
@@ -836,6 +981,44 @@ ek --format json explain EK_FOO      # for tooling
 **Evidence fields:** pending_acks
 
 **Related:** SPEC-EK-007
+
+---
+
+## operator
+
+### `EK_OPERATOR_BAD_ARGUMENT`
+
+- **Severity:** `warn`
+- **Since:** `0.9.0`
+- **Description:** operator-API call rejected on argument validation
+
+**Operator action:** fix the caller — argument shape or format does not match the contract
+
+**Evidence fields:** argument, value, expected
+
+---
+
+### `EK_OPERATOR_INTERNAL`
+
+- **Severity:** `error`
+- **Since:** `0.9.0`
+- **Description:** operator-API wrapper received an unexpected return from an internal module
+
+**Operator action:** inspect runtime logs for the underlying gen_server or event; this indicates contract drift between operator_api and an internal module
+
+**Evidence fields:** op, raw
+
+---
+
+### `EK_OPERATOR_NOT_FOUND`
+
+- **Severity:** `warn`
+- **Since:** `0.9.0`
+- **Description:** operator-API lookup found no matching resource
+
+**Operator action:** verify the supplied identifier (hash, uuid, container id) and recheck via the corresponding list verb
+
+**Evidence fields:** resource, key
 
 ---
 
@@ -1393,9 +1576,9 @@ ek --format json explain EK_FOO      # for tooling
 - **Since:** `0.9.0`
 - **Description:** volume quota command failed
 
-**Operator action:** check xfs_quota availability, filesystem type and project quota support; metadata records the intended quota for later reconciliation
+**Operator action:** check xfs_quota availability, filesystem type and project quota support; in enforce mode the quota operation failed and metadata was not updated
 
-**Evidence fields:** tag, message
+**Evidence fields:** tag, message, reason, mode, uuid, host_path
 
 **Related:** SPEC-EK-003
 

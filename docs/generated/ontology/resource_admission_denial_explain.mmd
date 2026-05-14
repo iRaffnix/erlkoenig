@@ -1,0 +1,11 @@
+graph TD
+  admission_denial__worker_1_denial_18e0ad5fb902["admission_denial: worker-1/denial<br/>reason: insufficient_memory<br/>required: 8.0G<br/>available: 1.0G"]
+  resource_request__worker_1_request_memory_b17b450c5e28["resource_request: worker-1/request-memory<br/>memory: 8.0G"]
+  resource_request__worker_1_request_pids_d901c405b3d8["resource_request: worker-1/request-pids<br/>pids: 256"]
+  capacity_snapshot__worker_1_snapshot_8550c428fc9c["capacity_snapshot: worker-1/snapshot<br/>kind: memory<br/>ceiling: 9.0G<br/>allocated: 8.0G<br/>committed: 0"]
+  resource_holder__worker_1_allocated_memory_worker_0_0_63dd2d5988e5["resource_holder: worker-1/allocated-memory-worker-0-0<br/>allocated memory<br/>worker-0: 8.0G"]
+  resource_request__worker_1_request_memory_b17b450c5e28 -->|has_resource_request| admission_denial__worker_1_denial_18e0ad5fb902
+  resource_request__worker_1_request_pids_d901c405b3d8 -->|has_resource_request| admission_denial__worker_1_denial_18e0ad5fb902
+  capacity_snapshot__worker_1_snapshot_8550c428fc9c -->|rejected_by_snapshot| admission_denial__worker_1_denial_18e0ad5fb902
+  resource_holder__worker_1_allocated_memory_worker_0_0_63dd2d5988e5 -->|capacity_held_by| capacity_snapshot__worker_1_snapshot_8550c428fc9c
+

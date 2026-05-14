@@ -1,0 +1,101 @@
+
+  Showcase ontology — 72 facts
+
+  capability (8)
+    frontdoor.edge-0.dns.local
+    frontdoor.edge-0.journal.local
+    frontdoor.edge-1.dns.local
+    frontdoor.edge-1.journal.local
+    workers.worker-0.dns.local
+    workers.worker-0.journal.local
+    workers.worker-1.dns.local
+    workers.worker-1.journal.local
+
+  container (4)
+    frontdoor.edge-0
+    frontdoor.edge-1
+    workers.worker-0
+    workers.worker-1
+
+  host (1)
+    host
+
+  nflog_group (1)
+    erlkoenig_host.72
+
+  nft_chain (10)
+    frontdoor.edge-0.input
+    frontdoor.edge-0.output
+    frontdoor.edge-1.input
+    frontdoor.edge-1.output
+    workers.worker-0.input
+    workers.worker-0.output
+    workers.worker-1.input
+    workers.worker-1.output
+    erlkoenig_host.input
+    erlkoenig_host.forward
+
+  nft_counter (2)
+    erlkoenig_host.admission_input_drop
+    erlkoenig_host.admission_forward_drop
+
+  nft_rule (35)
+    frontdoor.edge-0.input.rule_1
+    frontdoor.edge-0.input.rule_2
+    frontdoor.edge-0.input.rule_3
+    frontdoor.edge-0.output.rule_1
+    frontdoor.edge-0.output.rule_2
+    frontdoor.edge-0.output.rule_3
+    frontdoor.edge-0.output.rule_4
+    frontdoor.edge-1.input.rule_1
+    frontdoor.edge-1.input.rule_2
+    frontdoor.edge-1.input.rule_3
+    frontdoor.edge-1.output.rule_1
+    frontdoor.edge-1.output.rule_2
+    frontdoor.edge-1.output.rule_3
+    frontdoor.edge-1.output.rule_4
+    workers.worker-0.input.rule_1
+    workers.worker-0.input.rule_2
+    workers.worker-0.input.rule_3
+    workers.worker-0.output.rule_1
+    workers.worker-0.output.rule_2
+    workers.worker-0.output.rule_3
+    workers.worker-1.input.rule_1
+    workers.worker-1.input.rule_2
+    workers.worker-1.input.rule_3
+    workers.worker-1.output.rule_1
+    workers.worker-1.output.rule_2
+    workers.worker-1.output.rule_3
+    erlkoenig_host.input.rule_1
+    erlkoenig_host.input.rule_2
+    erlkoenig_host.input.rule_3
+    erlkoenig_host.input.rule_4
+    erlkoenig_host.input.rule_5
+    erlkoenig_host.forward.rule_1
+    erlkoenig_host.forward.rule_2
+    erlkoenig_host.forward.rule_3
+    erlkoenig_host.forward.rule_4
+
+  nft_table (1)
+    erlkoenig_host
+
+  pod (2)
+    frontdoor
+    workers
+
+  publish (4)
+    frontdoor.edge-0.publish
+    frontdoor.edge-1.publish
+    workers.worker-0.publish
+    workers.worker-1.publish
+
+  stack (1)
+    ResourceAdmissionLab
+
+  stream (2)
+    frontdoor.edge-0.stream
+    frontdoor.edge-1.stream
+
+  zone (1)
+    admission
+

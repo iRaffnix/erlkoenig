@@ -141,7 +141,30 @@ attaches the process, and explicitly persists to DETS.
 """.
 -spec maybe_migrate_cgroup(binary(), map()) -> map().
 maybe_migrate_cgroup(Id, #{os_pid := OsPid, cgroup := OldPath} = Info) ->
-    {ok, NewPath} = erlkoenig_cgroup:path(Id),
+    case current_cgroup_path(Id) of
+        {ok, NewPath} ->
+            migrate_cgroup_if_needed(Id, OsPid, OldPath, NewPath, Info);
+        {error, Reason} ->
+            logger:warning("Recovery: cgroup path unavailable for ~s: ~p "
+                           "(keeping stored path)",
+                           [Id, Reason]),
+            Info
+    end;
+maybe_migrate_cgroup(_Id, Info) ->
+    Info.
+
+-spec current_cgroup_path(binary()) -> {ok, string()} | {error, term()}.
+current_cgroup_path(Id) ->
+    try erlkoenig_cgroup:path(Id) of
+        {ok, Path} -> {ok, Path};
+        {error, Reason} -> {error, Reason}
+    catch
+        exit:{noproc, _} -> {error, cgroup_service_unavailable};
+        Class:Reason -> {error, {Class, Reason}}
+    end.
+
+-spec migrate_cgroup_if_needed(binary(), integer(), binary(), string(), map()) -> map().
+migrate_cgroup_if_needed(Id, OsPid, OldPath, NewPath, Info) ->
     case migration_needed(OldPath, NewPath) of
         ok ->
             Info;
@@ -157,9 +180,7 @@ maybe_migrate_cgroup(Id, #{os_pid := OsPid, cgroup := OldPath} = Info) ->
             logger:info("Migrated container ~s cgroup ~s -> ~s (persisted to DETS)",
                         [Id, OldPath, NewPath]),
             Info1
-    end;
-maybe_migrate_cgroup(_Id, Info) ->
-    Info.
+    end.
 
 -spec verify_network(map()) -> ok.
 verify_network(_) ->

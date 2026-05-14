@@ -16,7 +16,7 @@ Options (env vars):
 Routing key schema (v2):
     container.<name>.<event>      — started, stopped, failed, restarting, oom, health
     stats.<name>.<metric>         — memory, cpu, pids, pressure, oom
-    firewall.<chain>.<event>      — drop, packet
+    firewall.<chain>.<event>      — drop, packet, counter
     conntrack.flow.<event>        — new, destroy
     conntrack.alert.mode          — mode switch
     guard.threat.<event>          — ban, unban
@@ -207,6 +207,11 @@ def format_event(rk, payload):
             pps = payload.get("pps", 0)
             bps = payload.get("bps", 0)
             return f"{label}  {RED('DROP')} {pkts} pkts ({pps:.0f} pps, {fmt_bytes(bps)}/s)"
+        if rk.endswith(".counter"):
+            pkts = payload.get("packets", 0)
+            pps = payload.get("pps", 0)
+            bps = payload.get("bps", 0)
+            return f"{label}  {MAG('COUNTER')} {pkts} pkts ({pps:.0f} pps, {fmt_bytes(bps)}/s)"
         if rk.endswith(".packet"):
             src = payload.get("src", "?")
             dst = payload.get("dst", "?")

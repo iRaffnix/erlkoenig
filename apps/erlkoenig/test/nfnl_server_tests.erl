@@ -117,6 +117,57 @@ apply_msgs_malformed_recv_is_wrapped_test() ->
     ?assertMatch(#{reason := malformed_netlink_response}, Data),
     ok = nfnl_server:stop(Server).
 
+get_counter_uses_injected_socket_mod_test() ->
+    {ok, Mock} = nfnl_mock_socket:start_link([{counter, 7, 560}]),
+    {ok, Server} = nfnl_server:start_link([{socket, Mock}, {socket_mod, nfnl_mock_socket}]),
+
+    Result = nfnl_server:get_counter(
+        Server, ?NFPROTO_INET, <<"erlkoenig_host">>, <<"live_ssh_accept">>),
+    ?assertMatch({ok, #{packets := 7, bytes := 560}}, Result),
+    ok = nfnl_server:stop(Server).
+
+get_counter_ack_without_payload_is_wrapped_test() ->
+    {ok, Mock} = nfnl_mock_socket:start_link([auto_ack]),
+    {ok, Server} = nfnl_server:start_link([{socket, Mock}, {socket_mod, nfnl_mock_socket}]),
+
+    Result = nfnl_server:get_counter(
+        Server, ?NFPROTO_INET, <<"erlkoenig_host">>, <<"live_ssh_accept">>),
+    ?assertErrorCode('EK_NFT_COUNTER_QUERY_FAILED', Result),
+    {error, #{data := Data}} = Result,
+    ?assertMatch(#{reason := no_counter_payload}, Data),
+    ok = nfnl_server:stop(Server).
+
+list_chains_uses_injected_socket_mod_test() ->
+    {ok, Mock} = nfnl_mock_socket:start_link([
+        {raw_recv, chain_dump(<<"erlkoenig_host">>, <<"input">>)}
+    ]),
+    {ok, Server} = nfnl_server:start_link([{socket, Mock}, {socket_mod, nfnl_mock_socket}]),
+
+    Result = nfnl_server:list_chains(Server, ?NFPROTO_INET, <<"erlkoenig_host">>),
+    ?assertMatch({ok, [#{name := <<"input">>}]}, Result),
+    ok = nfnl_server:stop(Server).
+
+list_set_elems_uses_public_return_shape_test() ->
+    {ok, Mock} = nfnl_mock_socket:start_link([
+        {raw_recv, set_elem_dump(<<"erlkoenig_host">>, <<"blocked">>, <<10, 0, 0, 5>>)}
+    ]),
+    {ok, Server} = nfnl_server:start_link([{socket, Mock}, {socket_mod, nfnl_mock_socket}]),
+
+    Result = nfnl_server:list_set_elems(
+        Server, ?NFPROTO_INET, <<"erlkoenig_host">>, <<"blocked">>),
+    ?assertEqual({ok, [<<"10.0.0.5">>]}, Result),
+    ok = nfnl_server:stop(Server).
+
+list_chains_dump_timeout_is_wrapped_test() ->
+    {ok, Mock} = nfnl_mock_socket:start_link([no_ack]),
+    {ok, Server} = nfnl_server:start_link([{socket, Mock}, {socket_mod, nfnl_mock_socket}]),
+
+    Result = nfnl_server:list_chains(Server, ?NFPROTO_INET, <<"erlkoenig_host">>),
+    ?assertErrorCode('EK_NFT_LIST_CHAINS_FAILED', Result),
+    {error, #{data := Data}} = Result,
+    ?assertMatch(#{reason := {timeout, missing_nlmsg_done, 0}}, Data),
+    ok = nfnl_server:stop(Server).
+
 %% --- query wrappers ---
 
 wrap_query_error_ok_passthrough_test() ->
@@ -172,10 +223,15 @@ unified_seq_nft_object_exports_test() ->
 unified_seq_nft_query_exports_test() ->
     _ = code:ensure_loaded(nft_query),
     ?assert(erlang:function_exported(nft_query, list_tables, 3)),
+    ?assert(erlang:function_exported(nft_query, list_tables, 4)),
     ?assert(erlang:function_exported(nft_query, list_chains, 4)),
+    ?assert(erlang:function_exported(nft_query, list_chains, 5)),
     ?assert(erlang:function_exported(nft_query, list_rules, 4)),
+    ?assert(erlang:function_exported(nft_query, list_rules, 5)),
     ?assert(erlang:function_exported(nft_query, get_ruleset, 3)),
+    ?assert(erlang:function_exported(nft_query, get_ruleset, 4)),
     ?assert(erlang:function_exported(nft_query, list_set_elems, 5)),
+    ?assert(erlang:function_exported(nft_query, list_set_elems, 6)),
     ?assert(erlang:function_exported(nft_query, list_tables, 2)),
     ?assert(erlang:function_exported(nft_query, list_chains, 3)),
     ?assert(erlang:function_exported(nft_query, list_set_elems, 4)).
@@ -188,3 +244,33 @@ test_msg(Seq) ->
         Seq,
         <<>>
     ).
+
+chain_dump(Table, Chain) ->
+    Attrs = iolist_to_binary([
+        nfnl_attr:encode_str(?NFTA_CHAIN_TABLE, Table),
+        nfnl_attr:encode_str(?NFTA_CHAIN_NAME, Chain)
+    ]),
+    iolist_to_binary([
+        nfnl_msg:build_hdr(?NFT_MSG_NEWCHAIN, ?NFPROTO_INET, 0, 123, Attrs),
+        nlmsg_done(123)
+    ]).
+
+set_elem_dump(Table, Set, Ip) ->
+    Key = nfnl_attr:encode_nested(
+        ?NFTA_SET_ELEM_KEY,
+        nfnl_attr:encode(?NFTA_DATA_VALUE, Ip)
+    ),
+    Elem = nfnl_attr:encode_nested(?NFTA_LIST_ELEM, Key),
+    Attrs = iolist_to_binary([
+        nfnl_attr:encode_str(?NFTA_SET_ELEM_LIST_TABLE, Table),
+        nfnl_attr:encode_str(?NFTA_SET_ELEM_LIST_SET, Set),
+        nfnl_attr:encode_nested(?NFTA_SET_ELEM_LIST_ELEMENTS, Elem)
+    ]),
+    iolist_to_binary([
+        nfnl_msg:build_hdr(?NFT_MSG_NEWSETELEM, ?NFPROTO_INET, 0, 124, Attrs),
+        nlmsg_done(124)
+    ]).
+
+nlmsg_done(Seq) ->
+    <<16:32/little, ?NLMSG_DONE:16/little, 0:16/little,
+      Seq:32/little, 0:32/little>>.

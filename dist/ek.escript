@@ -788,7 +788,7 @@ stack_up(O, Path) ->
                     Policies = read_declared_policies(TermPath),
                     Classified = [{N, maps:get(state, Info),
                                    classify_post_up(N, maps:get(state, Info),
-                                                    Policies),
+                                                    Policies, Info),
                                    Info}
                                   || {N, Info} <- Statuses],
                     Running   = [N || {N, _, running, _} <- Classified],
@@ -825,38 +825,55 @@ stack_up(O, Path) ->
 %% Classify each container's post-load state against its declared restart
 %% policy so legitimate one-shots (transient + clean-exit, temporary +
 %% any-exit) do not get mis-flagged as failures.
-classify_post_up(_Name, State, _Policies) when State =:= running;
-                                                 State =:= namespace_ready;
-                                                 State =:= creating;
-                                                 State =:= restarting ->
+classify_post_up(_Name, State, _Policies, _Info) when State =:= running;
+                                                        State =:= namespace_ready;
+                                                        State =:= creating;
+                                                        State =:= restarting ->
     running;
-classify_post_up(Name, State, Policies) ->
+classify_post_up(Name, State, Policies, Info) ->
     Policy = maps:get(Name, Policies, undefined),
-    case State of
-        gone ->
-            case policy_tolerates_clean_terminal(Policy) of
-                true  -> completed;
-                false -> failed
-            end;
-        stopped ->
-            case policy_tolerates_clean_terminal(Policy) of
-                true  -> completed;
-                false -> failed
-            end;
-        failed ->
-            %% A `failed' state at settle time is only a legitimate
-            %% completion for explicit one-shot policies (temporary /
-            %% no_restart). For `transient' (on_failure), it indicates
-            %% an abnormal terminal failure — quarantine, repeated
-            %% setup error, or hit restart-attempt limit — that the
-            %% operator should see in the up summary.
-            case policy_tolerates_failed_terminal(Policy) of
-                true  -> completed;
-                false -> failed
-            end;
-        _ ->
-            failed
+    case has_quarantine_refusal(Info) of
+        true ->
+            failed;
+        false ->
+            case State of
+                gone ->
+                    case policy_tolerates_clean_terminal(Policy) of
+                        true  -> completed;
+                        false -> failed
+                    end;
+                stopped ->
+                    case policy_tolerates_clean_terminal(Policy) of
+                        true  -> completed;
+                        false -> failed
+                    end;
+                failed ->
+                    %% A `failed' state at settle time is only a legitimate
+                    %% completion for explicit one-shot policies (temporary /
+                    %% no_restart). For `transient' (on_failure), it indicates
+                    %% an abnormal terminal failure — quarantine, repeated
+                    %% setup error, or hit restart-attempt limit — that the
+                    %% operator should see in the up summary.
+                    case policy_tolerates_failed_terminal(Policy) of
+                        true  -> completed;
+                        false -> failed
+                    end;
+                _ ->
+                    failed
+            end
     end.
+
+has_quarantine_refusal(#{error := Error}) when is_map(Error) ->
+    is_quarantine_refusal(Error);
+has_quarantine_refusal(_) ->
+    false.
+
+is_quarantine_refusal(#{code := Code}) ->
+    Code =:= 'EK_RUNTIME_BINARY_QUARANTINED'
+        orelse Code =:= <<"EK_RUNTIME_BINARY_QUARANTINED">>
+        orelse Code =:= "EK_RUNTIME_BINARY_QUARANTINED";
+is_quarantine_refusal(_) ->
+    false.
 
 %% Policies under which `stopped' or `gone' at settle time is a
 %% legitimate completion (clean exit, or auto_shutdown removing a
@@ -947,13 +964,25 @@ stack_down(O, Path) ->
             PathBin = list_to_binary(TermPath),
             case call(O, erlkoenig_config, declared_names, [PathBin]) of
                 {ok, Names} when Names =/= [] ->
-                    Stopped = [stop_silently(O, N) || N <- Names],
+                    Stopped = stop_many_silently(O, Names),
                     Count = length([ok || ok <- Stopped]),
-                    emit_plain(io_lib:format(
-                        "down: stopped ~p/~p container(s)",
-                        [Count, length(Names)]));
+                    case call(O, erlkoenig_config, unload, [PathBin]) of
+                        {ok, _} ->
+                            emit_plain(io_lib:format(
+                                "down: stopped ~p/~p container(s)",
+                                [Count, length(Names)]));
+                        {error, Reason} ->
+                            {error, io_lib:format(
+                                "down unload failed after stopping ~p/~p container(s): ~p",
+                                [Count, length(Names), Reason])}
+                    end;
                 {ok, []} ->
-                    emit_plain("down: nothing declared in " ++ Path);
+                    case call(O, erlkoenig_config, unload, [PathBin]) of
+                        {ok, _} ->
+                            emit_plain("down: nothing declared in " ++ Path);
+                        {error, Reason} ->
+                            {error, io_lib:format("down unload failed: ~p", [Reason])}
+                    end;
                 {error, Reason} ->
                     {error, io_lib:format("down failed: ~p", [Reason])}
             end
@@ -967,8 +996,7 @@ stack_down_all(O) ->
             emit_plain("down: nothing running");
         _ ->
             Total = length(Names),
-            Stopped = [stop_silently(O, binary_to_list(iolist_to_binary(N)))
-                       || N <- Names],
+            Stopped = stop_many_silently(O, Names),
             Count = length([ok || ok <- Stopped]),
             case Count =:= Total of
                 true ->
@@ -989,6 +1017,38 @@ stack_down_no_args(O) ->
         false ->
             die(usage, "down requires a .term/.exs file or --all")
     end.
+
+%% Stop all requested containers concurrently for real RPC calls. The
+%% stopped state machine may wait up to stop_timeout before force-kill;
+%% doing that serially turns N containers into N * stop_timeout. Mock mode
+%% stays serial because the file-backed mock call log is intentionally simple.
+stop_many_silently(O, Names) ->
+    Normalized = [normalize_stop_name(N) || N <- Names],
+    case os:getenv("ERLKOENIG_EK_MOCK_OPERATOR_API") of
+        false ->
+            Parent = self(),
+            Refs = [begin
+                        Ref = make_ref(),
+                        spawn_link(fun() ->
+                            Parent ! {Ref, stop_silently(O, Name)}
+                        end),
+                        Ref
+                    end || Name <- Normalized],
+            [receive
+                 {Ref, Result} -> Result
+             after 35_000 ->
+                 {error, stop_timeout}
+             end || Ref <- Refs];
+        _Path ->
+            [stop_silently(O, Name) || Name <- Normalized]
+    end.
+
+normalize_stop_name(Name) when is_binary(Name) ->
+    Name;
+normalize_stop_name(Name) when is_list(Name) ->
+    list_to_binary(Name);
+normalize_stop_name(Name) ->
+    iolist_to_binary(Name).
 
 %% Stop by name; returns `ok' on success, `{error, Reason}' otherwise.
 stop_silently(O, Name) when is_list(Name) ->
@@ -2027,7 +2087,10 @@ normalize_container_info(Info0) ->
         args          => fun list_of_str/1,
         ports         => fun list_of_str/1,
         caps          => fun list_of_str/1,
-        volumes       => fun list_of_str/1,
+        volumes       => fun(L) when is_list(L) ->
+                              [normalize_container_volume(V) || V <- L];
+                             (_) -> []
+                          end,
         net_info      => fun(V) -> case is_map(V) of
                                        true  -> normalize_net_info(V);
                                        false -> null
@@ -2049,6 +2112,10 @@ normalize_container_info(Info0) ->
                                    end
                           end,
         error         => fun to_json_generic/1,
+        runtime_timeline => fun(L) when is_list(L) ->
+                                  [to_json_generic(S) || S <- L];
+                                 (_) -> []
+                              end,
         timeline      => fun(L) -> [normalize_timeline_step(S) || S <- L] end
     },
     apply_known(container_info, Known, Info0).
@@ -2089,6 +2156,19 @@ normalize_volume(Vol) ->
         <<"quota_bytes">> => int_or_null(maps:get(quota_bytes, Vol, undefined))
     },
     Map.
+
+normalize_container_volume(Vol) when is_map(Vol) ->
+    #{
+        <<"uuid">>      => to_str_or_null(maps:get(uuid, Vol, undefined)),
+        <<"container">> => to_str_or_null(maps:get(container, Vol, undefined)),
+        <<"persist">>   => to_str_or_null(maps:get(persist, Vol, undefined)),
+        <<"host">>      => to_str_or_null(maps:get(host, Vol, undefined)),
+        <<"read_only">> => bool_or_null(maps:get(read_only, Vol, undefined)),
+        <<"lifecycle">> => atom_to_str_or_null(maps:get(lifecycle, Vol, undefined)),
+        <<"opts">>      => to_str_or_null(maps:get(opts, Vol, undefined))
+    };
+normalize_container_volume(Vol) ->
+    to_json_generic(Vol).
 
 normalize_pod(P) ->
     #{
@@ -2229,6 +2309,11 @@ int_or_null(undefined) -> null;
 int_or_null(I) when is_integer(I) -> I;
 int_or_null(_) -> null.
 
+bool_or_null(undefined) -> null;
+bool_or_null(true) -> true;
+bool_or_null(false) -> false;
+bool_or_null(_) -> null.
+
 number_or_null(undefined) -> null;
 number_or_null(I) when is_integer(I) -> I;
 number_or_null(F) when is_float(F) -> F;
@@ -2358,7 +2443,7 @@ print_usage() ->
         "  ek ps~n"
         "  ek down my_stack.term~n"
         "  ek --format json vol list~n"
-        "  ek quarantine add deadbeef00112233 --reason operator_ban~n"
+        "  ek quarantine add deadbeef00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff --reason operator_ban~n"
         ).
 
 die(Class, Msg) ->

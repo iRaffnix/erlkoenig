@@ -449,7 +449,7 @@ defmodule Erlkoenig.Pod.Builder do
   # Owner model (SPEC-NFT-OWNERSHIP-SPLIT §7, phase 6e.0.b):
   # the container-local nft block carries `owner: :in_container`
   # at the top of the block IR and denormalized on each chain.
-  # Container nft is netns-local — no layout-bridge use, no fixed
+  # Container nft is netns-local — no host-layout coupling, no fixed
   # host table name — so the owner tag is a pure Glasbox/audit
   # signal, not a routing decision.
 

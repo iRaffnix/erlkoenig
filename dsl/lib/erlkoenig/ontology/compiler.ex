@@ -3,7 +3,7 @@ defmodule Erlkoenig.Ontology.Compiler do
   Emits ontology worlds from validated Erlkoenig DSL builder state.
   """
 
-  alias Erlkoenig.Ontology.{Fact, Schema, World}
+  alias Erlkoenig.Ontology.{Admission, Fact, Schema, World}
 
   @type stack_data :: %{
           module: module(),
@@ -30,6 +30,31 @@ defmodule Erlkoenig.Ontology.Compiler do
       |> Enum.reverse()
 
     World.new(facts, schema)
+  end
+
+  @doc """
+  Builds a diagnostic ontology world from a resource-admission denial.
+
+  This is intentionally separate from `from_stack/1`: stack ontology describes
+  declared topology, while admission denial ontology describes one runtime
+  decision and the capacity snapshot it read.
+  """
+  @spec from_admission_denial(map()) :: World.t()
+  def from_admission_denial(denial) when is_map(denial) do
+    Admission.from_denial(denial)
+  end
+
+  @doc """
+  Builds a diagnostic world from an `erlkoenig_error:to_map/1` payload —
+  the AMQP wire shape produced by the Erlang side and emitted by
+  `ek admission denial <id> --format json`.
+
+  Returns `{:error, {:unknown_event_shape, event}}` if the payload is
+  not a `EK_CT_RESOURCE_ADMISSION_DENIED` event.
+  """
+  @spec from_emit_event(map()) :: World.t() | {:error, term()}
+  def from_emit_event(event) when is_map(event) do
+    Admission.from_emit_event(event)
   end
 
   defp add_stack(facts, stack_ref, module, origin) do

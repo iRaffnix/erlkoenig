@@ -66,6 +66,34 @@ roundtrip_no_git_sha_test() ->
         file:delete(SigPath)
     end.
 
+invalid_git_sha_is_rejected_test() ->
+    BinPath = test_binary(),
+    try
+        Result = erlkoenig_sig:sign(
+            BinPath,
+            fixture("signing.pem"),
+            fixture("signing.key"),
+            #{git_sha => <<"not-a-valid-git-sha">>}
+        ),
+        ?assertMatch({error, {invalid_git_sha, _}}, Result)
+    after
+        file:delete(BinPath)
+    end.
+
+invalid_40_byte_git_sha_is_rejected_test() ->
+    BinPath = test_binary(),
+    try
+        Result = erlkoenig_sig:sign(
+            BinPath,
+            fixture("signing.pem"),
+            fixture("signing.key"),
+            #{git_sha => <<"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz">>}
+        ),
+        ?assertMatch({error, {invalid_git_sha, _}}, Result)
+    after
+        file:delete(BinPath)
+    end.
+
 %% --- Tamper detection ---
 
 tampered_binary_test() ->

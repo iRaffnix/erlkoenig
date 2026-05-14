@@ -180,11 +180,10 @@ volume directory tree, and sets a hard byte limit.
 `Bytes = 0` removes the quota (clears the limit but keeps the
 project-ID association so subsequent raises don't need to re-bind).
 
-Best-effort: if `xfs_quota` is missing, fails silently at the
-subprocess layer (warning logged, metadata still updated so the
-value shows up in events and future retries). Callers treat
-`{ok, _}` as "metadata recorded" and don't assume kernel-level
-enforcement.
+Quota application is strict by default. `{ok, Volume}` means the
+kernel project-quota command completed without output. Development
+fixtures can explicitly set `{volume_quota_mode, advisory}` to record
+quota metadata without kernel enforcement.
 """.
 -spec set_quota(binary(), non_neg_integer() | binary()) ->
     {ok, volume()} | {error, term()}.
@@ -321,10 +320,21 @@ do_ensure(#{container := Container, persist := Persist,
                            created_at => erlang:system_time(second)},
             case ensure_dir(HostPath, Uid, Gid) of
                 ok ->
-                    Record = apply_quota_on_create(BaseRecord, QuotaBytes),
-                    ok = dets:insert(?TABLE, {Uuid, Record}),
-                    _ = maybe_ensure_by_name_symlink(Container, Persist, Uuid),
-                    {ok, Record};
+                    case apply_quota_on_create(BaseRecord, QuotaBytes) of
+                        {ok, Record} ->
+                            ok = dets:insert(?TABLE, {Uuid, Record}),
+                            _ = maybe_ensure_by_name_symlink(Container, Persist, Uuid),
+                            {ok, Record};
+                        {error, Reason} = Err ->
+                            _ = rm_rf(HostPath),
+                            volume_store_error(quota_apply_failed,
+                                               #{uuid => Uuid,
+                                                 host_path => HostPath,
+                                                 container => Container,
+                                                 persist => Persist,
+                                                 reason => Reason}),
+                            Err
+                    end;
                 {error, Reason} = Err ->
                     volume_store_error(backing_create_failed,
                                        #{uuid => Uuid, host_path => HostPath,
@@ -364,16 +374,27 @@ maybe_reconcile_quota(Existing, Req) ->
             end
     end.
 
--spec apply_quota_on_create(volume(), non_neg_integer()) -> volume().
+-spec apply_quota_on_create(volume(), non_neg_integer()) ->
+    {ok, volume()} | {error, term()}.
 apply_quota_on_create(Record, 0) ->
-    Record;
+    {ok, Record};
 apply_quota_on_create(Record, Bytes) ->
-    %% Allocate a project ID now, best-effort-bind it to the dir.
+    %% Allocate a project ID now and bind it to the directory before
+    %% exposing quota metadata. In strict mode, metadata must not claim
+    %% enforcement that the kernel did not accept.
     ProjectId = next_project_id(),
     HostPath = maps:get(host_path, Record),
-    _ = xfs_project_bind(HostPath, ProjectId),
-    _ = xfs_project_limit(ProjectId, Bytes),
-    Record#{project_id => ProjectId, quota_bytes => Bytes}.
+    case xfs_project_bind(HostPath, ProjectId) of
+        ok ->
+            case xfs_project_limit(ProjectId, Bytes) of
+                ok ->
+                    {ok, Record#{project_id => ProjectId, quota_bytes => Bytes}};
+                {error, _} = Err ->
+                    Err
+            end;
+        {error, _} = Err ->
+            Err
+    end.
 
 -spec do_find(binary(), binary()) -> {ok, volume()} | not_found.
 do_find(Container, Persist) ->
@@ -446,29 +467,50 @@ do_set_quota(Uuid, Spec) ->
         [{Uuid, V}] ->
             Bytes = parse_quota(Spec),
             HostPath = maps:get(host_path, V),
-            {Pid, V1} =
+            BindResult =
                 case maps:get(project_id, V, 0) of
                     0 when Bytes > 0 ->
                         %% First quota for this volume — allocate + bind.
                         Allocated = next_project_id(),
-                        _ = xfs_project_bind(HostPath, Allocated),
-                        {Allocated, V#{project_id => Allocated}};
+                        case xfs_project_bind(HostPath, Allocated) of
+                            ok -> {ok, Allocated, V#{project_id => Allocated}};
+                            {error, _} = BindErr -> BindErr
+                        end;
                     Existing ->
-                        {Existing, V}
+                        {ok, Existing, V}
                 end,
-            _ = case {Pid, Bytes} of
-                    {0, _} ->
-                        %% No project id and Bytes == 0 → nothing to do.
-                        ok;
-                    {_, _} ->
-                        xfs_project_limit(Pid, Bytes)
-                end,
-            Updated = case Bytes of
-                0 -> maps:remove(quota_bytes, V1);
-                _ -> V1#{quota_bytes => Bytes}
-            end,
-            ok = dets:insert(?TABLE, {Uuid, Updated}),
-            {ok, Updated};
+            case BindResult of
+                {ok, Pid, V1} ->
+                    LimitResult =
+                        case {Pid, Bytes} of
+                            {0, _} ->
+                                %% No project id and Bytes == 0 → nothing to do.
+                                ok;
+                            {_, _} ->
+                                xfs_project_limit(Pid, Bytes)
+                        end,
+                    case LimitResult of
+                        ok ->
+                            Updated = case Bytes of
+                                0 -> maps:remove(quota_bytes, V1);
+                                _ -> V1#{quota_bytes => Bytes}
+                            end,
+                            ok = dets:insert(?TABLE, {Uuid, Updated}),
+                            {ok, Updated};
+                        {error, Reason} = LimitErr ->
+                            volume_store_error(quota_apply_failed,
+                                               #{uuid => Uuid,
+                                                 host_path => HostPath,
+                                                 reason => Reason}),
+                            LimitErr
+                    end;
+                {error, Reason} = BindErr2 ->
+                    volume_store_error(quota_apply_failed,
+                                       #{uuid => Uuid,
+                                         host_path => HostPath,
+                                         reason => Reason}),
+                    BindErr2
+            end;
         [] ->
             {error, not_found}
     end.
@@ -640,18 +682,17 @@ rm_rf(Path) when is_binary(Path) ->
     file:del_dir_r(binary_to_list(Path)).
 
 %%====================================================================
-%% XFS project quota — best-effort subprocess wrappers.
+%% XFS project quota subprocess wrappers.
 %%
 %% These shell out to `xfs_quota` because no portable
 %% `quotactl(Q_XSETQLIM)` wrapper exists in Erlang/OTP. The command is
 %% idempotent at the kernel layer and the subprocess cost only happens
 %% on volume create/destroy, not on any hot path.
 %%
-%% In dev setups (non-XFS /tmp, missing `xfs_quota` binary, running
-%% without CAP_SYS_ADMIN) the calls fail gracefully — the metadata
-%% still records the requested limit so a later move to a real XFS
-%% mount picks it up on reconciliation. That matches the ownership
-%% best-effort pattern used elsewhere in this module.
+%% Default mode is strict: metadata is updated only after the kernel
+%% command succeeds. Tests or development sandboxes may explicitly set
+%% `{volume_quota_mode, advisory}` to preserve the old "metadata only"
+%% behavior.
 %%====================================================================
 
 -spec next_project_id() -> non_neg_integer().
@@ -668,7 +709,7 @@ next_project_id() ->
         false -> Candidate
     end.
 
--spec xfs_project_bind(binary(), non_neg_integer()) -> ok.
+-spec xfs_project_bind(binary(), non_neg_integer()) -> ok | {error, term()}.
 xfs_project_bind(Dir, ProjectId) ->
     %% `project -s -p <dir> <id>` tags the directory tree with the
     %% project ID. Must run after the dir is created but before files
@@ -678,14 +719,14 @@ xfs_project_bind(Dir, ProjectId) ->
                          binary_to_list(volumes_root())]),
     run_xfs_quota(Cmd, {project_bind, Dir, ProjectId}).
 
--spec xfs_project_unbind(binary(), non_neg_integer()) -> ok.
+-spec xfs_project_unbind(binary(), non_neg_integer()) -> ok | {error, term()}.
 xfs_project_unbind(Dir, ProjectId) ->
     Cmd = io_lib:format("xfs_quota -x -c 'project -C -p ~s ~p' ~s 2>&1",
                         [binary_to_list(Dir), ProjectId,
                          binary_to_list(volumes_root())]),
     run_xfs_quota(Cmd, {project_unbind, Dir, ProjectId}).
 
--spec xfs_project_limit(non_neg_integer(), non_neg_integer()) -> ok.
+-spec xfs_project_limit(non_neg_integer(), non_neg_integer()) -> ok | {error, term()}.
 xfs_project_limit(ProjectId, Bytes) ->
     %% `limit -p bhard=<bytes> <id>` sets the hard byte limit. Setting
     %% bhard=0 clears the limit.
@@ -694,7 +735,7 @@ xfs_project_limit(ProjectId, Bytes) ->
         [Bytes, ProjectId, binary_to_list(volumes_root())]),
     run_xfs_quota(Cmd, {project_limit, ProjectId, Bytes}).
 
--spec run_xfs_quota(iolist(), term()) -> ok.
+-spec run_xfs_quota(iolist(), term()) -> ok | {error, term()}.
 run_xfs_quota(Cmd, Tag) ->
     %% Skip the subprocess entirely when the volumes root is
     %% obviously not a real XFS mount (e.g. a `/tmp` eunit fixture).
@@ -702,20 +743,46 @@ run_xfs_quota(Cmd, Tag) ->
     %% accumulated subprocess-spawn overhead that destabilises
     %% unrelated test modules when many volumes are created back-to-back.
     case xfs_quota_available() of
-        false -> ok;
+        false ->
+            case quota_mode() of
+                advisory ->
+                    logger:warning("volume_store: xfs_quota unavailable for ~p "
+                                   "(advisory quota metadata only)", [Tag]),
+                    ok;
+                enforce ->
+                    {error, {quota_unavailable, Tag}}
+            end;
         true ->
             Flat = lists:flatten(Cmd),
             Output = os:cmd(Flat),
             case string:trim(Output) of
                 "" -> ok;
                 Msg ->
+                    MsgBin = unicode:characters_to_binary(Msg),
                     logger:warning("volume_store: xfs_quota ~p failed: ~s",
                                    [Tag, Msg]),
-                    volume_store_error(quota_apply_failed,
-                                       #{tag => Tag,
-                                         message => unicode:characters_to_binary(Msg)}),
-                    ok
+                    case quota_mode() of
+                        advisory ->
+                            volume_store_error(quota_apply_failed,
+                                               #{tag => Tag, message => MsgBin,
+                                                 mode => advisory}),
+                            ok;
+                        enforce ->
+                            {error, {quota_command_failed, Tag, MsgBin}}
+                    end
             end
+    end.
+
+-spec quota_mode() -> enforce | advisory.
+quota_mode() ->
+    case application:get_env(erlkoenig, volume_quota_mode) of
+        {ok, advisory} -> advisory;
+        {ok, enforce} -> enforce;
+        undefined -> enforce;
+        {ok, Other} ->
+            logger:warning("volume_store: invalid volume_quota_mode ~p; "
+                           "using enforce", [Other]),
+            enforce
     end.
 
 %% True only when the volumes root looks like a real host FS *and*

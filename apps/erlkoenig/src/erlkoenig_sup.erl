@@ -70,7 +70,10 @@ init([]) ->
     %%   ├── erlkoenig_zone (zone registry, must start before zone_sup)
     %%   ├── erlkoenig_zone_sup (one_for_one, per-zone ip_pool + dns)
     %%   ├── erlkoenig_cgroup
+    %%   ├── erlkoenig_node_resources
+    %%   ├── erlkoenig_denial_log (bounded ring of recent denials)
     %%   ├── erlkoenig_events
+    %%   ├── erlkoenig_cgroup_stats
     %%   ├── erlkoenig_health
     %%   ├── erlkoenig_audit
     %%   ├── erlkoenig_pki
@@ -130,9 +133,27 @@ init([]) ->
         restart => permanent,
         type => worker
     },
+    NodeResourcesSpec = #{
+        id => erlkoenig_node_resources,
+        start => {erlkoenig_node_resources, start_link, []},
+        restart => permanent,
+        type => worker
+    },
+    DenialLogSpec = #{
+        id => erlkoenig_denial_log,
+        start => {erlkoenig_denial_log, start_link, []},
+        restart => permanent,
+        type => worker
+    },
     EventsSpec = #{
         id => erlkoenig_events,
         start => {erlkoenig_events, start_link, []},
+        restart => permanent,
+        type => worker
+    },
+    CgroupStatsSpec = #{
+        id => erlkoenig_cgroup_stats,
+        start => {erlkoenig_cgroup_stats, start_link, []},
         restart => permanent,
         type => worker
     },
@@ -216,7 +237,8 @@ init([]) ->
             []
     end,
     {ok, {SupFlags, [PgSpec, ZoneSpec, DnsFilterSpec, ZoneSupSpec,
-                     CgroupSpec, EventsSpec,
+                     CgroupSpec, NodeResourcesSpec, DenialLogSpec,
+                     EventsSpec, CgroupStatsSpec,
                      HealthSpec, AuditSpec, PkiSpec, NftSupSpec,
                      FirewallEventsSpec,
                      QuarantineSpec, AdmissionSpec,
